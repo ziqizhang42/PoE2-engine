@@ -2,15 +2,19 @@
 
 Native C++ builds use CMake, Ninja, Apple Clang, and Catch2 tests.
 
-Optionally LLVM.
+LLVM provides clang-format and clang-tidy.
 
 ## Commands
 
 ```bash
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
-
-cmake --build --preset debug --target format-check
-cmake --build --preset debug --target format
+make
+make PRESET=release
+make format
+make tidy
+make tidy-fix
+make clean
 ```
+
+`make` defaults to the debug preset and runs configure, build, tests, format check, and
+clang-tidy. Use `PRESET=release` for the release preset.
+`make format` and `make tidy-fix` edit source files.

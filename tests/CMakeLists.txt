@@ -12,11 +12,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 
-add_executable(poe2_smoke
-  smoke.cpp
+add_executable(poe2_tests
+  board_test.cpp
 )
 
-target_link_libraries(poe2_smoke
+target_link_libraries(poe2_tests
   PRIVATE
     poe2::game
     Catch2::Catch2WithMain
@@ -24,4 +24,4 @@ target_link_libraries(poe2_smoke
 
 include(Catch)
 
-catch_discover_tests(poe2_smoke)
+catch_discover_tests(poe2_tests)

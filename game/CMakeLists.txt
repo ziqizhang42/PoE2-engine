@@ -1,5 +1,5 @@
 add_library(poe2_game STATIC
-  src/version.cpp
+  src/board.cpp
 )
 
 add_library(poe2::game ALIAS poe2_game)
