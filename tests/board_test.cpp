@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <initializer_list>
+#include <optional>
 
 namespace {
 
@@ -16,12 +17,29 @@ void require_places(poe2::Board& board, poe2::Player player,
   }
 }
 
+void require_cached_scores_match(const poe2::Position& position) {
+  const poe2::ScoreByPlayer cached = position.scores();
+  const poe2::ScoreByPlayer full = poe2::score(position.board());
+
+  REQUIRE(cached.player_one == full.player_one);
+  REQUIRE(cached.player_two == full.player_two);
+  REQUIRE(position.score(poe2::Player::kOne) == full.player_one);
+  REQUIRE(position.score(poe2::Player::kTwo) == full.player_two);
+}
+
+void require_play_and_match(poe2::Position& position, poe2::Square square) {
+  REQUIRE(position.play(square));
+  require_cached_scores_match(position);
+}
+
 }  // namespace
 
 TEST_CASE("board starts empty", "[board]") {
   const poe2::Board board;
 
   REQUIRE(board.piece_count() == 0);
+  REQUIRE(board.empty_count() == poe2::kCellCount);
+  REQUIRE(board.empty_squares() == poe2::kBoardMask);
   REQUIRE_FALSE(board.is_full());
   REQUIRE(board.cell_at({0, 0}) == poe2::Cell::kEmpty);
   REQUIRE(board.can_place({0, 0}));
@@ -38,6 +56,8 @@ TEST_CASE("board rejects invalid and occupied squares", "[board]") {
 
   REQUIRE(board.place(poe2::Player::kOne, {3, 4}));
   REQUIRE(board.cell_at({3, 4}) == poe2::Cell::kPlayerOne);
+  REQUIRE(board.empty_count() == poe2::kCellCount - 1);
+  REQUIRE((board.empty_squares() & poe2::square_bit({3, 4})) == 0);
   REQUIRE_FALSE(board.can_place({3, 4}));
   REQUIRE_FALSE(board.place(poe2::Player::kTwo, {3, 4}));
 }
@@ -47,20 +67,95 @@ TEST_CASE("side to play alternates turns after legal moves", "[position]") {
 
   REQUIRE(position.side_to_move() == poe2::Player::kOne);
   REQUIRE(position.ply() == 0);
+  REQUIRE(position.legal_moves() == poe2::kBoardMask);
+  require_cached_scores_match(position);
 
   REQUIRE(position.play({0, 0}));
   REQUIRE(position.side_to_move() == poe2::Player::kTwo);
   REQUIRE(position.ply() == 1);
   REQUIRE(position.board().cell_at({0, 0}) == poe2::Cell::kPlayerOne);
+  REQUIRE((position.legal_moves() & poe2::square_bit({0, 0})) == 0);
+  require_cached_scores_match(position);
 
   REQUIRE(position.play({0, 1}));
   REQUIRE(position.side_to_move() == poe2::Player::kOne);
   REQUIRE(position.ply() == 2);
   REQUIRE(position.board().cell_at({0, 1}) == poe2::Cell::kPlayerTwo);
+  require_cached_scores_match(position);
 
   REQUIRE_FALSE(position.play({0, 1}));
   REQUIRE(position.side_to_move() == poe2::Player::kOne);
   REQUIRE(position.ply() == 2);
+  require_cached_scores_match(position);
+}
+
+TEST_CASE("position cached scores handle singleton removal and run merging", "[position][score]") {
+  poe2::Position position;
+
+  require_cached_scores_match(position);
+  require_play_and_match(position, {0, 0});
+  require_play_and_match(position, {6, 6});
+  require_play_and_match(position, {0, 1});
+  require_play_and_match(position, {5, 5});
+  require_play_and_match(position, {0, 3});
+  require_play_and_match(position, {4, 4});
+  require_play_and_match(position, {0, 2});
+
+  REQUIRE(position.score(poe2::Player::kOne) == 8);
+  REQUIRE(position.score(poe2::Player::kTwo) == 4);
+
+  const poe2::ScoreByPlayer scores = position.scores();
+  REQUIRE_FALSE(position.play({0, 2}));
+  REQUIRE(position.ply() == 7);
+  REQUIRE(position.side_to_move() == poe2::Player::kTwo);
+  REQUIRE(position.scores().player_one == scores.player_one);
+  REQUIRE(position.scores().player_two == scores.player_two);
+}
+
+TEST_CASE("position cached scores handle crossing lines", "[position][score]") {
+  poe2::Position position;
+
+  require_play_and_match(position, {3, 1});
+  require_play_and_match(position, {0, 0});
+  require_play_and_match(position, {3, 2});
+  require_play_and_match(position, {0, 1});
+  require_play_and_match(position, {2, 3});
+  require_play_and_match(position, {0, 2});
+  require_play_and_match(position, {4, 3});
+  require_play_and_match(position, {0, 3});
+  require_play_and_match(position, {3, 3});
+
+  REQUIRE(position.score(poe2::Player::kOne) == 12);
+  REQUIRE(position.score(poe2::Player::kTwo) == 8);
+}
+
+TEST_CASE("position terminal result uses cached scores", "[position][game]") {
+  poe2::Position position;
+
+  for (int row = 0; row < poe2::kBoardSize; ++row) {
+    for (int col = 0; col < poe2::kBoardSize; ++col) {
+      require_play_and_match(position, {row, col});
+    }
+  }
+
+  const std::optional<poe2::GameResult> board_result = poe2::result_if_full(position.board());
+  const std::optional<poe2::GameResult> position_result = poe2::result_if_full(position);
+
+  if (!board_result.has_value()) {
+    FAIL("full-board terminal result is missing");
+    return;
+  }
+  if (!position_result.has_value()) {
+    FAIL("cached terminal result is missing");
+    return;
+  }
+
+  const poe2::GameResult board_value = *board_result;
+  const poe2::GameResult position_value = *position_result;
+  REQUIRE(position_value.scores.player_one == board_value.scores.player_one);
+  REQUIRE(position_value.scores.player_two == board_value.scores.player_two);
+  REQUIRE(position_value.winner == board_value.winner);
+  REQUIRE(poe2::winner_if_full(position) == board_value.winner);
 }
 
 TEST_CASE("isolated pieces count as single-point lines", "[score]") {
