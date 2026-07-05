@@ -13,8 +13,10 @@ constexpr int kPlayerTwoHandicapHalfPoints = 11;
 
 using Bitboard = std::uint64_t;
 using Score = int;
+using PositionHash = std::uint64_t;
 
 constexpr Bitboard kBoardMask = (Bitboard{1} << kCellCount) - Bitboard{1};
+constexpr Bitboard kPositionKeySideToMoveBit = Bitboard{1} << kCellCount;
 
 enum class Player : std::uint8_t {
   kOne = 0,
@@ -37,6 +39,21 @@ struct Square {
 struct ScoreByPlayer {
   Score player_one = 0;
   Score player_two = 0;
+};
+
+struct PositionKey {
+  Bitboard low = 0;
+  Bitboard high = 0;
+
+  friend constexpr bool operator==(const PositionKey&, const PositionKey&) = default;
+};
+
+struct MoveUndo {
+  Player player = Player::kOne;
+  Square square;
+  PositionHash previous_hash = 0;
+  Score previous_score = 0;
+  Bitboard previous_pieces_in_lines = 0;
 };
 
 [[nodiscard]] constexpr Player opponent(Player player) noexcept {
@@ -63,6 +80,23 @@ struct ScoreByPlayer {
   return is_valid(square) ? Bitboard{1} << square_index(square) : Bitboard{0};
 }
 
+[[nodiscard]] constexpr PositionKey make_position_key(Bitboard player_one, Bitboard player_two,
+                                                      Player side_to_move) noexcept {
+  return PositionKey{
+      .low = player_one & kBoardMask,
+      .high = (player_two & kBoardMask) |
+              (side_to_move == Player::kTwo ? kPositionKeySideToMoveBit : Bitboard{0}),
+  };
+}
+
+[[nodiscard]] constexpr Bitboard position_key_bits(PositionKey key, Player player) noexcept {
+  return player == Player::kOne ? key.low & kBoardMask : key.high & kBoardMask;
+}
+
+[[nodiscard]] constexpr Player position_key_side_to_move(PositionKey key) noexcept {
+  return (key.high & kPositionKeySideToMoveBit) != 0 ? Player::kTwo : Player::kOne;
+}
+
 class Board final {
  public:
   constexpr Board() noexcept = default;
@@ -78,6 +112,7 @@ class Board final {
   [[nodiscard]] int empty_count() const noexcept;
 
   [[nodiscard]] bool place(Player player, Square square) noexcept;
+  [[nodiscard]] bool remove(Player player, Square square) noexcept;
 
  private:
   std::array<Bitboard, 2> pieces_{};
@@ -93,13 +128,18 @@ class Position final {
   [[nodiscard]] Bitboard legal_moves() const noexcept;
   [[nodiscard]] Score score(Player player) const noexcept;
   [[nodiscard]] ScoreByPlayer scores() const noexcept;
+  [[nodiscard]] PositionKey key() const noexcept;
+  [[nodiscard]] PositionHash hash() const noexcept;
   [[nodiscard]] bool is_full() const noexcept;
 
   [[nodiscard]] bool play(Square square) noexcept;
+  [[nodiscard]] bool make_move(Square square, MoveUndo& undo) noexcept;
+  void unmake_move(const MoveUndo& undo) noexcept;
 
  private:
   Board board_;
   Player side_to_move_ = Player::kOne;
+  PositionHash hash_ = 0;
   int ply_ = 0;
   ScoreByPlayer scores_{};
   std::array<Bitboard, 2> pieces_in_lines_{};
@@ -112,6 +152,7 @@ struct GameResult {
 
 [[nodiscard]] Score score(const Board& board, Player player) noexcept;
 [[nodiscard]] ScoreByPlayer score(const Board& board) noexcept;
+[[nodiscard]] PositionHash position_key_hash(PositionKey key) noexcept;
 [[nodiscard]] Player leader_after_handicap(ScoreByPlayer scores) noexcept;
 [[nodiscard]] std::optional<GameResult> result_if_full(const Board& board) noexcept;
 [[nodiscard]] std::optional<GameResult> result_if_full(const Position& position) noexcept;

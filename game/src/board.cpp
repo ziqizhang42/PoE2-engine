@@ -2,6 +2,7 @@
 
 #include <array>
 #include <bit>
+#include <cassert>
 
 namespace poe2 {
 
@@ -33,6 +34,36 @@ constexpr std::array<Direction, 4> kLineDirections{{
     {1, 1},
     {1, -1},
 }};
+
+[[nodiscard]] constexpr PositionHash mix64(PositionHash value) noexcept {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+[[nodiscard]] constexpr std::array<std::array<PositionHash, kCellCount>, 2>
+make_zobrist_piece_hashes() noexcept {
+  std::array<std::array<PositionHash, kCellCount>, 2> hashes{};
+
+  for (int player = 0; player < 2; ++player) {
+    for (int index = 0; index < kCellCount; ++index) {
+      const PositionHash key =
+          (static_cast<PositionHash>(player) << 32) | static_cast<PositionHash>(index);
+      hashes[player][index] = mix64(0x6a09e667f3bcc909ULL ^ key);
+    }
+  }
+
+  return hashes;
+}
+
+constexpr std::array<std::array<PositionHash, kCellCount>, 2> kZobristPieceHashes =
+    make_zobrist_piece_hashes();
+constexpr PositionHash kZobristSideToMoveHash = mix64(0xbb67ae8584caa73bULL);
+
+[[nodiscard]] PositionHash zobrist_piece_hash(Player player, Square square) noexcept {
+  return kZobristPieceHashes[player_index(player)][square_index(square)];
+}
 
 [[nodiscard]] constexpr Square step(Square square, Direction direction) noexcept {
   return Square{square.row + direction.row_delta, square.col + direction.col_delta};
@@ -179,6 +210,21 @@ bool Board::place(Player player, Square square) noexcept {
   return true;
 }
 
+bool Board::remove(Player player, Square square) noexcept {
+  if (!is_valid(square)) {
+    return false;
+  }
+
+  const Bitboard bit = square_bit(square);
+  Bitboard& pieces = pieces_[player_index(player)];
+  if ((pieces & bit) == 0) {
+    return false;
+  }
+
+  pieces &= ~bit;
+  return true;
+}
+
 const Board& Position::board() const noexcept { return board_; }
 
 Player Position::side_to_move() const noexcept { return side_to_move_; }
@@ -191,9 +237,20 @@ Score Position::score(Player player) const noexcept { return score_for_player(sc
 
 ScoreByPlayer Position::scores() const noexcept { return scores_; }
 
+PositionKey Position::key() const noexcept {
+  return make_position_key(board_.bits(Player::kOne), board_.bits(Player::kTwo), side_to_move_);
+}
+
+PositionHash Position::hash() const noexcept { return hash_; }
+
 bool Position::is_full() const noexcept { return board_.is_full(); }
 
 bool Position::play(Square square) noexcept {
+  MoveUndo undo;
+  return make_move(square, undo);
+}
+
+bool Position::make_move(Square square, MoveUndo& undo) noexcept {
   if (!board_.can_place(square)) {
     return false;
   }
@@ -201,6 +258,13 @@ bool Position::play(Square square) noexcept {
   const Player player = side_to_move_;
   const int index = player_index(player);
   const ScoreUpdate update = score_update_for_move(board_, pieces_in_lines_[index], player, square);
+  undo = MoveUndo{
+      .player = player,
+      .square = square,
+      .previous_hash = hash_,
+      .previous_score = score_for_player(scores_, player),
+      .previous_pieces_in_lines = pieces_in_lines_[index],
+  };
 
   if (!board_.place(player, square)) {
     return false;
@@ -208,9 +272,27 @@ bool Position::play(Square square) noexcept {
 
   mutable_score_for_player(scores_, player) += update.delta;
   pieces_in_lines_[index] |= update.pieces_in_lines;
+  hash_ ^= zobrist_piece_hash(player, square);
+  hash_ ^= kZobristSideToMoveHash;
   side_to_move_ = opponent(side_to_move_);
   ++ply_;
   return true;
+}
+
+void Position::unmake_move(const MoveUndo& undo) noexcept {
+  assert(ply_ > 0);
+  assert(side_to_move_ == opponent(undo.player));
+
+  const bool removed = board_.remove(undo.player, undo.square);
+  assert(removed);
+  (void)removed;
+
+  const int index = player_index(undo.player);
+  mutable_score_for_player(scores_, undo.player) = undo.previous_score;
+  pieces_in_lines_[index] = undo.previous_pieces_in_lines;
+  hash_ = undo.previous_hash;
+  side_to_move_ = undo.player;
+  --ply_;
 }
 
 Score score(const Board& board, Player player) noexcept { return score_state(board, player).total; }
@@ -220,6 +302,25 @@ ScoreByPlayer score(const Board& board) noexcept {
       .player_one = score(board, Player::kOne),
       .player_two = score(board, Player::kTwo),
   };
+}
+
+PositionHash position_key_hash(PositionKey key) noexcept {
+  PositionHash hash = 0;
+
+  for (const Player player : {Player::kOne, Player::kTwo}) {
+    Bitboard bits = position_key_bits(key, player);
+    while (bits != 0) {
+      const int index = std::countr_zero(bits);
+      hash ^= kZobristPieceHashes[player_index(player)][index];
+      bits &= bits - Bitboard{1};
+    }
+  }
+
+  if (position_key_side_to_move(key) == Player::kTwo) {
+    hash ^= kZobristSideToMoveHash;
+  }
+
+  return hash;
 }
 
 Player leader_after_handicap(ScoreByPlayer scores) noexcept {

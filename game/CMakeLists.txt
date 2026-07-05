@@ -1,5 +1,6 @@
 add_library(poe2_game STATIC
   src/board.cpp
+  src/transposition_table.cpp
 )
 
 add_library(poe2::game ALIAS poe2_game)
