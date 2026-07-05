@@ -1,5 +1,6 @@
 add_library(poe2_game STATIC
   src/board.cpp
+  src/move.cpp
   src/transposition_table.cpp
 )
 

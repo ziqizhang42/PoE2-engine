@@ -14,6 +14,7 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 
 add_executable(poe2_tests
   board_test.cpp
+  move_test.cpp
 )
 
 target_link_libraries(poe2_tests
