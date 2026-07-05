@@ -13,7 +13,7 @@ find_program(
 set(POE2_FORMAT_FILES)
 set(POE2_TIDY_FILES)
 
-foreach(POE2_FORMAT_DIR game engines tools tests)
+foreach(POE2_FORMAT_DIR game engines runner tools tests)
   if(EXISTS "${PROJECT_SOURCE_DIR}/${POE2_FORMAT_DIR}")
     file(GLOB_RECURSE POE2_FORMAT_DIR_FILES CONFIGURE_DEPENDS
       "${PROJECT_SOURCE_DIR}/${POE2_FORMAT_DIR}/*.c"

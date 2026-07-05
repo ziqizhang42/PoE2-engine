@@ -29,6 +29,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_testing()
 
 add_subdirectory(game)
+add_subdirectory(runner)
 add_subdirectory(tests)
 
 include(cmake/CodeTools.cmake)

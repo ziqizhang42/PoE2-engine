@@ -2,7 +2,7 @@
 
 PRESET ?= debug
 
-.PHONY: configure build test format format-check tidy tidy-fix check clean debug release
+.PHONY: configure build test format format-check tidy tidy-fix fix check clean debug release
 
 configure:
 	cmake --preset $(PRESET)
@@ -24,6 +24,10 @@ tidy: build
 
 tidy-fix: build
 	cmake --build --preset $(PRESET) --target tidy-fix
+
+fix:
+	$(MAKE) format PRESET=$(PRESET)
+	$(MAKE) tidy-fix PRESET=$(PRESET)
 
 check:
 	$(MAKE) test PRESET=$(PRESET)

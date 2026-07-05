@@ -14,5 +14,5 @@ Checks: >
   readability-redundant-member-init,
   -bugprone-easily-swappable-parameters
 WarningsAsErrors: ''
-HeaderFilterRegex: '.*/(game|engines|tools|tests)/.*'
+HeaderFilterRegex: '.*/(game|engines|runner|tools|tests)/.*'
 FormatStyle: file
