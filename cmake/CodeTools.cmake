@@ -1,13 +1,20 @@
+set(POE2_LLVM_TOOL_VERSION "22" CACHE STRING "Preferred LLVM tool major version")
+set(POE2_LLVM_TOOL_HINTS
+  "/opt/homebrew/opt/llvm/bin"
+  "/opt/homebrew/opt/llvm@${POE2_LLVM_TOOL_VERSION}/bin"
+  "/usr/lib/llvm-${POE2_LLVM_TOOL_VERSION}/bin"
+)
+
 find_program(
   POE2_CLANG_FORMAT
-  NAMES clang-format
-  HINTS /opt/homebrew/opt/llvm/bin
+  NAMES clang-format-${POE2_LLVM_TOOL_VERSION} clang-format
+  HINTS ${POE2_LLVM_TOOL_HINTS}
 )
 
 find_program(
   POE2_CLANG_TIDY
-  NAMES clang-tidy
-  HINTS /opt/homebrew/opt/llvm/bin
+  NAMES clang-tidy-${POE2_LLVM_TOOL_VERSION} clang-tidy
+  HINTS ${POE2_LLVM_TOOL_HINTS}
 )
 
 set(POE2_FORMAT_FILES)
