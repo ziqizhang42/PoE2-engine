@@ -16,6 +16,7 @@ add_executable(poe2_tests
   board_test.cpp
   engine_stdio_test.cpp
   move_test.cpp
+  symmetry_test.cpp
 )
 
 target_link_libraries(poe2_tests
