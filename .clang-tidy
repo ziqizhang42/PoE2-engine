@@ -15,4 +15,5 @@ Checks: >
   -bugprone-easily-swappable-parameters
 WarningsAsErrors: ''
 HeaderFilterRegex: '.*/(game|engines|runner|tools|tests)/.*'
+ExcludeHeaderFilterRegex: '.*/build/.*/_deps/.*'
 FormatStyle: file
