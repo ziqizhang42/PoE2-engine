@@ -36,3 +36,13 @@ add_test(
           --p2 $<TARGET_FILE:poe2_first_legal>
           --timeout-ms 1000
 )
+
+add_test(
+  NAME runner_first_vs_random_series
+  COMMAND poe2_runner series
+          --engine-one $<TARGET_FILE:poe2_first_legal>
+          --engine-two "$<TARGET_FILE:poe2_random_legal> --seed 1"
+          --games 4
+          --sprt-stop
+          --timeout-ms 1000
+)

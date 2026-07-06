@@ -1,11 +1,11 @@
 # Match Runner
 
-`poe2_runner` is an authoritative match runner. It can run in manual mode for debugging, or supervise one game between two external engine processes.
+`poe2_runner` is an authoritative match runner. It can run in manual mode for debugging, supervise one game between two external engine processes, or run a repeated series to compare two engines.
 
 ## Build
 
 ```bash
-cmake --build --preset debug --target poe2_runner poe2_first_legal
+cmake --build --preset debug --target poe2_runner poe2_first_legal poe2_random_legal
 ```
 
 ## Manual Mode
@@ -58,6 +58,41 @@ Engine failures are treated as game outcomes:
 - process closes before `bestmove`: opponent wins with reason `disconnected`
 - malformed coordinate: opponent wins with reason `malformed_move`
 - illegal coordinate: opponent wins with reason `illegal_move`
+
+## Series Mode
+
+Series mode reuses the same two engine processes across games, sends `newgame` before each game, alternates sides by default, and prints aggregate comparison stats.
+
+```bash
+build/debug/runner/poe2_runner series \
+  --engine-one ./build/debug/engines/poe2_first_legal \
+  --engine-two "./build/debug/engines/poe2_random_legal --seed 1" \
+  --games 100 \
+  --timeout-ms 1000 \
+  --summary-only \
+  --sprt-stop \
+  --sprt-null 0.50 \
+  --sprt-alt 0.55
+```
+
+Useful options:
+
+- `--games <n>`: number of games to run.
+- `--fixed-sides`: keep engine one as player one for every game.
+- `--summary-only`: suppress per-game result lines for larger local runs.
+- `--verbose-games`: print the full one-game move/state log for every game.
+- `--sprt-stop`: treat `--games` as the maximum game budget and stop early on `accept_alt` or `accept_null`.
+- `--sprt-null <p>`: null score rate for engine one. Defaults to `0.50`.
+- `--sprt-alt <p>`: alternative score rate for engine one. Defaults to `0.55`.
+- `--sprt-alpha <p>`: false-positive risk for accepting the alternative. Defaults to `0.05`.
+- `--sprt-beta <p>`: false-negative risk for accepting the null. Defaults to `0.05`.
+
+The summary includes engine-one wins, engine-two wins, average plies, average scores, reason counts, a 95% Wilson confidence interval for engine one's score rate, and an SPRT-style likelihood report. The SPRT decision is `accept_alt`, `accept_null`, or `continue`; `continue` means the current sample is not decisive under the selected null/alternative rates and risk settings. Without `--sprt-stop`, the runner always runs exactly `--games` games and only reports the SPRT decision at the end. With `--sprt-stop`, `--games` becomes a maximum budget and a decisive SPRT result stops the series early.
+
+The repository includes two small baseline engines:
+
+- `poe2_first_legal`: always plays the first legal square in board order.
+- `poe2_random_legal`: plays a uniformly random legal square. Pass `--seed <n>` for reproducible comparisons.
 
 ## Engine Stdio Protocol
 

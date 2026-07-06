@@ -6,11 +6,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -366,26 +369,11 @@ struct BestMoveResult {
   };
 }
 
-[[nodiscard]] MatchResult play_match(EngineProcess& player_one, EngineProcess& player_two,
-                                     const MatchOptions& options, std::ostream& output) {
-  std::string detail;
-  if (!wait_for_ready(player_one, options.move_timeout, detail)) {
-    return MatchResult{
-        .reason = MatchEndReason::kProtocolError,
-        .winner = Player::kTwo,
-        .detail = std::move(detail),
-    };
-  }
-  if (!wait_for_ready(player_two, options.move_timeout, detail)) {
-    return MatchResult{
-        .reason = MatchEndReason::kProtocolError,
-        .winner = Player::kOne,
-        .detail = std::move(detail),
-    };
-  }
-
+[[nodiscard]] MatchResult play_ready_match(EngineProcess& player_one, EngineProcess& player_two,
+                                           const MatchOptions& options, std::ostream& output) {
   Position position;
   std::vector<std::string> moves;
+  std::string detail;
   if (!write_engine_command(player_one, engine_stdio::kCommandNewGame, detail)) {
     return failed_match(position, moves, MatchEndReason::kDisconnected, Player::kOne,
                         std::move(detail));
@@ -395,7 +383,9 @@ struct BestMoveResult {
                         std::move(detail));
   }
 
-  print_state(position, output);
+  if (options.verbose) {
+    print_state(position, output);
+  }
 
   while (true) {
     const Player side_to_move = position.side_to_move();
@@ -432,13 +422,17 @@ struct BestMoveResult {
     }
 
     moves.push_back(formatted_move);
-    output << "move"
-           << " ply=" << ply << " side=" << player_name(side_to_move) << " move=" << formatted_move
-           << '\n';
-    print_state(position, output);
+    if (options.verbose) {
+      output << "move"
+             << " ply=" << ply << " side=" << player_name(side_to_move)
+             << " move=" << formatted_move << '\n';
+      print_state(position, output);
+    }
 
     if (move_result.game_result.has_value()) {
-      print_final(*move_result.game_result, output);
+      if (options.verbose) {
+        print_final(*move_result.game_result, output);
+      }
       return MatchResult{
           .reason = MatchEndReason::kNormal,
           .winner = move_result.game_result->winner,
@@ -446,6 +440,200 @@ struct BestMoveResult {
           .moves = std::move(moves),
       };
     }
+  }
+}
+
+[[nodiscard]] MatchResult play_match(EngineProcess& player_one, EngineProcess& player_two,
+                                     const MatchOptions& options, std::ostream& output) {
+  std::string detail;
+  if (!wait_for_ready(player_one, options.move_timeout, detail)) {
+    return MatchResult{
+        .reason = MatchEndReason::kProtocolError,
+        .winner = Player::kTwo,
+        .detail = std::move(detail),
+    };
+  }
+  if (!wait_for_ready(player_two, options.move_timeout, detail)) {
+    return MatchResult{
+        .reason = MatchEndReason::kProtocolError,
+        .winner = Player::kOne,
+        .detail = std::move(detail),
+    };
+  }
+
+  return play_ready_match(player_one, player_two, options, output);
+}
+
+[[nodiscard]] bool can_continue_series_after(MatchEndReason reason) noexcept {
+  return reason == MatchEndReason::kNormal || reason == MatchEndReason::kMalformedMove ||
+         reason == MatchEndReason::kIllegalMove;
+}
+
+[[nodiscard]] Player engine_one_player_for_game(int zero_based_game_index,
+                                                bool alternate_sides) noexcept {
+  if (alternate_sides && (zero_based_game_index % 2) != 0) {
+    return Player::kTwo;
+  }
+
+  return Player::kOne;
+}
+
+void count_reason(SeriesResult& result, MatchEndReason reason) noexcept {
+  switch (reason) {
+    case MatchEndReason::kNormal:
+      ++result.normal_games;
+      return;
+    case MatchEndReason::kTimeout:
+      ++result.timeout_games;
+      return;
+    case MatchEndReason::kDisconnected:
+      ++result.disconnected_games;
+      return;
+    case MatchEndReason::kMalformedMove:
+      ++result.malformed_move_games;
+      return;
+    case MatchEndReason::kIllegalMove:
+      ++result.illegal_move_games;
+      return;
+    case MatchEndReason::kProtocolError:
+      ++result.protocol_error_games;
+      return;
+  }
+}
+
+[[nodiscard]] Score score_for_player(ScoreByPlayer scores, Player player) noexcept {
+  return player == Player::kOne ? scores.player_one : scores.player_two;
+}
+
+void update_series_result(SeriesResult& result, SeriesGameResult game) {
+  ++result.games_played;
+  count_reason(result, game.match.reason);
+
+  const Player engine_two_player = other_player(game.engine_one_player);
+  result.engine_one_score_total += score_for_player(game.match.scores, game.engine_one_player);
+  result.engine_two_score_total += score_for_player(game.match.scores, engine_two_player);
+  result.plies_total += static_cast<long long>(game.match.moves.size());
+
+  if (!game.match.winner.has_value()) {
+    ++result.no_winner;
+  } else if (*game.match.winner == game.engine_one_player) {
+    ++result.engine_one_wins;
+  } else {
+    ++result.engine_two_wins;
+  }
+
+  result.games.push_back(std::move(game));
+}
+
+[[nodiscard]] double percentage(int count, int total) noexcept {
+  if (total <= 0) {
+    return 0.0;
+  }
+
+  return static_cast<double>(count) * 100.0 / static_cast<double>(total);
+}
+
+[[nodiscard]] double average(long long total, int count) noexcept {
+  if (count <= 0) {
+    return 0.0;
+  }
+
+  return static_cast<double>(total) / static_cast<double>(count);
+}
+
+[[nodiscard]] double percent_from_rate(double rate) noexcept { return rate * 100.0; }
+
+[[nodiscard]] double engine_one_result_score(const SeriesResult& result) noexcept {
+  return static_cast<double>(result.engine_one_wins) + (0.5 * result.no_winner);
+}
+
+[[nodiscard]] SprtDecision sprt_decision(double log_likelihood_ratio, double lower_bound,
+                                         double upper_bound) noexcept {
+  if (log_likelihood_ratio >= upper_bound) {
+    return SprtDecision::kAcceptAlternative;
+  }
+  if (log_likelihood_ratio <= lower_bound) {
+    return SprtDecision::kAcceptNull;
+  }
+
+  return SprtDecision::kContinue;
+}
+
+void update_confidence_interval(SeriesResult& result) noexcept {
+  const int samples = result.statistical_samples;
+  if (samples <= 0) {
+    result.confidence_low = 0.0;
+    result.confidence_high = 0.0;
+    return;
+  }
+
+  constexpr double kWilsonZ95 = 1.959963984540054;
+  const double sample_count = static_cast<double>(samples);
+  const double z_squared = kWilsonZ95 * kWilsonZ95;
+  const double denominator = 1.0 + (z_squared / sample_count);
+  const double center =
+      (result.engine_one_result_rate + (z_squared / (2.0 * sample_count))) / denominator;
+  const double margin =
+      (kWilsonZ95 *
+       std::sqrt((result.engine_one_result_rate * (1.0 - result.engine_one_result_rate) +
+                  (z_squared / (4.0 * sample_count))) /
+                 sample_count)) /
+      denominator;
+
+  result.confidence_low = std::clamp(center - margin, 0.0, 1.0);
+  result.confidence_high = std::clamp(center + margin, 0.0, 1.0);
+}
+
+void update_sprt(SeriesResult& result) noexcept {
+  const int samples = result.statistical_samples;
+  if (samples <= 0 || result.sprt_null_rate <= 0.0 || result.sprt_null_rate >= 1.0 ||
+      result.sprt_alt_rate <= 0.0 || result.sprt_alt_rate >= 1.0 ||
+      result.sprt_alt_rate <= result.sprt_null_rate || result.sprt_alpha <= 0.0 ||
+      result.sprt_alpha >= 1.0 || result.sprt_beta <= 0.0 || result.sprt_beta >= 1.0) {
+    result.sprt_decision = SprtDecision::kInvalid;
+    return;
+  }
+
+  const double losses = static_cast<double>(samples) - result.engine_one_result_score;
+  result.sprt_log_likelihood_ratio =
+      (result.engine_one_result_score * std::log(result.sprt_alt_rate / result.sprt_null_rate)) +
+      (losses * std::log((1.0 - result.sprt_alt_rate) / (1.0 - result.sprt_null_rate)));
+  result.sprt_lower_bound = std::log(result.sprt_beta / (1.0 - result.sprt_alpha));
+  result.sprt_upper_bound = std::log((1.0 - result.sprt_beta) / result.sprt_alpha);
+  result.sprt_decision = sprt_decision(result.sprt_log_likelihood_ratio, result.sprt_lower_bound,
+                                       result.sprt_upper_bound);
+}
+
+void update_series_statistics(SeriesResult& result, const SeriesOptions& options) noexcept {
+  result.statistical_samples = result.games_played;
+  result.engine_one_result_score = engine_one_result_score(result);
+  result.engine_one_result_rate =
+      result.statistical_samples > 0
+          ? result.engine_one_result_score / static_cast<double>(result.statistical_samples)
+          : 0.0;
+  result.confidence_level = kDefaultConfidenceLevel;
+  result.sprt_null_rate = options.sprt_null_rate;
+  result.sprt_alt_rate = options.sprt_alt_rate;
+  result.sprt_alpha = options.sprt_alpha;
+  result.sprt_beta = options.sprt_beta;
+
+  update_confidence_interval(result);
+  update_sprt(result);
+}
+
+[[nodiscard]] bool is_decisive_sprt(SprtDecision decision) noexcept {
+  return decision == SprtDecision::kAcceptAlternative || decision == SprtDecision::kAcceptNull;
+}
+
+void print_series_game(const SeriesGameResult& game, std::ostream& output) {
+  output << "game"
+         << " index=" << game.game_number
+         << " engine_one_as=" << player_name(game.engine_one_player)
+         << " reason=" << reason_name(game.match.reason)
+         << " winner=" << engine_name_from_winner(game) << " p1=" << game.match.scores.player_one
+         << " p2=" << game.match.scores.player_two << " plies=" << game.match.moves.size() << '\n';
+  if (!game.match.detail.empty()) {
+    output << "detail game=" << game.game_number << ' ' << game.match.detail << '\n';
   }
 }
 
@@ -474,6 +662,29 @@ std::string_view reason_name(MatchEndReason reason) noexcept {
   return "unknown";
 }
 
+std::string_view sprt_decision_name(SprtDecision decision) noexcept {
+  switch (decision) {
+    case SprtDecision::kContinue:
+      return "continue";
+    case SprtDecision::kAcceptNull:
+      return "accept_null";
+    case SprtDecision::kAcceptAlternative:
+      return "accept_alt";
+    case SprtDecision::kInvalid:
+      return "invalid";
+  }
+
+  return "unknown";
+}
+
+std::string_view engine_name_from_winner(const SeriesGameResult& game) noexcept {
+  if (!game.match.winner.has_value()) {
+    return "none";
+  }
+
+  return *game.match.winner == game.engine_one_player ? "engine_one" : "engine_two";
+}
+
 void print_state(const Position& position, std::ostream& output) {
   const ScoreByPlayer scores = position.scores();
   output << "state"
@@ -499,6 +710,44 @@ void print_match_result(const MatchResult& result, std::ostream& output) {
   }
 }
 
+void print_series_result(const SeriesResult& result, std::ostream& output) {
+  output << "series_result"
+         << " games_requested=" << result.games_requested << " games_played=" << result.games_played
+         << " engine_one_wins=" << result.engine_one_wins
+         << " engine_two_wins=" << result.engine_two_wins << " no_winner=" << result.no_winner
+         << " engine_one_win_pct=" << std::fixed << std::setprecision(1)
+         << percentage(result.engine_one_wins, result.games_played)
+         << " engine_two_win_pct=" << percentage(result.engine_two_wins, result.games_played)
+         << " avg_plies=" << average(result.plies_total, result.games_played)
+         << " engine_one_avg_score=" << average(result.engine_one_score_total, result.games_played)
+         << " engine_two_avg_score=" << average(result.engine_two_score_total, result.games_played)
+         << '\n';
+  output << "series_reasons"
+         << " normal=" << result.normal_games << " timeout=" << result.timeout_games
+         << " disconnected=" << result.disconnected_games
+         << " malformed_move=" << result.malformed_move_games
+         << " illegal_move=" << result.illegal_move_games
+         << " protocol_error=" << result.protocol_error_games << '\n';
+  output << "series_confidence"
+         << " confidence_pct=" << std::fixed << std::setprecision(1)
+         << percent_from_rate(result.confidence_level) << " samples=" << result.statistical_samples
+         << " engine_one_score_pct=" << percent_from_rate(result.engine_one_result_rate)
+         << " low_pct=" << percent_from_rate(result.confidence_low)
+         << " high_pct=" << percent_from_rate(result.confidence_high) << '\n';
+  output << "series_sprt"
+         << " null_pct=" << std::fixed << std::setprecision(1)
+         << percent_from_rate(result.sprt_null_rate)
+         << " alt_pct=" << percent_from_rate(result.sprt_alt_rate)
+         << " alpha_pct=" << percent_from_rate(result.sprt_alpha)
+         << " beta_pct=" << percent_from_rate(result.sprt_beta) << " llr=" << std::setprecision(3)
+         << result.sprt_log_likelihood_ratio << " lower=" << result.sprt_lower_bound
+         << " upper=" << result.sprt_upper_bound
+         << " decision=" << sprt_decision_name(result.sprt_decision) << '\n';
+  if (!result.detail.empty()) {
+    output << "detail " << result.detail << '\n';
+  }
+}
+
 MatchResult run_process_match(const MatchOptions& options, std::ostream& output) {
   std::signal(SIGPIPE, SIG_IGN);
 
@@ -508,6 +757,75 @@ MatchResult run_process_match(const MatchOptions& options, std::ostream& output)
   player_two.start();
 
   return play_match(player_one, player_two, options, output);
+}
+
+SeriesResult run_process_series(const SeriesOptions& options, std::ostream& output) {
+  std::signal(SIGPIPE, SIG_IGN);
+
+  SeriesResult result{
+      .games_requested = options.games,
+  };
+
+  EngineProcess engine_one{options.engine_one_command};
+  EngineProcess engine_two{options.engine_two_command};
+  engine_one.start();
+  engine_two.start();
+
+  std::string detail;
+  if (!wait_for_ready(engine_one, options.move_timeout, detail)) {
+    result.detail = "engine_one startup failed: " + detail;
+    ++result.protocol_error_games;
+    update_series_statistics(result, options);
+    return result;
+  }
+  if (!wait_for_ready(engine_two, options.move_timeout, detail)) {
+    result.detail = "engine_two startup failed: " + detail;
+    ++result.protocol_error_games;
+    update_series_statistics(result, options);
+    return result;
+  }
+
+  for (int game_index = 0; game_index < options.games; ++game_index) {
+    const Player engine_one_player =
+        engine_one_player_for_game(game_index, options.alternate_sides);
+    EngineProcess& player_one = engine_one_player == Player::kOne ? engine_one : engine_two;
+    EngineProcess& player_two = engine_one_player == Player::kOne ? engine_two : engine_one;
+
+    MatchOptions match_options{
+        .move_timeout = options.move_timeout,
+        .verbose = options.verbose_games,
+    };
+    MatchResult match = play_ready_match(player_one, player_two, match_options, output);
+    const MatchEndReason reason = match.reason;
+
+    SeriesGameResult game{
+        .game_number = game_index + 1,
+        .engine_one_player = engine_one_player,
+        .match = std::move(match),
+    };
+    if (options.print_game_results) {
+      print_series_game(game, output);
+    }
+    update_series_result(result, std::move(game));
+
+    if (!can_continue_series_after(reason)) {
+      result.detail = "series stopped after unrecoverable game result: ";
+      result.detail += reason_name(reason);
+      break;
+    }
+
+    if (options.sprt_stop) {
+      update_series_statistics(result, options);
+      if (is_decisive_sprt(result.sprt_decision)) {
+        result.detail = "series stopped after sprt decision: ";
+        result.detail += sprt_decision_name(result.sprt_decision);
+        break;
+      }
+    }
+  }
+
+  update_series_statistics(result, options);
+  return result;
 }
 
 }  // namespace poe2::match_runner

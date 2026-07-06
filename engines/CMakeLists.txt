@@ -26,3 +26,14 @@ target_link_libraries(poe2_first_legal
 )
 
 target_compile_features(poe2_first_legal PRIVATE cxx_std_23)
+
+add_executable(poe2_random_legal
+  src/random_legal.cpp
+)
+
+target_link_libraries(poe2_random_legal
+  PRIVATE
+    poe2::engine_stdio
+)
+
+target_compile_features(poe2_random_legal PRIVATE cxx_std_23)
