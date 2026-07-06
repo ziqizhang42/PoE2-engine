@@ -1,3 +1,17 @@
+add_library(poe2_engine_common INTERFACE)
+
+add_library(poe2::engine_common ALIAS poe2_engine_common)
+
+target_include_directories(poe2_engine_common
+  INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(poe2_engine_common
+  INTERFACE
+    poe2::game
+)
+
 add_library(poe2_engine_stdio STATIC
   src/engine_stdio.cpp
 )
@@ -11,7 +25,7 @@ target_include_directories(poe2_engine_stdio
 
 target_link_libraries(poe2_engine_stdio
   PUBLIC
-    poe2::game
+    poe2::engine_common
 )
 
 target_compile_features(poe2_engine_stdio PUBLIC cxx_std_23)

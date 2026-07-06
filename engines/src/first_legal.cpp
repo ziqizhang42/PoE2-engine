@@ -19,7 +19,19 @@ namespace {
   return std::nullopt;
 }
 
-int run() { return poe2::engine_stdio::run_engine_stdio("first_legal", first_legal_move); }
+class FirstLegalEngine final : public poe2::engine_stdio::Engine {
+ public:
+  [[nodiscard]] poe2::engine_stdio::EngineResult choose_move(
+      const poe2::Position& position, const poe2::engine_stdio::EngineLimits&,
+      const poe2::engine_stdio::InfoSink&) override {
+    return poe2::engine_stdio::EngineResult{.best_move = first_legal_move(position)};
+  }
+};
+
+int run() {
+  FirstLegalEngine engine;
+  return poe2::engine_stdio::run_engine_stdio("first_legal", engine);
+}
 
 }  // namespace
 

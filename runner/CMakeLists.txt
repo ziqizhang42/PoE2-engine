@@ -11,6 +11,7 @@ target_include_directories(poe2_match_runner
 
 target_link_libraries(poe2_match_runner
   PUBLIC
+    poe2::engine_common
     poe2::game
   PRIVATE
     poe2::engine_stdio
@@ -35,6 +36,9 @@ add_test(
           --p1 $<TARGET_FILE:poe2_first_legal>
           --p2 $<TARGET_FILE:poe2_first_legal>
           --timeout-ms 1000
+          --go-depth 1
+          --go-movetime-ms 100
+          --go-nodes 1000
 )
 
 add_test(
@@ -45,4 +49,7 @@ add_test(
           --games 4
           --sprt-stop
           --timeout-ms 1000
+          --go-depth 1
+          --go-movetime-ms 100
+          --go-nodes 1000
 )

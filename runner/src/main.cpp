@@ -1,4 +1,6 @@
+#include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <optional>
@@ -98,16 +100,82 @@ int run_manual() {
   return value;
 }
 
+[[nodiscard]] std::optional<std::uint64_t> parse_positive_u64(std::string_view text) noexcept {
+  std::uint64_t value = 0;
+  const char* begin = text.data();
+  const char* end = begin + text.size();
+  const auto result = std::from_chars(begin, end, value);
+  if (result.ec != std::errc{} || result.ptr != end || value == 0) {
+    return std::nullopt;
+  }
+
+  return value;
+}
+
+bool parse_go_limit_option(std::string_view argument, int& index, int argc, char** argv,
+                           poe2::engine::EngineLimits& limits) {
+  if (argument == "--go-depth") {
+    if (index + 1 >= argc) {
+      throw std::invalid_argument{"--go-depth requires a positive integer"};
+    }
+    const std::optional<int> depth = parse_positive_int(argv[++index]);
+    if (!depth.has_value()) {
+      throw std::invalid_argument{"--go-depth requires a positive integer"};
+    }
+    limits.depth = depth;
+    return true;
+  }
+  if (argument == "--go-movetime-ms") {
+    if (index + 1 >= argc) {
+      throw std::invalid_argument{"--go-movetime-ms requires a positive integer"};
+    }
+    const std::optional<int> move_time_ms = parse_positive_int(argv[++index]);
+    if (!move_time_ms.has_value()) {
+      throw std::invalid_argument{"--go-movetime-ms requires a positive integer"};
+    }
+    limits.move_time = std::chrono::milliseconds{*move_time_ms};
+    return true;
+  }
+  if (argument == "--go-nodes") {
+    if (index + 1 >= argc) {
+      throw std::invalid_argument{"--go-nodes requires a positive integer"};
+    }
+    const std::optional<std::uint64_t> nodes = parse_positive_u64(argv[++index]);
+    if (!nodes.has_value()) {
+      throw std::invalid_argument{"--go-nodes requires a positive integer"};
+    }
+    limits.nodes = nodes;
+    return true;
+  }
+
+  return false;
+}
+
+void print_go_limits(const poe2::engine::EngineLimits& limits, std::ostream& output) {
+  if (limits.depth.has_value()) {
+    output << " go_depth=" << *limits.depth;
+  }
+  if (limits.move_time.has_value()) {
+    output << " go_movetime_ms=" << limits.move_time->count();
+  }
+  if (limits.nodes.has_value()) {
+    output << " go_nodes=" << *limits.nodes;
+  }
+}
+
 void print_usage(std::ostream& output) {
   output
       << "usage:\n"
       << "  poe2_runner\n"
       << "  poe2_runner manual\n"
-      << "  poe2_runner match --p1 <command> --p2 <command> [--timeout-ms <ms>] [--quiet]\n"
+      << "  poe2_runner match --p1 <command> --p2 <command> [--timeout-ms <ms>]\n"
+      << "                    [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
+      << "                    [--quiet]\n"
       << "  poe2_runner series --engine-one <command> --engine-two <command> --games <n>\n"
       << "                     [--timeout-ms <ms>] [--fixed-sides] [--summary-only]\n"
       << "                     [--verbose-games] [--sprt-stop] [--sprt-null <p>] [--sprt-alt <p>]\n"
-      << "                     [--sprt-alpha <p>] [--sprt-beta <p>]\n";
+      << "                     [--sprt-alpha <p>] [--sprt-beta <p>]\n"
+      << "                     [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n";
 }
 
 [[nodiscard]] poe2::match_runner::MatchOptions parse_match_options(int argc, char** argv) {
@@ -142,6 +210,9 @@ void print_usage(std::ostream& output) {
     }
     if (argument == "--quiet") {
       options.verbose = false;
+      continue;
+    }
+    if (parse_go_limit_option(argument, index, argc, argv, options.go_limits)) {
       continue;
     }
 
@@ -259,6 +330,9 @@ void print_usage(std::ostream& output) {
       options.sprt_beta = *beta;
       continue;
     }
+    if (parse_go_limit_option(argument, index, argc, argv, options.go_limits)) {
+      continue;
+    }
 
     throw std::invalid_argument{"unknown series argument: " + std::string{argument}};
   }
@@ -280,7 +354,9 @@ int run_match(int argc, char** argv) {
   const poe2::match_runner::MatchOptions options = parse_match_options(argc, argv);
 
   std::cout << "match"
-            << " timeout_ms=" << options.move_timeout.count() << '\n';
+            << " timeout_ms=" << options.move_timeout.count();
+  print_go_limits(options.go_limits, std::cout);
+  std::cout << '\n';
   std::cout << "engine p1 " << options.player_one_command << '\n';
   std::cout << "engine p2 " << options.player_two_command << '\n';
 
@@ -298,7 +374,9 @@ int run_series(int argc, char** argv) {
             << " alternate_sides=" << (options.alternate_sides ? 1 : 0)
             << " sprt_stop=" << (options.sprt_stop ? 1 : 0)
             << " sprt_null=" << options.sprt_null_rate << " sprt_alt=" << options.sprt_alt_rate
-            << " sprt_alpha=" << options.sprt_alpha << " sprt_beta=" << options.sprt_beta << '\n';
+            << " sprt_alpha=" << options.sprt_alpha << " sprt_beta=" << options.sprt_beta;
+  print_go_limits(options.go_limits, std::cout);
+  std::cout << '\n';
   std::cout << "engine engine_one " << options.engine_one_command << '\n';
   std::cout << "engine engine_two " << options.engine_two_command << '\n';
 

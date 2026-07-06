@@ -43,12 +43,13 @@ The runner's `Position` is authoritative. Engines should keep their own local po
 build/debug/runner/poe2_runner match \
   --p1 ./build/debug/engines/poe2_first_legal \
   --p2 ./build/debug/engines/poe2_first_legal \
-  --timeout-ms 1000
+  --timeout-ms 1000 \
+  --go-depth 1
 ```
 
 The runner starts each engine as a separate process, sends the current move history before every turn, asks the side to move for `go`, validates the returned move, and prints the final result.
 
-Engines can use the `poe2_engine_stdio` helper library to handle this local stdin/stdout protocol. With that helper, an engine only needs to provide a function that chooses a move from a `poe2::Position`.
+Engines can use the `poe2_engine_stdio` helper library to handle this local stdin/stdout protocol. With that helper, an engine implements `poe2::engine::Engine`, stores any engine-specific configuration or state on that object, and returns a `poe2::engine::EngineResult` from `choose_move`.
 
 The runner executable uses the `poe2_match_runner` library for process supervision and one-game match execution. The executable itself is intentionally kept as CLI glue.
 
@@ -69,6 +70,7 @@ build/debug/runner/poe2_runner series \
   --engine-two "./build/debug/engines/poe2_random_legal --seed 1" \
   --games 100 \
   --timeout-ms 1000 \
+  --go-movetime-ms 900 \
   --summary-only \
   --sprt-stop \
   --sprt-null 0.50 \
@@ -78,6 +80,9 @@ build/debug/runner/poe2_runner series \
 Useful options:
 
 - `--games <n>`: number of games to run.
+- `--go-depth <n>`: include `depth <n>` in every `go` command sent to engines.
+- `--go-movetime-ms <ms>`: include `movetime <ms>` in every `go` command sent to engines.
+- `--go-nodes <n>`: include `nodes <n>` in every `go` command sent to engines.
 - `--fixed-sides`: keep engine one as player one for every game.
 - `--summary-only`: suppress per-game result lines for larger local runs.
 - `--verbose-games`: print the full one-game move/state log for every game.
@@ -128,3 +133,13 @@ bestmove d1
 ```
 
 Engines may print `info ...` lines. The runner ignores all lines until it sees a `bestmove` line or the timeout expires.
+
+Engines using the stdio helper can also accept optional `go` limits:
+
+```text
+go depth 5 movetime 1000 nodes 500000
+```
+
+All limits are optional. Engine implementations may ignore limits that do not apply to their algorithm.
+
+The runner's `--timeout-ms` remains a hard supervision timeout. `--go-movetime-ms` is only a requested engine search limit and should usually be set lower than `--timeout-ms`.

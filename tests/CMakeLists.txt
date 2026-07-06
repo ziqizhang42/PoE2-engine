@@ -14,12 +14,13 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 
 add_executable(poe2_tests
   board_test.cpp
+  engine_stdio_test.cpp
   move_test.cpp
 )
 
 target_link_libraries(poe2_tests
   PRIVATE
-    poe2::game
+    poe2::engine_stdio
     Catch2::Catch2WithMain
 )
 

@@ -40,7 +40,19 @@ namespace {
   return best_move;
 }
 
-int run() { return poe2::engine_stdio::run_engine_stdio("greedy", greedy_move); }
+class GreedyEngine final : public poe2::engine_stdio::Engine {
+ public:
+  [[nodiscard]] poe2::engine_stdio::EngineResult choose_move(
+      const poe2::Position& position, const poe2::engine_stdio::EngineLimits&,
+      const poe2::engine_stdio::InfoSink&) override {
+    return poe2::engine_stdio::EngineResult{.best_move = greedy_move(position)};
+  }
+};
+
+int run() {
+  GreedyEngine engine;
+  return poe2::engine_stdio::run_engine_stdio("greedy", engine);
+}
 
 }  // namespace
 

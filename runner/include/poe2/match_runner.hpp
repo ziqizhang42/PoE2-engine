@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "poe2/engine.hpp"
 #include "poe2/move.hpp"
 
 namespace poe2::match_runner {
@@ -24,6 +25,7 @@ struct MatchOptions {
   std::string player_one_command;
   std::string player_two_command;
   std::chrono::milliseconds move_timeout = kDefaultMoveTimeout;
+  engine::EngineLimits go_limits;
   bool verbose = true;
 };
 
@@ -56,6 +58,7 @@ struct SeriesOptions {
   std::string engine_two_command;
   int games = 1;
   std::chrono::milliseconds move_timeout = kDefaultMoveTimeout;
+  engine::EngineLimits go_limits;
   bool alternate_sides = true;
   bool print_game_results = true;
   bool verbose_games = false;

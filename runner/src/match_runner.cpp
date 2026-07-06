@@ -390,12 +390,13 @@ struct BestMoveResult {
   while (true) {
     const Player side_to_move = position.side_to_move();
     EngineProcess& engine = side_to_move == Player::kOne ? player_one : player_two;
+    const std::string go_command = engine_stdio::format_go_command(options.go_limits);
 
     if (!write_engine_command(engine, engine_stdio::format_position_command(moves), detail)) {
       return failed_match(position, moves, MatchEndReason::kDisconnected, side_to_move,
                           std::move(detail));
     }
-    if (!write_engine_command(engine, engine_stdio::kCommandGo, detail)) {
+    if (!write_engine_command(engine, go_command, detail)) {
       return failed_match(position, moves, MatchEndReason::kDisconnected, side_to_move,
                           std::move(detail));
     }
@@ -793,6 +794,7 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
 
     MatchOptions match_options{
         .move_timeout = options.move_timeout,
+        .go_limits = options.go_limits,
         .verbose = options.verbose_games,
     };
     MatchResult match = play_ready_match(player_one, player_two, match_options, output);

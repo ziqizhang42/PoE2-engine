@@ -55,6 +55,22 @@ namespace {
   return std::nullopt;
 }
 
+class RandomLegalEngine final : public poe2::engine_stdio::Engine {
+ public:
+  explicit RandomLegalEngine(std::uint64_t seed) : rng_{seed} {}
+
+  [[nodiscard]] poe2::engine_stdio::EngineResult choose_move(
+      const poe2::Position& position, const poe2::engine_stdio::EngineLimits&,
+      const poe2::engine_stdio::InfoSink&) override {
+    return poe2::engine_stdio::EngineResult{
+        .best_move = random_legal_move(position, rng_),
+    };
+  }
+
+ private:
+  std::mt19937_64 rng_;
+};
+
 int run(int argc, char** argv) {
   std::optional<std::uint64_t> seed;
   for (int index = 1; index < argc; ++index) {
@@ -73,11 +89,8 @@ int run(int argc, char** argv) {
     throw std::invalid_argument{"unknown argument: " + std::string{argument}};
   }
 
-  std::mt19937_64 rng{seed.value_or(random_seed())};
-  const auto choose_move = [&rng](const poe2::Position& position) {
-    return random_legal_move(position, rng);
-  };
-  return poe2::engine_stdio::run_engine_stdio("random_legal", choose_move);
+  RandomLegalEngine engine{seed.value_or(random_seed())};
+  return poe2::engine_stdio::run_engine_stdio("random_legal", engine);
 }
 
 }  // namespace
