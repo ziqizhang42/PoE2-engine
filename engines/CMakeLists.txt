@@ -27,6 +27,17 @@ target_link_libraries(poe2_first_legal
 
 target_compile_features(poe2_first_legal PRIVATE cxx_std_23)
 
+add_executable(poe2_greedy
+  src/greedy.cpp
+)
+
+target_link_libraries(poe2_greedy
+  PRIVATE
+    poe2::engine_stdio
+)
+
+target_compile_features(poe2_greedy PRIVATE cxx_std_23)
+
 add_executable(poe2_random_legal
   src/random_legal.cpp
 )

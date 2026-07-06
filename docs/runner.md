@@ -5,7 +5,7 @@
 ## Build
 
 ```bash
-cmake --build --preset debug --target poe2_runner poe2_first_legal poe2_random_legal
+cmake --build --preset debug --target poe2_runner poe2_first_legal poe2_greedy poe2_random_legal
 ```
 
 ## Manual Mode
@@ -89,9 +89,12 @@ Useful options:
 
 The summary includes engine-one wins, engine-two wins, average plies, average scores, reason counts, a 95% Wilson confidence interval for engine one's score rate, and an SPRT-style likelihood report. The SPRT decision is `accept_alt`, `accept_null`, or `continue`; `continue` means the current sample is not decisive under the selected null/alternative rates and risk settings. Without `--sprt-stop`, the runner always runs exactly `--games` games and only reports the SPRT decision at the end. With `--sprt-stop`, `--games` becomes a maximum budget and a decisive SPRT result stops the series early.
 
-The repository includes two small baseline engines:
+SPRT decisions are directional for engine one: `accept_alt` supports engine one's `--sprt-alt` score-rate claim, while `accept_null` rejects it; swap engine order to test the other engine.
+
+The repository includes three small baseline engines:
 
 - `poe2_first_legal`: always plays the first legal square in board order.
+- `poe2_greedy`: plays the legal square that maximizes the side-to-move player's immediate score gain, using board-order ties.
 - `poe2_random_legal`: plays a uniformly random legal square. Pass `--seed <n>` for reproducible comparisons.
 
 ## Engine Stdio Protocol
