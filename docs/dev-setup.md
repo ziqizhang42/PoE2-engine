@@ -15,6 +15,8 @@ make tidy-fix
 make fix
 make git-build PRESET=release
 make git-test PRESET=release
+make eval-smoke BASE=<baseline-build-id> PRESET=release
+make eval-gate BASE=<baseline-build-id> PRESET=release
 make clean
 ```
 
@@ -47,3 +49,7 @@ git switch main
 ```
 
 The build output stays under `build/by-commit/<zero-padded-commit-count>-<short-git-sha>/release/`, so each checked commit keeps its own release build directory.
+
+## Engine Evaluation
+
+Use `make eval-gate BASE=<baseline-build-id> PRESET=release` for a SPRT strength gate. Evaluation runs are saved under `build/eval/runs/`, and summary rows are appended to `eval/results.csv`. See `docs/evaluation.md` for the full workflow.

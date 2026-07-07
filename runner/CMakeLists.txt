@@ -53,3 +53,18 @@ add_test(
           --go-movetime-ms 100
           --go-nodes 1000
 )
+
+add_test(
+  NAME runner_eval_self_smoke
+  COMMAND poe2_runner eval
+          --new-build ${CMAKE_BINARY_DIR}
+          --base ${CMAKE_BINARY_DIR}
+          --engine poe2_greedy
+          --games 2
+          --timeout-ms 1000
+          --go-depth 1
+          --go-movetime-ms 100
+          --run-root ${CMAKE_BINARY_DIR}/eval-test/runs
+          --kind smoke
+          --no-ledger
+)

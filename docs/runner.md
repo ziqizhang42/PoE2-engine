@@ -96,11 +96,21 @@ The summary includes engine-one wins, engine-two wins, average plies, average sc
 
 SPRT decisions are directional for engine one: `accept_alt` supports engine one's `--sprt-alt` score-rate claim, while `accept_null` rejects it; swap engine order to test the other engine.
 
-The repository includes three small baseline engines:
+## Eval Mode
 
-- `poe2_first_legal`: always plays the first legal square in board order.
-- `poe2_greedy`: plays the legal square that maximizes the side-to-move player's immediate score gain, using board-order ties.
-- `poe2_random_legal`: plays a uniformly random legal square. Pass `--seed <n>` for reproducible comparisons.
+Eval mode wraps series mode for saved engine comparisons:
+
+```bash
+build/release/runner/poe2_runner eval \
+  --new-build build/by-commit/000015-d74d255e5cfd/release \
+  --base 000014-abcd1234 \
+  --engine poe2_greedy \
+  --games 2000 \
+  --sprt-stop \
+  --require-accept-alt
+```
+
+It writes `manifest.json`, `summary.json`, `games.csv`, `command.txt`, and `runner.log` under `build/eval/runs/`, and appends one summary row to `eval/results.csv` unless `--no-ledger` is passed.
 
 ## Engine Stdio Protocol
 
