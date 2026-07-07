@@ -23,7 +23,9 @@
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "POE2_ENABLE_IPO": "ON",
+        "POE2_ENABLE_NATIVE_ARCH": "ON"
       }
     }
   ],

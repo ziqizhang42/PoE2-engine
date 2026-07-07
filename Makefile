@@ -1,8 +1,12 @@
 .DEFAULT_GOAL := check
 
 PRESET ?= debug
+GIT_COMMIT_COUNT = $(shell git rev-list --count HEAD)
+GIT_COMMIT = $(shell git rev-parse --short=12 HEAD)
+GIT_BUILD_ID = $(shell printf "%06d-%s" $(GIT_COMMIT_COUNT) $(GIT_COMMIT))
+GIT_BUILD_DIR = build/by-commit/$(GIT_BUILD_ID)/$(PRESET)
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check clean debug release
+.PHONY: configure build test format format-check tidy tidy-fix fix check clean debug release require-clean git-configure git-build git-test
 
 configure:
 	cmake --preset $(PRESET)
@@ -42,3 +46,18 @@ debug:
 
 release:
 	$(MAKE) check PRESET=release
+
+require-clean:
+	@test -z "$$(git status --porcelain)" || \
+	  (echo "working tree is dirty; commit or stash changes before using git-build" >&2; \
+	   git status --short >&2; \
+	   exit 1)
+
+git-configure: require-clean
+	cmake --preset $(PRESET) -B $(GIT_BUILD_DIR)
+
+git-build: git-configure
+	cmake --build $(GIT_BUILD_DIR)
+
+git-test: git-build
+	ctest --test-dir $(GIT_BUILD_DIR) --output-on-failure
