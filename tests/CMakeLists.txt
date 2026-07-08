@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 add_executable(poe2_tests
   board_test.cpp
   engine_stdio_test.cpp
+  match_runner_test.cpp
   move_test.cpp
   symmetry_test.cpp
 )
@@ -22,6 +23,7 @@ add_executable(poe2_tests
 target_link_libraries(poe2_tests
   PRIVATE
     poe2::engine_stdio
+    poe2::match_runner
     Catch2::Catch2WithMain
 )
 

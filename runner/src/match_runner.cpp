@@ -13,9 +13,11 @@
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -32,6 +34,102 @@ using Clock = std::chrono::steady_clock;
 
 [[nodiscard]] Player other_player(Player player) noexcept {
   return player == Player::kOne ? Player::kTwo : Player::kOne;
+}
+
+[[nodiscard]] std::string trim_copy(std::string_view text) {
+  const std::size_t first = text.find_first_not_of(" \t\r\n");
+  if (first == std::string_view::npos) {
+    return {};
+  }
+
+  const std::size_t last = text.find_last_not_of(" \t\r\n");
+  return std::string{text.substr(first, last - first + 1)};
+}
+
+[[nodiscard]] std::string line_location(std::string_view path, int line_number) {
+  std::ostringstream output;
+  if (!path.empty()) {
+    output << path << ':';
+  }
+  output << line_number;
+  return output.str();
+}
+
+[[nodiscard]] std::string strip_comment(std::string_view line) {
+  const std::size_t comment = line.find('#');
+  if (comment != std::string_view::npos) {
+    line = line.substr(0, comment);
+  }
+
+  return trim_copy(line);
+}
+
+[[nodiscard]] std::optional<OpeningLine> parse_opening_line(std::string_view path, int line_number,
+                                                            std::string_view line) {
+  const std::string opening_text = strip_comment(line);
+  if (opening_text.empty()) {
+    return std::nullopt;
+  }
+
+  Position position;
+  std::vector<std::string> moves;
+  std::istringstream input{opening_text};
+  std::string token;
+  while (input >> token) {
+    const std::optional<Move> parsed = parse_move(token);
+    if (!parsed.has_value()) {
+      throw std::invalid_argument{line_location(path, line_number) +
+                                  " malformed opening move: " + token};
+    }
+
+    const std::string formatted = format_move(*parsed);
+    const MoveResult result = apply_move(position, *parsed);
+    if (!result.accepted) {
+      const std::string_view error =
+          result.error.has_value() ? move_error_name(*result.error) : "unknown";
+      throw std::invalid_argument{line_location(path, line_number) + " illegal opening move " +
+                                  formatted + ": " + std::string{error}};
+    }
+    if (result.game_result.has_value()) {
+      throw std::invalid_argument{line_location(path, line_number) +
+                                  " opening line reaches a terminal position"};
+    }
+
+    moves.push_back(formatted);
+  }
+
+  const std::string normalized_text = format_opening_moves(moves);
+  return OpeningLine{
+      .line_number = line_number,
+      .moves = std::move(moves),
+      .text = normalized_text,
+  };
+}
+
+[[nodiscard]] std::optional<std::string> apply_opening_moves(
+    Position& position, std::vector<std::string>& played_moves,
+    const std::vector<std::string>& opening_moves) {
+  for (const std::string& move_text : opening_moves) {
+    const std::optional<Move> parsed = parse_move(move_text);
+    if (!parsed.has_value()) {
+      return "malformed opening move: " + move_text;
+    }
+
+    const std::string formatted = format_move(*parsed);
+    const MoveResult result = apply_move(position, *parsed);
+    if (!result.accepted) {
+      const std::string_view error =
+          result.error.has_value() ? move_error_name(*result.error) : "unknown";
+      return "illegal opening move " + formatted + ": " + std::string{error};
+    }
+    if (result.game_result.has_value()) {
+      return "opening line reaches a terminal position";
+    }
+
+    played_moves.push_back(formatted);
+  }
+
+  return std::nullopt;
 }
 
 enum class LineReadStatus : std::uint8_t {
@@ -383,6 +481,17 @@ struct BestMoveResult {
                         std::move(detail));
   }
 
+  if (std::optional<std::string> opening_error =
+          apply_opening_moves(position, moves, options.opening_moves);
+      opening_error.has_value()) {
+    return MatchResult{
+        .reason = MatchEndReason::kProtocolError,
+        .scores = position.scores(),
+        .moves = std::move(moves),
+        .detail = std::move(*opening_error),
+    };
+  }
+
   if (options.verbose) {
     print_state(position, output);
   }
@@ -630,6 +739,7 @@ void print_series_game(const SeriesGameResult& game, std::ostream& output) {
   output << "game"
          << " index=" << game.game_number
          << " engine_one_as=" << player_name(game.engine_one_player)
+         << " opening_line=" << game.opening_line_number
          << " reason=" << reason_name(game.match.reason)
          << " winner=" << engine_name_from_winner(game) << " p1=" << game.match.scores.player_one
          << " p2=" << game.match.scores.player_two << " plies=" << game.match.moves.size() << '\n';
@@ -684,6 +794,51 @@ std::string_view engine_name_from_winner(const SeriesGameResult& game) noexcept 
   }
 
   return *game.match.winner == game.engine_one_player ? "engine_one" : "engine_two";
+}
+
+std::string format_opening_moves(const std::vector<std::string>& moves) {
+  std::string text;
+  for (std::size_t index = 0; index < moves.size(); ++index) {
+    if (index != 0) {
+      text += ' ';
+    }
+    text += moves[index];
+  }
+  return text;
+}
+
+OpeningBook parse_opening_book_text(std::string_view path, std::string_view text) {
+  OpeningBook book{
+      .path = std::string{path},
+  };
+
+  std::istringstream input{std::string{text}};
+  std::string line;
+  int line_number = 0;
+  while (std::getline(input, line)) {
+    ++line_number;
+    if (std::optional<OpeningLine> opening = parse_opening_line(path, line_number, line);
+        opening.has_value()) {
+      book.lines.push_back(std::move(*opening));
+    }
+  }
+
+  if (book.lines.empty()) {
+    throw std::invalid_argument{"opening book has no opening lines: " + std::string{path}};
+  }
+
+  return book;
+}
+
+OpeningBook load_opening_book(std::string_view path) {
+  std::ifstream input{std::string{path}};
+  if (!input) {
+    throw std::invalid_argument{"failed to open opening book: " + std::string{path}};
+  }
+
+  std::ostringstream text;
+  text << input.rdbuf();
+  return parse_opening_book_text(path, text.str());
 }
 
 void print_state(const Position& position, std::ostream& output) {
@@ -797,12 +952,25 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
         .go_limits = options.go_limits,
         .verbose = options.verbose_games,
     };
+    const bool has_openings = !options.opening_book.lines.empty();
+    const int opening_index = has_openings
+                                  ? (options.alternate_sides ? (game_index / 2) : game_index) %
+                                        static_cast<int>(options.opening_book.lines.size())
+                                  : -1;
+    const OpeningLine* opening =
+        has_openings ? &options.opening_book.lines[opening_index] : nullptr;
+    if (opening != nullptr) {
+      match_options.opening_moves = opening->moves;
+    }
+
     MatchResult match = play_ready_match(player_one, player_two, match_options, output);
     const MatchEndReason reason = match.reason;
 
     SeriesGameResult game{
         .game_number = game_index + 1,
         .engine_one_player = engine_one_player,
+        .opening_line_number = opening != nullptr ? opening->line_number : 0,
+        .opening_moves = opening != nullptr ? opening->text : std::string{},
         .match = std::move(match),
     };
     if (options.print_game_results) {

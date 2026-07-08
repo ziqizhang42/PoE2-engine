@@ -80,6 +80,8 @@ build/debug/runner/poe2_runner series \
 Useful options:
 
 - `--games <n>`: number of games to run.
+- `--opening-book <path>`: cycle through a text opening suite and start each game after the
+  selected move prefix.
 - `--go-depth <n>`: include `depth <n>` in every `go` command sent to engines.
 - `--go-movetime-ms <ms>`: include `movetime <ms>` in every `go` command sent to engines.
 - `--go-nodes <n>`: include `nodes <n>` in every `go` command sent to engines.
@@ -96,6 +98,9 @@ The summary includes engine-one wins, engine-two wins, average plies, average sc
 
 SPRT decisions are directional for engine one: `accept_alt` supports engine one's `--sprt-alt` score-rate claim, while `accept_null` rejects it; swap engine order to test the other engine.
 
+When an opening book is provided, series mode cycles through opening lines. With alternating sides,
+each opening is reused for the adjacent swapped-side game before advancing to the next line.
+
 ## Eval Mode
 
 Eval mode wraps series mode for saved engine comparisons:
@@ -111,6 +116,30 @@ build/release/runner/poe2_runner eval \
 ```
 
 It writes `manifest.json`, `summary.json`, `games.csv`, `command.txt`, and `runner.log` under `build/eval/runs/`, and appends one summary row to `eval/results.csv` unless `--no-ledger` is passed.
+
+## Opening Generation
+
+Generate the default systematic 2-ply gate suite:
+
+```bash
+build/debug/runner/poe2_runner openings generate-systematic \
+  --out eval/openings/systematic-2ply-v1.txt \
+  --plies 2
+```
+
+This enumerates all ordered two-ply prefixes and keeps one representative per final colored
+position under board symmetry.
+
+Generate a random symmetry-deduplicated suite:
+
+```bash
+build/debug/runner/poe2_runner openings generate-random \
+  --out eval/openings/fresh/random-6ply-2026-07.txt \
+  --count 200 \
+  --plies 6 \
+  --seed 20260707 \
+  --max-score-gap 4
+```
 
 ## Engine Stdio Protocol
 

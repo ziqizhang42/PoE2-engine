@@ -26,7 +26,19 @@ struct MatchOptions {
   std::string player_two_command;
   std::chrono::milliseconds move_timeout = kDefaultMoveTimeout;
   engine::EngineLimits go_limits;
+  std::vector<std::string> opening_moves;
   bool verbose = true;
+};
+
+struct OpeningLine {
+  int line_number = 0;
+  std::vector<std::string> moves;
+  std::string text;
+};
+
+struct OpeningBook {
+  std::string path;
+  std::vector<OpeningLine> lines;
 };
 
 enum class MatchEndReason : std::uint8_t {
@@ -59,6 +71,7 @@ struct SeriesOptions {
   int games = 1;
   std::chrono::milliseconds move_timeout = kDefaultMoveTimeout;
   engine::EngineLimits go_limits;
+  OpeningBook opening_book;
   bool alternate_sides = true;
   bool print_game_results = true;
   bool verbose_games = false;
@@ -72,6 +85,8 @@ struct SeriesOptions {
 struct SeriesGameResult {
   int game_number = 0;
   Player engine_one_player = Player::kOne;
+  int opening_line_number = 0;
+  std::string opening_moves;
   MatchResult match;
 };
 
@@ -112,6 +127,9 @@ struct SeriesResult {
 [[nodiscard]] std::string_view reason_name(MatchEndReason reason) noexcept;
 [[nodiscard]] std::string_view sprt_decision_name(SprtDecision decision) noexcept;
 [[nodiscard]] std::string_view engine_name_from_winner(const SeriesGameResult& game) noexcept;
+[[nodiscard]] std::string format_opening_moves(const std::vector<std::string>& moves);
+[[nodiscard]] OpeningBook parse_opening_book_text(std::string_view path, std::string_view text);
+[[nodiscard]] OpeningBook load_opening_book(std::string_view path);
 
 void print_state(const Position& position, std::ostream& output);
 void print_final(const GameResult& result, std::ostream& output);

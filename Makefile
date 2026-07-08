@@ -7,6 +7,7 @@ GIT_BUILD_ID = $(shell printf "%06d-%s" $(GIT_COMMIT_COUNT) $(GIT_COMMIT))
 GIT_BUILD_DIR = build/by-commit/$(GIT_BUILD_ID)/$(PRESET)
 ENGINE ?= poe2_greedy
 BASE ?=
+BOOK ?= eval/openings/systematic-2ply-v1.txt
 GAMES ?= 1000
 SMOKE_GAMES ?= 100
 TIMEOUT_MS ?= 1000
@@ -84,6 +85,7 @@ eval-gate: require-base git-test
 	  --engine $(ENGINE) \
 	  --preset $(PRESET) \
 	  --kind gate \
+	  --opening-book $(BOOK) \
 	  --games $(GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS) \
@@ -101,6 +103,7 @@ eval-smoke: require-base git-test
 	  --engine $(ENGINE) \
 	  --preset $(PRESET) \
 	  --kind smoke \
+	  --opening-book $(BOOK) \
 	  --games $(SMOKE_GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS)
