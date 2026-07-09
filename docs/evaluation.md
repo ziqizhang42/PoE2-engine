@@ -27,7 +27,7 @@ To build an older commit, switch to it from a clean tree, run `make git-test PRE
 Use a strength gate when a change may affect move choice or search behavior:
 
 ```bash
-make eval-gate BASE=000014-abcd1234 ENGINE=poe2_greedy GAMES=2000
+make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy GAMES=2000
 ```
 
 This target:
@@ -55,6 +55,16 @@ Adjust them at the command line:
 
 ```bash
 make eval-gate BASE=000014-abcd1234 GAMES=5000 GO_MOVETIME_MS=100 TIMEOUT_MS=200
+```
+
+Every eval run names both engine binaries explicitly:
+
+```bash
+make eval-smoke BASE=build/by-commit/000015-d74d255e5cfd/release \
+  NEW_ENGINE=poe2_greedy \
+  BASE_ENGINE=poe2_random_legal \
+  BASE_ENGINE_ARGS='--seed 1' \
+  GAMES=630
 ```
 
 ## Opening Suites
@@ -91,9 +101,9 @@ build/debug/runner/poe2_runner openings generate-random \
 `BASE` can be a build id, a build directory, or an engine binary:
 
 ```bash
-make eval-gate BASE=000014-abcd1234
-make eval-gate BASE=build/by-commit/000014-abcd1234/release
-make eval-gate BASE=build/by-commit/000014-abcd1234/release/engines/poe2_greedy
+make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
+make eval-gate BASE=build/by-commit/000014-abcd1234/release NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
+make eval-gate BASE=build/by-commit/000014-abcd1234/release/engines/poe2_greedy NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
 ```
 
 ## Saved Runs
@@ -101,7 +111,7 @@ make eval-gate BASE=build/by-commit/000014-abcd1234/release/engines/poe2_greedy
 Every evaluation run is saved under:
 
 ```text
-build/eval/runs/<timestamp>__<new-id>__vs__<base-id>/
+build/eval/runs/<timestamp>__<new-id>__<new-engine>__vs__<base-id>__<base-engine>[__args-hashes]/
 ```
 
 Each run contains:
@@ -121,6 +131,8 @@ eval/results.csv
 ```
 
 It stores one summary row per evaluation run. Keep the raw logs in `build/eval/runs/`; they are intentionally not committed.
+Each row records both artifact identities as `new_id + new_engine + new_engine_args` and
+`base_id + base_engine + base_engine_args`.
 
 ## Direct Runner Usage
 
@@ -130,7 +142,9 @@ The Make targets call `poe2_runner eval`, but the runner can also be used direct
 build/by-commit/000015-d74d255e5cfd/release/runner/poe2_runner eval \
   --new-build build/by-commit/000015-d74d255e5cfd/release \
   --base 000014-abcd1234 \
-  --engine poe2_greedy \
+  --new-engine poe2_greedy \
+  --base-engine poe2_random_legal \
+  --base-engine-args '--seed 1' \
   --opening-book eval/openings/systematic-2ply-v1.txt \
   --games 2000 \
   --go-movetime-ms 100 \

@@ -1,5 +1,8 @@
 add_library(poe2_match_runner STATIC
+  src/engine_process.cpp
   src/match_runner.cpp
+  src/match_output.cpp
+  src/opening_book.cpp
 )
 
 add_library(poe2::match_runner ALIAS poe2_match_runner)
@@ -20,7 +23,9 @@ target_link_libraries(poe2_match_runner
 target_compile_features(poe2_match_runner PUBLIC cxx_std_23)
 
 add_executable(poe2_runner
+  src/eval_cli.cpp
   src/main.cpp
+  src/openings_cli.cpp
 )
 
 target_link_libraries(poe2_runner
@@ -59,7 +64,25 @@ add_test(
   COMMAND poe2_runner eval
           --new-build ${CMAKE_BINARY_DIR}
           --base ${CMAKE_BINARY_DIR}
-          --engine poe2_greedy
+          --new-engine poe2_greedy
+          --base-engine poe2_greedy
+          --games 2
+          --timeout-ms 1000
+          --go-depth 1
+          --go-movetime-ms 100
+          --run-root ${CMAKE_BINARY_DIR}/eval-test/runs
+          --kind smoke
+          --no-ledger
+)
+
+add_test(
+  NAME runner_eval_cross_engine_smoke
+  COMMAND poe2_runner eval
+          --new-build ${CMAKE_BINARY_DIR}
+          --base ${CMAKE_BINARY_DIR}
+          --new-engine poe2_greedy
+          --base-engine poe2_random_legal
+          --base-engine-args "--seed 1"
           --games 2
           --timeout-ms 1000
           --go-depth 1

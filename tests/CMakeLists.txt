@@ -12,21 +12,47 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 
-add_executable(poe2_tests
+add_executable(poe2_core_tests
   board_test.cpp
-  engine_stdio_test.cpp
-  match_runner_test.cpp
   move_test.cpp
   symmetry_test.cpp
 )
 
-target_link_libraries(poe2_tests
+target_link_libraries(poe2_core_tests
+  PRIVATE
+    poe2::game
+    Catch2::Catch2WithMain
+)
+
+add_executable(poe2_engine_stdio_tests
+  engine_stdio_test.cpp
+)
+
+target_link_libraries(poe2_engine_stdio_tests
   PRIVATE
     poe2::engine_stdio
+    Catch2::Catch2WithMain
+)
+
+add_executable(poe2_match_runner_tests
+  match_runner_test.cpp
+)
+
+target_link_libraries(poe2_match_runner_tests
+  PRIVATE
     poe2::match_runner
     Catch2::Catch2WithMain
 )
 
 include(Catch)
 
-catch_discover_tests(poe2_tests)
+catch_discover_tests(poe2_core_tests)
+catch_discover_tests(poe2_engine_stdio_tests)
+catch_discover_tests(poe2_match_runner_tests)
+
+add_custom_target(poe2_tests
+  DEPENDS
+    poe2_core_tests
+    poe2_engine_stdio_tests
+    poe2_match_runner_tests
+)

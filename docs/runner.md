@@ -109,13 +109,17 @@ Eval mode wraps series mode for saved engine comparisons:
 build/release/runner/poe2_runner eval \
   --new-build build/by-commit/000015-d74d255e5cfd/release \
   --base 000014-abcd1234 \
-  --engine poe2_greedy \
+  --new-engine poe2_greedy \
+  --base-engine poe2_random_legal \
+  --base-engine-args '--seed 1' \
   --games 2000 \
   --sprt-stop \
   --require-accept-alt
 ```
 
 It writes `manifest.json`, `summary.json`, `games.csv`, `command.txt`, and `runner.log` under `build/eval/runs/`, and appends one summary row to `eval/results.csv` unless `--no-ledger` is passed.
+Every eval run supplies both `--new-engine <name>` and `--base-engine <name>`. Use
+`--new-engine-args` or `--base-engine-args` for side-specific engine arguments.
 
 ## Opening Generation
 

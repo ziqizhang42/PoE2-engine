@@ -5,7 +5,10 @@ GIT_COMMIT_COUNT = $(shell git rev-list --count HEAD)
 GIT_COMMIT = $(shell git rev-parse --short=12 HEAD)
 GIT_BUILD_ID = $(shell printf "%06d-%s" $(GIT_COMMIT_COUNT) $(GIT_COMMIT))
 GIT_BUILD_DIR = build/by-commit/$(GIT_BUILD_ID)/$(PRESET)
-ENGINE ?= poe2_greedy
+NEW_ENGINE ?=
+BASE_ENGINE ?=
+NEW_ENGINE_ARGS ?=
+BASE_ENGINE_ARGS ?=
 BASE ?=
 BOOK ?= eval/openings/systematic-2ply-v1.txt
 GAMES ?= 1000
@@ -17,7 +20,7 @@ SPRT_ALT ?= 0.55
 SPRT_ALPHA ?= 0.05
 SPRT_BETA ?= 0.05
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check clean debug release require-clean git-configure git-build git-test require-base eval-gate eval-smoke
+.PHONY: configure build test format format-check tidy tidy-fix fix check clean debug release require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
 
 configure:
 	cmake --preset $(PRESET)
@@ -69,6 +72,14 @@ require-base:
 	  (echo "BASE=<build-id|build-dir|engine-binary> is required" >&2; \
 	   exit 1)
 
+require-eval-engines:
+	@test -n "$(NEW_ENGINE)" || \
+	  (echo "NEW_ENGINE=<engine-binary-name> is required" >&2; \
+	   exit 1)
+	@test -n "$(BASE_ENGINE)" || \
+	  (echo "BASE_ENGINE=<engine-binary-name> is required" >&2; \
+	   exit 1)
+
 git-configure: require-clean
 	cmake --preset $(PRESET) -B $(GIT_BUILD_DIR)
 
@@ -78,11 +89,14 @@ git-build: git-configure
 git-test: git-build
 	ctest --test-dir $(GIT_BUILD_DIR) --output-on-failure
 
-eval-gate: require-base git-test
+eval-gate: require-base require-eval-engines git-test
 	$(GIT_BUILD_DIR)/runner/poe2_runner eval \
 	  --new-build $(GIT_BUILD_DIR) \
 	  --base $(BASE) \
-	  --engine $(ENGINE) \
+	  --new-engine $(NEW_ENGINE) \
+	  --base-engine $(BASE_ENGINE) \
+	  $(if $(NEW_ENGINE_ARGS),--new-engine-args '$(NEW_ENGINE_ARGS)',) \
+	  $(if $(BASE_ENGINE_ARGS),--base-engine-args '$(BASE_ENGINE_ARGS)',) \
 	  --preset $(PRESET) \
 	  --kind gate \
 	  --opening-book $(BOOK) \
@@ -96,11 +110,14 @@ eval-gate: require-base git-test
 	  --sprt-beta $(SPRT_BETA) \
 	  --require-accept-alt
 
-eval-smoke: require-base git-test
+eval-smoke: require-base require-eval-engines git-test
 	$(GIT_BUILD_DIR)/runner/poe2_runner eval \
 	  --new-build $(GIT_BUILD_DIR) \
 	  --base $(BASE) \
-	  --engine $(ENGINE) \
+	  --new-engine $(NEW_ENGINE) \
+	  --base-engine $(BASE_ENGINE) \
+	  $(if $(NEW_ENGINE_ARGS),--new-engine-args '$(NEW_ENGINE_ARGS)',) \
+	  $(if $(BASE_ENGINE_ARGS),--base-engine-args '$(BASE_ENGINE_ARGS)',) \
 	  --preset $(PRESET) \
 	  --kind smoke \
 	  --opening-book $(BOOK) \
