@@ -62,3 +62,5 @@ target_link_libraries(poe2_random_legal
 )
 
 target_compile_features(poe2_random_legal PRIVATE cxx_std_23)
+
+add_subdirectory(minimax)

@@ -34,6 +34,16 @@ target_link_libraries(poe2_engine_stdio_tests
     Catch2::Catch2WithMain
 )
 
+add_executable(poe2_minimax_tests
+  minimax_search_test.cpp
+)
+
+target_link_libraries(poe2_minimax_tests
+  PRIVATE
+    poe2::minimax_engine
+    Catch2::Catch2WithMain
+)
+
 add_executable(poe2_match_runner_tests
   match_runner_test.cpp
 )
@@ -48,11 +58,13 @@ include(Catch)
 
 catch_discover_tests(poe2_core_tests)
 catch_discover_tests(poe2_engine_stdio_tests)
+catch_discover_tests(poe2_minimax_tests)
 catch_discover_tests(poe2_match_runner_tests)
 
 add_custom_target(poe2_tests
   DEPENDS
     poe2_core_tests
     poe2_engine_stdio_tests
+    poe2_minimax_tests
     poe2_match_runner_tests
 )
