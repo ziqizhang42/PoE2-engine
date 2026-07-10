@@ -70,6 +70,8 @@ add_test(
           --timeout-ms 1000
           --go-depth 1
           --go-movetime-ms 100
+          --opening-book ${PROJECT_SOURCE_DIR}/eval/openings/systematic-2ply-v1.txt
+          --shuffle-openings
           --run-root ${CMAKE_BINARY_DIR}/eval-test/runs
           --kind smoke
           --no-ledger
@@ -87,6 +89,8 @@ add_test(
           --timeout-ms 1000
           --go-depth 1
           --go-movetime-ms 100
+          --opening-book ${PROJECT_SOURCE_DIR}/eval/openings/systematic-2ply-v1.txt
+          --shuffle-openings
           --run-root ${CMAKE_BINARY_DIR}/eval-test/runs
           --kind smoke
           --no-ledger

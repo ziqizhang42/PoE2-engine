@@ -176,7 +176,7 @@ void print_usage(std::ostream& output) {
       << "                    [--opening-book <path>] [--quiet]\n"
       << "  poe2_runner series --engine-one <command> --engine-two <command> --games <n>\n"
       << "                     [--timeout-ms <ms>] [--fixed-sides] [--summary-only]\n"
-      << "                     [--opening-book <path>]\n"
+      << "                     [--opening-book <path>] [--shuffle-openings]\n"
       << "                     [--verbose-games] [--sprt-stop] [--sprt-null <p>] [--sprt-alt <p>]\n"
       << "                     [--sprt-alpha <p>] [--sprt-beta <p>]\n"
       << "                     [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
@@ -184,7 +184,7 @@ void print_usage(std::ostream& output) {
       << "                   --new-engine <name> --base-engine <name>\n"
       << "                   [--new-engine-args <args>] [--base-engine-args <args>]\n"
       << "                   [--games <n>] [--timeout-ms <ms>] [--sprt-stop]\n"
-      << "                   [--opening-book <path>]\n"
+      << "                   [--opening-book <path>] [--shuffle-openings]\n"
       << "                   [--require-accept-alt] [--ledger <path>] [--no-ledger]\n"
       << "                   [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
       << "  poe2_runner openings generate-random --out <path> --count <n> --plies <n> --seed <n>\n"
@@ -308,6 +308,10 @@ void print_usage(std::ostream& output) {
       options.opening_book = poe2::match_runner::load_opening_book(argv[++index]);
       continue;
     }
+    if (argument == "--shuffle-openings") {
+      options.shuffle_openings = true;
+      continue;
+    }
     if (argument == "--verbose-games") {
       options.verbose_games = true;
       continue;
@@ -404,6 +408,7 @@ int run_series(int argc, char** argv) {
             << " alternate_sides=" << (options.alternate_sides ? 1 : 0) << " opening_book="
             << (options.opening_book.path.empty() ? "none" : options.opening_book.path)
             << " opening_count=" << options.opening_book.lines.size()
+            << " shuffle_openings=" << (options.shuffle_openings ? 1 : 0)
             << " sprt_stop=" << (options.sprt_stop ? 1 : 0)
             << " sprt_null=" << options.sprt_null_rate << " sprt_alt=" << options.sprt_alt_rate
             << " sprt_alpha=" << options.sprt_alpha << " sprt_beta=" << options.sprt_beta;

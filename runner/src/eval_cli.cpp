@@ -393,6 +393,9 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   if (!options.series.opening_book.path.empty()) {
     output << " --opening-book " << shell_quote(options.series.opening_book.path);
   }
+  if (options.series.shuffle_openings) {
+    output << " --shuffle-openings";
+  }
   if (options.series.go_limits.depth.has_value()) {
     output << " --go-depth " << *options.series.go_limits.depth;
   }
@@ -498,6 +501,8 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
   }
   output << ",\n"
          << "  \"opening_count\": " << options.series.opening_book.lines.size() << ",\n"
+         << "  \"shuffle_openings\": " << (options.series.shuffle_openings ? "true" : "false")
+         << ",\n"
          << "  \"games\": " << options.series.games << ",\n"
          << "  \"games_played\": " << result.games_played << ",\n"
          << "  \"timeout_ms\": " << options.series.move_timeout.count() << ",\n"
@@ -719,6 +724,10 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
       options.series.opening_book = match_runner::load_opening_book(argv[++index]);
       continue;
     }
+    if (argument == "--shuffle-openings") {
+      options.series.shuffle_openings = true;
+      continue;
+    }
     if (argument == "--sprt-stop") {
       options.series.sprt_stop = true;
       continue;
@@ -847,6 +856,7 @@ int run_eval(int argc, char** argv) {
       << " alternate_sides=" << (options.series.alternate_sides ? 1 : 0) << " opening_book="
       << (options.series.opening_book.path.empty() ? "none" : options.series.opening_book.path)
       << " opening_count=" << options.series.opening_book.lines.size()
+      << " shuffle_openings=" << (options.series.shuffle_openings ? 1 : 0)
       << " sprt_stop=" << (options.series.sprt_stop ? 1 : 0)
       << " sprt_null=" << options.series.sprt_null_rate
       << " sprt_alt=" << options.series.sprt_alt_rate << " sprt_alpha=" << options.series.sprt_alpha

@@ -6,6 +6,7 @@
 #include <csignal>
 #include <optional>
 #include <ostream>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -398,6 +399,10 @@ void update_series_statistics(SeriesResult& result, const SeriesOptions& options
   return decision == SprtDecision::kAcceptAlternative || decision == SprtDecision::kAcceptNull;
 }
 
+[[nodiscard]] bool is_side_pair_complete(int zero_based_game_index, bool alternate_sides) noexcept {
+  return !alternate_sides || (zero_based_game_index % 2) != 0;
+}
+
 void print_series_game(const SeriesGameResult& game, std::ostream& output) {
   output << "game"
          << " index=" << game.game_number
@@ -430,6 +435,11 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
   SeriesResult result{
       .games_requested = options.games,
   };
+  OpeningBook opening_book = options.opening_book;
+  if (options.shuffle_openings) {
+    std::mt19937_64 generator{std::random_device{}()};
+    std::shuffle(opening_book.lines.begin(), opening_book.lines.end(), generator);
+  }
 
   EngineProcess engine_one{options.engine_one_command};
   EngineProcess engine_two{options.engine_two_command};
@@ -461,13 +471,12 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
         .go_limits = options.go_limits,
         .verbose = options.verbose_games,
     };
-    const bool has_openings = !options.opening_book.lines.empty();
+    const bool has_openings = !opening_book.lines.empty();
     const int opening_index = has_openings
                                   ? (options.alternate_sides ? (game_index / 2) : game_index) %
-                                        static_cast<int>(options.opening_book.lines.size())
+                                        static_cast<int>(opening_book.lines.size())
                                   : -1;
-    const OpeningLine* opening =
-        has_openings ? &options.opening_book.lines[opening_index] : nullptr;
+    const OpeningLine* opening = has_openings ? &opening_book.lines[opening_index] : nullptr;
     if (opening != nullptr) {
       match_options.opening_moves = opening->moves;
     }
@@ -493,7 +502,7 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
       break;
     }
 
-    if (options.sprt_stop) {
+    if (options.sprt_stop && is_side_pair_complete(game_index, options.alternate_sides)) {
       update_series_statistics(result, options);
       if (is_decisive_sprt(result.sprt_decision)) {
         result.detail = "series stopped after sprt decision: ";

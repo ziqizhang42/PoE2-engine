@@ -100,6 +100,7 @@ eval-gate: require-base require-eval-engines git-test
 	  --preset $(PRESET) \
 	  --kind gate \
 	  --opening-book $(BOOK) \
+	  --shuffle-openings \
 	  --games $(GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS) \
@@ -121,6 +122,7 @@ eval-smoke: require-base require-eval-engines git-test
 	  --preset $(PRESET) \
 	  --kind smoke \
 	  --opening-book $(BOOK) \
+	  --shuffle-openings \
 	  --games $(SMOKE_GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS)

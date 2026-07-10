@@ -82,6 +82,7 @@ Useful options:
 - `--games <n>`: number of games to run.
 - `--opening-book <path>`: cycle through a text opening suite and start each game after the
   selected move prefix.
+- `--shuffle-openings`: randomly shuffle the opening suite once before the series starts.
 - `--go-depth <n>`: include `depth <n>` in every `go` command sent to engines.
 - `--go-movetime-ms <ms>`: include `movetime <ms>` in every `go` command sent to engines.
 - `--go-nodes <n>`: include `nodes <n>` in every `go` command sent to engines.
@@ -98,8 +99,10 @@ The summary includes engine-one wins, engine-two wins, average plies, average sc
 
 SPRT decisions are directional for engine one: `accept_alt` supports engine one's `--sprt-alt` score-rate claim, while `accept_null` rejects it; swap engine order to test the other engine.
 
-When an opening book is provided, series mode cycles through opening lines. With alternating sides,
-each opening is reused for the adjacent swapped-side game before advancing to the next line.
+When an opening book is provided, series mode cycles through opening lines. `--shuffle-openings`
+randomizes that order once at the start of the series. With alternating sides, each opening is
+still reused for the adjacent swapped-side game before advancing to the next line, and SPRT early
+stopping is checked only after the pair is complete.
 
 ## Eval Mode
 

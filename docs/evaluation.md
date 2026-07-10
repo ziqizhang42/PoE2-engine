@@ -35,6 +35,7 @@ This target:
 - requires a clean tree,
 - builds and tests the current commit,
 - runs the current engine as `engine_one` against the baseline,
+- randomly shuffles the opening suite while preserving adjacent side-swapped pairs,
 - enables SPRT early stopping,
 - appends one row to `eval/results.csv`,
 - fails unless SPRT reports `accept_alt`.
@@ -146,6 +147,7 @@ build/by-commit/000015-d74d255e5cfd/release/runner/poe2_runner eval \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \
   --opening-book eval/openings/systematic-2ply-v1.txt \
+  --shuffle-openings \
   --games 2000 \
   --go-movetime-ms 100 \
   --timeout-ms 200 \

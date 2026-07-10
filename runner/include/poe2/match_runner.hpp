@@ -72,6 +72,7 @@ struct SeriesOptions {
   std::chrono::milliseconds move_timeout = kDefaultMoveTimeout;
   engine::EngineLimits go_limits;
   OpeningBook opening_book;
+  bool shuffle_openings = false;
   bool alternate_sides = true;
   bool print_game_results = true;
   bool verbose_games = false;
