@@ -35,6 +35,7 @@ target_link_libraries(poe2_engine_stdio_tests
 )
 
 add_executable(poe2_minimax_tests
+  minimax_evaluation_test.cpp
   minimax_search_test.cpp
 )
 

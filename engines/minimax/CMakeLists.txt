@@ -1,5 +1,6 @@
 add_library(poe2_minimax_engine STATIC
   src/engine.cpp
+  src/evaluation.cpp
   src/search.cpp
 )
 
