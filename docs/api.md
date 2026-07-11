@@ -65,6 +65,8 @@ if (position.make_move(move.square, undo)) {
 ```
 
 Use `poe2/transposition_table.hpp` for search caching. The table stores exact `PositionKey` values and uses `Position::hash()` for fast bucket lookup when probing or storing a live `Position`.
+`update_position_hash()` applies the reversible piece-and-side-to-move Zobrist transition used by
+`Position`; applying it twice with the same player and square restores the original hash.
 
 ## Symmetry Helpers
 
@@ -79,69 +81,55 @@ The symmetry API transforms only geometry:
 
 Canonicalization never swaps players.
 
-### Symmetric Transposition Table
+### Incremental Symmetry Tracking
 
-The current `TranspositionTable` intentionally stores exactly the key it is given. A symmetry-aware engine can canonicalize before probing or storing:
+Searches that opt into symmetry can construct one `PositionSymmetryTracker` from the live key. It maintains both player bitboards and hashes in all eight orientations as moves are made and unmade.
+`preview_move()` computes the child canonical view without changing the tracker:
 
 ```cpp
 #include "poe2/symmetry.hpp"
-#include "poe2/transposition_table.hpp"
 
-const poe2::CanonicalPositionKey canonical =
-    poe2::canonicalize_position_key(position.key());
+poe2::PositionSymmetryTracker symmetry{position.key()};
+const poe2::CanonicalPositionView child = symmetry.preview_move(move.square);
 
-if (const std::optional<poe2::TranspositionEntry> hit = table.probe(canonical.key)) {
-  if (hit->value.best_move.has_value()) {
-    const poe2::Square move_in_current_position =
-        poe2::transform_square(canonical.inverse_transform, *hit->value.best_move);
+poe2::MoveUndo undo;
+if (position.make_move(move.square, undo)) {
+  if (symmetry.make_move(move.square)) {
+    // child.key and child.hash are ready for the recursive search.
+    symmetry.unmake_move(move.square);
   }
-}
-```
-
-When storing a best move, store it in canonical orientation because the entry is keyed by `canonical.key`:
-
-```cpp
-poe2::TranspositionValue value = searched_value;
-if (value.best_move.has_value()) {
-  value.best_move = poe2::transform_square(canonical.transform, *value.best_move);
-}
-
-table.store(canonical.key, value);
-```
-
-An engine should avoid `table.store(position, value)` and `table.probe(position)` for symmetry-aware use because those overloads use the live position's non-canonical key and hash.
-
-### Child Deduplication
-
-The same helper can also suppress duplicate child nodes. The simplest version canonicalizes each child after making the move and skips children whose canonical key has already been searched from this parent:
-
-```cpp
-std::vector<poe2::PositionKey> searched_children;
-poe2::Bitboard moves = position.legal_moves();
-
-while (moves != 0) {
-  const int move_index = std::countr_zero(moves);
-  const poe2::Square move = poe2::square_from_index(move_index);
-  moves &= moves - poe2::Bitboard{1};
-
-  poe2::MoveUndo undo;
-  if (!position.make_move(move, undo)) {
-    continue;
-  }
-
-  const poe2::PositionKey child_key =
-      poe2::canonicalize_position_key(position.key()).key;
-
-  const bool duplicate =
-      std::find(searched_children.begin(), searched_children.end(), child_key) !=
-      searched_children.end();
-  if (!duplicate) {
-    searched_children.push_back(child_key);
-    // Search this representative child.
-  }
-
   position.unmake_move(undo);
 }
 ```
 
-This works for both fully symmetric and partially symmetric positions because it compares the canonical result of the actual child position. A later optimized engine can replace the vector with a small hash set or compute parent-stabilizing symmetries first.
+`canonical_view()` returns the current key, hash, and live-to-canonical transform pair.
+`stabilizer_mask()` identifies the transforms that leave the current colored position unchanged.
+`transformed_move_orbit()` returns every move equivalent to a square under that stabilizer.
+The compile-time `transformed_move_bits` table is available to searches that want to reuse a previously computed stabilizer mask.
+
+### Transposition Table
+
+`TranspositionTable` uses aligned two-way buckets. `capacity()` counts usable entry slots, while `storage_bytes()` reports the cache-line allocation. Keys remain authoritative: hashes select a bucket but are not stored in its packed entries.
+
+Callers that already maintain the exact hash can avoid recomputation with the prehashed overloads:
+
+```cpp
+const poe2::CanonicalPositionView view = symmetry.canonical_view();
+if (const std::optional<poe2::TranspositionEntry> hit = table.probe(view.key, view.hash)) {
+  // Use the exact-key hit.
+}
+
+const bool accepted = table.store(view.key, view.hash, searched_value);
+```
+
+The overloads taking only a key recompute its hash. The `Position` overloads use the live, non-canonical key and its already-maintained hash. `store()` reports whether the replacement policy accepted the write.
+
+### Minimax Command Line
+
+The minimax executable enables D4 symmetry and a 64 MiB transposition table by default:
+
+```bash
+build/release/engines/minimax/poe2_minimax [--hash-mb <size>] [--no-symmetry]
+```
+
+`--hash-mb 0` disables the table. `--no-symmetry` selects the separately compiled identity search path, so it does not construct or update a symmetry tracker.

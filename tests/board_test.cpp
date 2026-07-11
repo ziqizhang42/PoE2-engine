@@ -6,8 +6,6 @@
 #include <optional>
 #include <vector>
 
-#include "poe2/transposition_table.hpp"
-
 namespace {
 
 struct PositionSnapshot {
@@ -252,110 +250,17 @@ TEST_CASE("position key packs both bitboards and side to move", "[key]") {
   REQUIRE(poe2::position_key_hash(key) != poe2::position_key_hash(swapped_players));
 }
 
-TEST_CASE("transposition table probes by exact bitboards and side to move", "[key][tt]") {
+TEST_CASE("position hash move updates are reversible and match full recomputation", "[key][hash]") {
   poe2::Position position;
-  require_play_and_match(position, {0, 0});
-  require_play_and_match(position, {6, 6});
-  require_play_and_match(position, {0, 1});
+  const poe2::PositionHash initial_hash = position.hash();
+  const poe2::Square move{2, 4};
+  const poe2::PositionHash child_hash =
+      poe2::update_position_hash(initial_hash, position.side_to_move(), move);
 
-  poe2::TranspositionTable table(16);
-  const poe2::TranspositionValue value{
-      .score = 42,
-      .depth = 6,
-      .bound = poe2::TranspositionBound::kExact,
-      .best_move = poe2::Square{4, 4},
-  };
-
-  table.store(position, value);
-  const std::optional<poe2::TranspositionEntry> hit = table.probe(position);
-
-  if (!hit.has_value()) {
-    FAIL("stored transposition entry is missing");
-    return;
-  }
-
-  const poe2::TranspositionEntry entry = *hit;
-  REQUIRE(entry.key == position.key());
-  REQUIRE(poe2::position_key_bits(entry.key, poe2::Player::kOne) ==
-          position.board().bits(poe2::Player::kOne));
-  REQUIRE(poe2::position_key_bits(entry.key, poe2::Player::kTwo) ==
-          position.board().bits(poe2::Player::kTwo));
-  REQUIRE(poe2::position_key_side_to_move(entry.key) == position.side_to_move());
-  REQUIRE(entry.hash == position.hash());
-  REQUIRE(entry.hash == poe2::position_key_hash(position.key()));
-  REQUIRE(entry.value.score == value.score);
-  REQUIRE(entry.value.depth == value.depth);
-  REQUIRE(entry.value.bound == value.bound);
-  const std::optional<poe2::Square> best_move = entry.value.best_move;
-  if (!best_move.has_value()) {
-    FAIL("stored best move is missing");
-    return;
-  }
-  const poe2::Square best_move_value = *best_move;
-  REQUIRE(best_move_value.row == 4);
-  REQUIRE(best_move_value.col == 4);
-
-  const poe2::PositionKey key = position.key();
-  const poe2::PositionKey other_side = poe2::make_position_key(
-      poe2::position_key_bits(key, poe2::Player::kOne),
-      poe2::position_key_bits(key, poe2::Player::kTwo), poe2::opponent(position.side_to_move()));
-  const poe2::PositionKey swapped_players = poe2::make_position_key(
-      poe2::position_key_bits(key, poe2::Player::kTwo),
-      poe2::position_key_bits(key, poe2::Player::kOne), position.side_to_move());
-
-  REQUIRE_FALSE(table.probe(other_side).has_value());
-  REQUIRE_FALSE(table.probe(swapped_players).has_value());
-}
-
-TEST_CASE("transposition table rounds capacity to power of two", "[tt]") {
-  poe2::TranspositionTable empty;
-  REQUIRE(empty.capacity() == 0);
-  REQUIRE(empty.empty());
-
-  poe2::TranspositionTable table(3);
-  REQUIRE(table.capacity() == 4);
-
-  const poe2::PositionKey key = poe2::make_position_key(
-      poe2::square_bit({0, 0}), poe2::square_bit({6, 6}), poe2::Player::kOne);
-  table.store(key, {.score = 10, .depth = 4});
-  REQUIRE(table.size() == 1);
-  REQUIRE(table.probe(key).has_value());
-
-  table.resize(17);
-  REQUIRE(table.capacity() == 32);
-  REQUIRE(table.empty());
-  REQUIRE_FALSE(table.probe(key).has_value());
-
-  table.resize(1);
-  REQUIRE(table.capacity() == 1);
-}
-
-TEST_CASE("transposition table keeps deeper entries on bucket collisions", "[tt]") {
-  poe2::TranspositionTable table(1);
-  const poe2::PositionKey first = poe2::make_position_key(
-      poe2::square_bit({0, 0}), poe2::square_bit({6, 6}), poe2::Player::kOne);
-  const poe2::PositionKey second = poe2::make_position_key(
-      poe2::square_bit({0, 1}), poe2::square_bit({6, 5}), poe2::Player::kTwo);
-
-  table.store(first, {.score = 10, .depth = 4});
-  table.store(second, {.score = 20, .depth = 2});
-
-  REQUIRE(table.size() == 1);
-  REQUIRE(table.probe(first).has_value());
-  REQUIRE_FALSE(table.probe(second).has_value());
-
-  table.store(second, {.score = 20, .depth = 5});
-
-  const std::optional<poe2::TranspositionEntry> hit = table.probe(second);
-  REQUIRE_FALSE(table.probe(first).has_value());
-  if (!hit.has_value()) {
-    FAIL("deeper transposition entry is missing");
-    return;
-  }
-
-  const poe2::TranspositionEntry entry = *hit;
-  REQUIRE(entry.value.score == 20);
-  REQUIRE(entry.value.depth == 5);
+  REQUIRE(position.play(move));
+  REQUIRE(position.hash() == child_hash);
+  REQUIRE(position.hash() == poe2::position_key_hash(position.key()));
+  REQUIRE(poe2::update_position_hash(child_hash, poe2::Player::kOne, move) == initial_hash);
 }
 
 TEST_CASE("position terminal result uses cached scores", "[position][game]") {

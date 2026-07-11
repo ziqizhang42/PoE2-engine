@@ -36,6 +36,16 @@ struct CanonicalPositionKey {
   Symmetry inverse_transform = Symmetry::kIdentity;
 };
 
+struct CanonicalPositionView {
+  PositionKey key;
+  PositionHash hash = 0;
+  Symmetry transform = Symmetry::kIdentity;
+  Symmetry inverse_transform = Symmetry::kIdentity;
+
+  friend constexpr bool operator==(const CanonicalPositionView&,
+                                   const CanonicalPositionView&) = default;
+};
+
 [[nodiscard]] constexpr Square transform_square(Symmetry symmetry, Square square) noexcept {
   constexpr int last = kBoardSize - 1;
 
@@ -80,6 +90,43 @@ struct CanonicalPositionKey {
 
   return Symmetry::kIdentity;
 }
+
+inline constexpr std::array<std::array<Bitboard, kCellCount>, kAllSymmetries.size()>
+    transformed_move_bits = []() consteval {
+      std::array<std::array<Bitboard, kCellCount>, kAllSymmetries.size()> result{};
+
+      for (std::size_t symmetry_index = 0; symmetry_index < kAllSymmetries.size();
+           ++symmetry_index) {
+        for (int square_index_value = 0; square_index_value < kCellCount; ++square_index_value) {
+          const Square square = square_from_index(square_index_value);
+          result[symmetry_index][square_index_value] =
+              square_bit(transform_square(kAllSymmetries[symmetry_index], square));
+        }
+      }
+
+      return result;
+    }();
+
+class PositionSymmetryTracker final {
+ public:
+  explicit PositionSymmetryTracker(PositionKey key) noexcept;
+
+  [[nodiscard]] Player side_to_move() const noexcept;
+  [[nodiscard]] PositionKey key(Symmetry symmetry = Symmetry::kIdentity) const noexcept;
+  [[nodiscard]] PositionHash hash(Symmetry symmetry = Symmetry::kIdentity) const noexcept;
+  [[nodiscard]] CanonicalPositionView canonical_view() const noexcept;
+  [[nodiscard]] CanonicalPositionView preview_move(Square square) const noexcept;
+  [[nodiscard]] std::uint8_t stabilizer_mask() const noexcept;
+  [[nodiscard]] Bitboard transformed_move_orbit(Square square) const noexcept;
+
+  [[nodiscard]] bool make_move(Square square) noexcept;
+  void unmake_move(Square square) noexcept;
+
+ private:
+  std::array<std::array<Bitboard, 2>, kAllSymmetries.size()> pieces_{};
+  std::array<PositionHash, kAllSymmetries.size()> hashes_{};
+  Player side_to_move_ = Player::kOne;
+};
 
 [[nodiscard]] Bitboard transform_bitboard(Symmetry symmetry, Bitboard bits) noexcept;
 [[nodiscard]] PositionKey transform_position_key(Symmetry symmetry, PositionKey key) noexcept;

@@ -16,6 +16,7 @@ add_executable(poe2_core_tests
   board_test.cpp
   move_test.cpp
   symmetry_test.cpp
+  transposition_table_test.cpp
 )
 
 target_link_libraries(poe2_core_tests
@@ -36,6 +37,7 @@ target_link_libraries(poe2_engine_stdio_tests
 
 add_executable(poe2_minimax_tests
   minimax_evaluation_test.cpp
+  minimax_options_test.cpp
   minimax_search_test.cpp
 )
 

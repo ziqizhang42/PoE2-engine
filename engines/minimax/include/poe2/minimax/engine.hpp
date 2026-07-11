@@ -8,6 +8,8 @@ namespace poe2::minimax {
 
 class MinimaxEngine final : public engine::Engine {
  public:
+  explicit MinimaxEngine(SearchOptions options = {});
+
   void new_game() override;
   [[nodiscard]] engine::EngineResult choose_move(const Position& position,
                                                  const engine::EngineLimits& limits,

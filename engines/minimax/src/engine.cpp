@@ -2,6 +2,8 @@
 
 namespace poe2::minimax {
 
+MinimaxEngine::MinimaxEngine(SearchOptions options) : search_(options) {}
+
 void MinimaxEngine::new_game() { search_.new_game(); }
 
 engine::EngineResult MinimaxEngine::choose_move(const Position& position,

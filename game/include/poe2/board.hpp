@@ -153,6 +153,8 @@ struct GameResult {
 [[nodiscard]] Score score(const Board& board, Player player) noexcept;
 [[nodiscard]] ScoreByPlayer score(const Board& board) noexcept;
 [[nodiscard]] PositionHash position_key_hash(PositionKey key) noexcept;
+[[nodiscard]] PositionHash update_position_hash(PositionHash hash, Player player,
+                                                Square square) noexcept;
 [[nodiscard]] Player leader_after_handicap(ScoreByPlayer scores) noexcept;
 [[nodiscard]] std::optional<GameResult> result_if_full(const Board& board) noexcept;
 [[nodiscard]] std::optional<GameResult> result_if_full(const Position& position) noexcept;

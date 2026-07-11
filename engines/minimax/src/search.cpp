@@ -1,14 +1,17 @@
 #include "poe2/minimax/search.hpp"
 
+#include <array>
 #include <bit>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <optional>
+#include <sstream>
 #include <utility>
-#include <vector>
 
 #include "poe2/minimax/evaluation.hpp"
 #include "poe2/move.hpp"
+#include "poe2/symmetry.hpp"
 
 namespace poe2::minimax {
 
@@ -16,9 +19,15 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr std::size_t kChildKeySetCapacity = 64;
+constexpr std::size_t kPlyCount = static_cast<std::size_t>(kCellCount) + 1;
+static_assert(std::has_single_bit(kChildKeySetCapacity));
+static_assert(kChildKeySetCapacity > static_cast<std::size_t>(kCellCount));
+
 class SearchState final {
  public:
-  explicit SearchState(std::chrono::milliseconds move_time) : deadline_(Clock::now() + move_time) {}
+  SearchState(std::chrono::milliseconds move_time, TranspositionTable& table)
+      : deadline_(Clock::now() + move_time), table_(table) {}
 
   [[nodiscard]] bool enter_node() noexcept {
     if (Clock::now() >= deadline_) {
@@ -29,87 +38,517 @@ class SearchState final {
     return true;
   }
 
+  [[nodiscard]] std::optional<TranspositionEntry> probe(PositionKey key,
+                                                        PositionHash hash) noexcept {
+    ++tt_probes_;
+    std::optional<TranspositionEntry> entry = table_.probe(key, hash);
+    if (entry.has_value()) {
+      ++tt_hits_;
+    }
+    return entry;
+  }
+
+  void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
+
+  void store(PositionKey key, PositionHash hash, TranspositionValue value) {
+    if (table_.store(key, hash, value)) {
+      ++tt_stores_;
+    }
+  }
+
+  void record_symmetry_prunes(std::uint64_t count) noexcept { symmetry_prunes_ += count; }
+
+  void clear_principal_variation(int ply) noexcept {
+    principal_variation_lengths_[static_cast<std::size_t>(ply)] = 0;
+  }
+
+  void set_cached_principal_variation(int ply, Move move) noexcept {
+    const std::size_t index = static_cast<std::size_t>(ply);
+    principal_variations_[index][0] = move;
+    principal_variation_lengths_[index] = 1;
+  }
+
+  void prepend_principal_variation(int ply, Move move) noexcept {
+    const std::size_t index = static_cast<std::size_t>(ply);
+    const std::size_t child_index = index + 1;
+    assert(child_index < kPlyCount);
+    const std::uint8_t child_length = principal_variation_lengths_[child_index];
+
+    principal_variations_[index][0] = move;
+    for (std::uint8_t offset = 0; offset < child_length; ++offset) {
+      principal_variations_[index][static_cast<std::size_t>(offset) + 1] =
+          principal_variations_[child_index][offset];
+    }
+    principal_variation_lengths_[index] = static_cast<std::uint8_t>(child_length + 1);
+  }
+
+  [[nodiscard]] const std::array<Move, kCellCount>& principal_variation(int ply) const noexcept {
+    return principal_variations_[static_cast<std::size_t>(ply)];
+  }
+
+  [[nodiscard]] std::size_t principal_variation_length(int ply) const noexcept {
+    return principal_variation_lengths_[static_cast<std::size_t>(ply)];
+  }
+
   [[nodiscard]] std::uint64_t nodes() const noexcept { return nodes_; }
+  [[nodiscard]] std::uint64_t tt_probes() const noexcept { return tt_probes_; }
+  [[nodiscard]] std::uint64_t tt_hits() const noexcept { return tt_hits_; }
+  [[nodiscard]] std::uint64_t tt_cutoffs() const noexcept { return tt_cutoffs_; }
+  [[nodiscard]] std::uint64_t tt_stores() const noexcept { return tt_stores_; }
+  [[nodiscard]] std::uint64_t symmetry_prunes() const noexcept { return symmetry_prunes_; }
 
  private:
   Clock::time_point deadline_;
+  TranspositionTable& table_;
+  std::array<std::array<Move, kCellCount>, kPlyCount> principal_variations_{};
+  std::array<std::uint8_t, kPlyCount> principal_variation_lengths_{};
   std::uint64_t nodes_ = 0;
+  std::uint64_t tt_probes_ = 0;
+  std::uint64_t tt_hits_ = 0;
+  std::uint64_t tt_cutoffs_ = 0;
+  std::uint64_t tt_stores_ = 0;
+  std::uint64_t symmetry_prunes_ = 0;
+};
+
+class ChildKeySet final {
+ public:
+  void clear() noexcept { occupied_ = 0; }
+
+  [[nodiscard]] bool insert(PositionKey key, PositionHash hash) noexcept {
+    std::size_t index = static_cast<std::size_t>(hash) & (kChildKeySetCapacity - 1);
+
+    for (std::size_t probe = 0; probe < kChildKeySetCapacity; ++probe) {
+      const std::uint64_t occupied_bit = std::uint64_t{1} << index;
+      if ((occupied_ & occupied_bit) == 0) {
+        occupied_ |= occupied_bit;
+        keys_[index] = key;
+        hashes_[index] = hash;
+        return true;
+      }
+      if (hashes_[index] == hash && keys_[index] == key) {
+        return false;
+      }
+      index = (index + 1) & (kChildKeySetCapacity - 1);
+    }
+
+    assert(false && "child-key set cannot fill with at most 49 successors");
+    return false;
+  }
+
+ private:
+  std::array<PositionKey, kChildKeySetCapacity> keys_{};
+  std::array<PositionHash, kChildKeySetCapacity> hashes_{};
+  std::uint64_t occupied_ = 0;
+};
+
+class IdentityPolicy final {
+ public:
+  static constexpr bool kUsesSymmetry = false;
+
+  explicit IdentityPolicy(const Position&) noexcept {}
+
+  [[nodiscard]] static CanonicalPositionView current_view(const Position& position) noexcept {
+    return CanonicalPositionView{
+        .key = position.key(),
+        .hash = position.hash(),
+    };
+  }
+
+  [[nodiscard]] static CanonicalPositionView preview_move(const CanonicalPositionView& current,
+                                                          Square square) noexcept {
+    const Player player = position_key_side_to_move(current.key);
+    Bitboard player_one = position_key_bits(current.key, Player::kOne);
+    Bitboard player_two = position_key_bits(current.key, Player::kTwo);
+    if (player == Player::kOne) {
+      player_one |= square_bit(square);
+    } else {
+      player_two |= square_bit(square);
+    }
+
+    return CanonicalPositionView{
+        .key = make_position_key(player_one, player_two, opponent(player)),
+        .hash = update_position_hash(current.hash, player, square),
+    };
+  }
+
+  static void start_node(int) noexcept {}
+  [[nodiscard]] static Bitboard move_orbit(int, Square square) noexcept {
+    return square_bit(square);
+  }
+  static void make_move(Square) noexcept {}
+  static void unmake_move(Square) noexcept {}
+};
+
+class D4Policy final {
+ public:
+  static constexpr bool kUsesSymmetry = true;
+
+  explicit D4Policy(const Position& position) noexcept : tracker_(position.key()) {
+    assert(tracker_.hash() == position.hash());
+  }
+
+  [[nodiscard]] CanonicalPositionView current_view(const Position&) const noexcept {
+    return tracker_.canonical_view();
+  }
+
+  [[nodiscard]] CanonicalPositionView preview_move(const CanonicalPositionView&,
+                                                   Square square) const noexcept {
+    return tracker_.preview_move(square);
+  }
+
+  void start_node(int ply) noexcept {
+    const std::size_t index = static_cast<std::size_t>(ply);
+    child_keys_[index].clear();
+    stabilizer_masks_[index] = tracker_.stabilizer_mask();
+  }
+
+  [[nodiscard]] Bitboard move_orbit(int ply, Square square) const noexcept {
+    const std::uint8_t stabilizer_mask = stabilizer_masks_[static_cast<std::size_t>(ply)];
+    const int move_index = square_index(square);
+    Bitboard orbit = 0;
+
+    for (std::size_t symmetry = 0; symmetry < kAllSymmetries.size(); ++symmetry) {
+      if ((stabilizer_mask & (std::uint8_t{1} << symmetry)) != 0) {
+        orbit |= transformed_move_bits[symmetry][move_index];
+      }
+    }
+    return orbit;
+  }
+
+  [[nodiscard]] bool remember_child(int ply, const CanonicalPositionView& child) noexcept {
+    return child_keys_[static_cast<std::size_t>(ply)].insert(child.key, child.hash);
+  }
+
+  void make_move(Square square) noexcept {
+    const bool made_move = tracker_.make_move(square);
+    assert(made_move);
+    (void)made_move;
+  }
+
+  void unmake_move(Square square) noexcept { tracker_.unmake_move(square); }
+
+ private:
+  PositionSymmetryTracker tracker_;
+  std::array<ChildKeySet, kPlyCount> child_keys_{};
+  std::array<std::uint8_t, kPlyCount> stabilizer_masks_{};
 };
 
 struct NodeResult {
   Score value = 0;
-  std::vector<Move> principal_variation;
+  std::optional<Move> best_move;
 };
 
-void set_principal_variation(NodeResult& result, Move move, const NodeResult& child) {
-  result.principal_variation.clear();
-  result.principal_variation.reserve(child.principal_variation.size() + 1);
-  result.principal_variation.push_back(move);
-  result.principal_variation.insert(result.principal_variation.end(),
-                                    child.principal_variation.begin(),
-                                    child.principal_variation.end());
+struct FixedPrincipalVariation {
+  std::array<Move, kCellCount> moves{};
+  std::size_t size = 0;
+};
+
+struct EmptyPositionView {};
+
+template <typename Policy, bool UseTable>
+using SearchPositionView =
+    std::conditional_t<UseTable || Policy::kUsesSymmetry, CanonicalPositionView, EmptyPositionView>;
+
+[[nodiscard]] std::optional<Move> remap_cached_move(const TranspositionEntry& entry,
+                                                    const CanonicalPositionView& view,
+                                                    Bitboard legal_moves) noexcept {
+  if (!entry.value.best_move.has_value()) {
+    return std::nullopt;
+  }
+
+  const Square live_square = transform_square(view.inverse_transform, *entry.value.best_move);
+  if ((legal_moves & square_bit(live_square)) == 0) {
+    return std::nullopt;
+  }
+  return Move{.square = live_square};
 }
 
-[[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, SearchState& state) {
+void store_exact(SearchState& state, const CanonicalPositionView& view, int depth, Score value,
+                 std::optional<Move> best_move) {
+  std::optional<Square> canonical_best_move;
+  if (best_move.has_value()) {
+    canonical_best_move = transform_square(view.transform, best_move->square);
+  }
+
+  state.store(view.key, view.hash,
+              TranspositionValue{
+                  .score = value,
+                  .depth = depth,
+                  .bound = TranspositionBound::kExact,
+                  .best_move = canonical_best_move,
+              });
+}
+
+template <typename Policy, bool UseTable>
+[[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, int ply,
+                                                SearchState& state, Policy& policy,
+                                                SearchPositionView<Policy, UseTable> view) {
+  state.clear_principal_variation(ply);
   if (!state.enter_node()) {
     return std::nullopt;
   }
 
-  Bitboard legal_moves = position.legal_moves();
-  if (depth == 0 || legal_moves == 0) {
-    return NodeResult{.value = evaluate(position)};
+  const Bitboard legal_moves = position.legal_moves();
+  std::optional<Move> cached_move;
+  if constexpr (UseTable) {
+    const std::optional<TranspositionEntry> cached = state.probe(view.key, view.hash);
+    if (cached.has_value()) {
+      cached_move = remap_cached_move(*cached, view, legal_moves);
+      const bool can_return_score =
+          cached->value.bound == TranspositionBound::kExact && cached->value.depth >= depth;
+      const bool has_required_move = depth == 0 || legal_moves == 0 || cached_move.has_value();
+      if (can_return_score && has_required_move) {
+        state.record_tt_cutoff();
+        if (depth > 0 && cached_move.has_value()) {
+          state.set_cached_principal_variation(ply, *cached_move);
+        }
+        return NodeResult{.value = cached->value.score, .best_move = cached_move};
+      }
+    }
   }
 
+  if (depth == 0 || legal_moves == 0) {
+    const Score value = evaluate(position);
+    if constexpr (UseTable) {
+      store_exact(state, view, depth, value, std::nullopt);
+    }
+    return NodeResult{.value = value};
+  }
+
+  policy.start_node(ply);
+  Bitboard remaining_moves = legal_moves;
   NodeResult best;
   bool found_move = false;
 
-  while (legal_moves != 0) {
-    const int move_index = std::countr_zero(legal_moves);
-    legal_moves &= legal_moves - Bitboard{1};
+  const auto search_move = [&](Move move) -> bool {
+    const Bitboard equivalent_moves = remaining_moves & policy.move_orbit(ply, move.square);
+    assert((equivalent_moves & square_bit(move.square)) != 0);
+    remaining_moves &= ~equivalent_moves;
+    SearchPositionView<Policy, UseTable> child_view;
+    if constexpr (UseTable || Policy::kUsesSymmetry) {
+      child_view = policy.preview_move(view, move.square);
+    }
 
-    const Move move{.square = square_from_index(move_index)};
+    if constexpr (Policy::kUsesSymmetry) {
+      if (!policy.remember_child(ply, child_view)) {
+        state.record_symmetry_prunes(std::popcount(equivalent_moves));
+        return true;
+      }
+      state.record_symmetry_prunes(std::popcount(equivalent_moves) - 1);
+    }
+
     MoveUndo undo;
     const bool made_move = position.make_move(move.square, undo);
     assert(made_move);
     if (!made_move) {
-      continue;
+      return false;
     }
+    policy.make_move(move.square);
 
-    std::optional<NodeResult> child = negamax(position, depth - 1, state);
+    std::optional<NodeResult> child =
+        negamax<Policy, UseTable>(position, depth - 1, ply + 1, state, policy, child_view);
+
+    policy.unmake_move(move.square);
     position.unmake_move(undo);
-
     if (!child.has_value()) {
-      return std::nullopt;
+      return false;
     }
 
     const Score value = -child->value;
     if (!found_move || value > best.value) {
       found_move = true;
       best.value = value;
-      set_principal_variation(best, move, *child);
+      best.best_move = move;
+      state.prepend_principal_variation(ply, move);
+    }
+    return true;
+  };
+
+  if (cached_move.has_value() && !search_move(*cached_move)) {
+    return std::nullopt;
+  }
+
+  while (remaining_moves != 0) {
+    const int move_index = std::countr_zero(remaining_moves);
+    const Move move{.square = square_from_index(move_index)};
+    if (!search_move(move)) {
+      return std::nullopt;
     }
   }
 
   assert(found_move);
+  if constexpr (UseTable) {
+    store_exact(state, view, depth, best.value, best.best_move);
+  }
   return best;
 }
 
-void commit_iteration(engine::EngineResult& result, NodeResult iteration, int depth) {
-  assert(!iteration.principal_variation.empty());
-  result.best_move = iteration.principal_variation.front();
+[[nodiscard]] FixedPrincipalVariation reconstruct_identity_principal_variation(
+    const Position& root, int depth, Move best_move, const TranspositionTable& table) {
+  FixedPrincipalVariation principal_variation;
+  if (depth <= 0) {
+    return principal_variation;
+  }
+
+  Position position = root;
+  if (!position.play(best_move.square)) {
+    return principal_variation;
+  }
+  principal_variation.moves[principal_variation.size++] = best_move;
+
+  for (int remaining_depth = depth - 1; remaining_depth > 0; --remaining_depth) {
+    const CanonicalPositionView view = IdentityPolicy::current_view(position);
+    const std::optional<TranspositionEntry> cached = table.probe(view.key, view.hash);
+    if (!cached.has_value() || cached->value.bound != TranspositionBound::kExact ||
+        cached->value.depth < remaining_depth) {
+      break;
+    }
+
+    const std::optional<Move> move = remap_cached_move(*cached, view, position.legal_moves());
+    if (!move.has_value() || !position.play(move->square)) {
+      break;
+    }
+    principal_variation.moves[principal_variation.size++] = *move;
+  }
+
+  return principal_variation;
+}
+
+[[nodiscard]] FixedPrincipalVariation reconstruct_d4_principal_variation(
+    const Position& root, int depth, Move best_move, const TranspositionTable& table) {
+  FixedPrincipalVariation principal_variation;
+  if (depth <= 0) {
+    return principal_variation;
+  }
+
+  Position position = root;
+  PositionSymmetryTracker tracker{root.key()};
+  if (!position.play(best_move.square) || !tracker.make_move(best_move.square)) {
+    return principal_variation;
+  }
+  principal_variation.moves[principal_variation.size++] = best_move;
+
+  for (int remaining_depth = depth - 1; remaining_depth > 0; --remaining_depth) {
+    const CanonicalPositionView view = tracker.canonical_view();
+    const std::optional<TranspositionEntry> cached = table.probe(view.key, view.hash);
+    if (!cached.has_value() || cached->value.bound != TranspositionBound::kExact ||
+        cached->value.depth < remaining_depth) {
+      break;
+    }
+
+    const std::optional<Move> move = remap_cached_move(*cached, view, position.legal_moves());
+    if (!move.has_value() || !position.play(move->square) || !tracker.make_move(move->square)) {
+      break;
+    }
+    principal_variation.moves[principal_variation.size++] = *move;
+  }
+
+  return principal_variation;
+}
+
+template <typename Policy>
+[[nodiscard]] FixedPrincipalVariation reconstruct_principal_variation(
+    const Position& root, int depth, Move best_move, const TranspositionTable& table) {
+  if constexpr (Policy::kUsesSymmetry) {
+    return reconstruct_d4_principal_variation(root, depth, best_move, table);
+  } else {
+    return reconstruct_identity_principal_variation(root, depth, best_move, table);
+  }
+}
+
+template <typename Policy, bool UseTable>
+void commit_iteration(engine::EngineResult& result, const NodeResult& iteration,
+                      const SearchState& state, const Position& root, int depth,
+                      const TranspositionTable& table) {
+  assert(iteration.best_move.has_value());
+  if (!iteration.best_move.has_value()) {
+    return;
+  }
+
+  result.best_move = iteration.best_move;
   result.score = iteration.value;
   result.depth = depth;
-  result.principal_variation = std::move(iteration.principal_variation);
+
+  FixedPrincipalVariation principal_variation;
+  if constexpr (!UseTable) {
+    principal_variation.moves = state.principal_variation(0);
+    principal_variation.size = state.principal_variation_length(0);
+  } else {
+    principal_variation =
+        reconstruct_principal_variation<Policy>(root, depth, *iteration.best_move, table);
+  }
+
+  if (principal_variation.size == 0) {
+    principal_variation.moves[0] = *iteration.best_move;
+    principal_variation.size = 1;
+  }
+  result.principal_variation.assign(
+      principal_variation.moves.begin(),
+      principal_variation.moves.begin() + static_cast<std::ptrdiff_t>(principal_variation.size));
+}
+
+void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
+                      const TranspositionTable& table) {
+  if (!info) {
+    return;
+  }
+
+  std::ostringstream diagnostics;
+  diagnostics << "ttprobes " << state.tt_probes() << " tthits " << state.tt_hits() << " ttcutoffs "
+              << state.tt_cutoffs() << " ttstores " << state.tt_stores() << " symmetryprunes "
+              << state.symmetry_prunes() << " hashentries " << table.size() << " hashcapacity "
+              << table.capacity() << " hashbytes " << table.storage_bytes();
+  info(diagnostics.str());
+}
+
+template <typename Policy, bool UseTable>
+[[nodiscard]] engine::EngineResult run_timed_search(const Position& position,
+                                                    std::chrono::milliseconds move_time,
+                                                    const engine::InfoSink& info,
+                                                    TranspositionTable& table,
+                                                    engine::EngineResult result) {
+  SearchState state{move_time, table};
+  Position search_position = position;
+  Policy policy{search_position};
+  const int maximum_depth = search_position.board().empty_count();
+  SearchPositionView<Policy, UseTable> root_view;
+  if constexpr (UseTable || Policy::kUsesSymmetry) {
+    root_view = policy.current_view(search_position);
+  }
+
+  for (int depth = 1; depth <= maximum_depth; ++depth) {
+    std::optional<NodeResult> iteration =
+        negamax<Policy, UseTable>(search_position, depth, 0, state, policy, root_view);
+    if (!iteration.has_value()) {
+      break;
+    }
+
+    commit_iteration<Policy, UseTable>(result, *iteration, state, position, depth, table);
+  }
+
+  result.nodes = state.nodes();
+  emit_diagnostics(info, state, table);
+  return result;
 }
 
 }  // namespace
 
-void Search::new_game() noexcept {}
+Search::Search(SearchOptions options) : use_symmetry_(options.use_symmetry) {
+  table_.resize_bytes(options.hash_bytes);
+}
+
+void Search::new_game() noexcept { table_.clear(); }
+
+const TranspositionTable& Search::transposition_table() const noexcept { return table_; }
 
 engine::EngineResult Search::run(const Position& position, const engine::EngineLimits& limits,
                                  const engine::InfoSink& info) {
   const Bitboard legal_moves = position.legal_moves();
   if (legal_moves == 0) {
+    if (limits.move_time.has_value() && limits.move_time->count() > 0) {
+      SearchState state{*limits.move_time, table_};
+      emit_diagnostics(info, state, table_);
+    }
     return {};
   }
 
@@ -124,21 +563,20 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
     return result;
   }
 
-  SearchState state{*limits.move_time};
-  Position search_position = position;
-  const int maximum_depth = search_position.board().empty_count();
-
-  for (int depth = 1; depth <= maximum_depth; ++depth) {
-    std::optional<NodeResult> iteration = negamax(search_position, depth, state);
-    if (!iteration.has_value()) {
-      break;
+  if (use_symmetry_) {
+    if (table_.capacity() == 0) {
+      return run_timed_search<D4Policy, false>(position, *limits.move_time, info, table_,
+                                               std::move(result));
     }
-
-    commit_iteration(result, std::move(*iteration), depth);
+    return run_timed_search<D4Policy, true>(position, *limits.move_time, info, table_,
+                                            std::move(result));
   }
-
-  result.nodes = state.nodes();
-  return result;
+  if (table_.capacity() == 0) {
+    return run_timed_search<IdentityPolicy, false>(position, *limits.move_time, info, table_,
+                                                   std::move(result));
+  }
+  return run_timed_search<IdentityPolicy, true>(position, *limits.move_time, info, table_,
+                                                std::move(result));
 }
 
 }  // namespace poe2::minimax

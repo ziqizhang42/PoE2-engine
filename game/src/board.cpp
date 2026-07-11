@@ -272,8 +272,7 @@ bool Position::make_move(Square square, MoveUndo& undo) noexcept {
 
   mutable_score_for_player(scores_, player) += update.delta;
   pieces_in_lines_[index] |= update.pieces_in_lines;
-  hash_ ^= zobrist_piece_hash(player, square);
-  hash_ ^= kZobristSideToMoveHash;
+  hash_ = update_position_hash(hash_, player, square);
   side_to_move_ = opponent(side_to_move_);
   ++ply_;
   return true;
@@ -321,6 +320,11 @@ PositionHash position_key_hash(PositionKey key) noexcept {
   }
 
   return hash;
+}
+
+PositionHash update_position_hash(PositionHash hash, Player player, Square square) noexcept {
+  assert(is_valid(square));
+  return hash ^ zobrist_piece_hash(player, square) ^ kZobristSideToMoveHash;
 }
 
 Player leader_after_handicap(ScoreByPlayer scores) noexcept {
