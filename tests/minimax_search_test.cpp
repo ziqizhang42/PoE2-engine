@@ -41,6 +41,7 @@ struct SearchDiagnostics {
   std::uint64_t tt_probes = 0;
   std::uint64_t tt_hits = 0;
   std::uint64_t tt_cutoffs = 0;
+  std::uint64_t alpha_beta_cutoffs = 0;
   std::uint64_t tt_stores = 0;
   std::uint64_t symmetry_prunes = 0;
   std::uint64_t hash_entries = 0;
@@ -60,6 +61,8 @@ struct SearchDiagnostics {
       diagnostics.tt_hits = value;
     } else if (name == "ttcutoffs") {
       diagnostics.tt_cutoffs = value;
+    } else if (name == "abcutoffs") {
+      diagnostics.alpha_beta_cutoffs = value;
     } else if (name == "ttstores") {
       diagnostics.tt_stores = value;
     } else if (name == "symmetryprunes") {
@@ -218,6 +221,86 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   REQUIRE(result.score == value_for(final_position, perspective));
 }
 
+TEST_CASE("fail-soft alpha-beta prunes a deterministic four-move search", "[minimax][alphabeta]") {
+  const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
+                                       poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
+  const poe2::Position position = position_with_empty_squares(empty_squares);
+  poe2::minimax::Search search{
+      poe2::minimax::SearchOptions{.hash_bytes = 0, .use_symmetry = false}};
+
+  SearchDiagnostics diagnostics;
+  const poe2::engine::EngineResult result =
+      run_with_diagnostics(search, position, std::chrono::milliseconds{100}, diagnostics);
+  const std::vector<poe2::Move> expected_principal_variation{
+      poe2::Move{.square = {0, 0}},
+      poe2::Move{.square = {0, 1}},
+      poe2::Move{.square = {0, 2}},
+      poe2::Move{.square = {0, 3}},
+  };
+
+  REQUIRE(result.depth == 4);
+  REQUIRE(result.score == -41);
+  REQUIRE(result.best_move == poe2::Move{.square = {0, 0}});
+  REQUIRE(result.principal_variation == expected_principal_variation);
+  REQUIRE(result.nodes == 68);
+  REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
+  REQUIRE(diagnostics.tt_probes == 0);
+  REQUIRE(diagnostics.symmetry_prunes == 0);
+}
+
+TEST_CASE("fail-soft bounds are cached and reused", "[minimax][alphabeta][tt]") {
+  const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
+                                       poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
+  const poe2::Position position = position_with_empty_squares(empty_squares);
+  poe2::minimax::Search search{
+      poe2::minimax::SearchOptions{.hash_bytes = poe2::minimax::kMebibyte, .use_symmetry = false}};
+
+  const poe2::engine::EngineResult first =
+      search.run(position, timed_limits(std::chrono::milliseconds{100}), {});
+
+  const auto require_cached_move_legal = [&search](const poe2::Position& cached_position, int depth,
+                                                   poe2::TranspositionBound bound) {
+    const std::optional<poe2::TranspositionEntry> entry =
+        search.transposition_table().probe(cached_position);
+    REQUIRE(entry.has_value());
+    REQUIRE(entry->value.depth == depth);
+    REQUIRE(entry->value.bound == bound);
+    REQUIRE(entry->value.best_move.has_value());
+    REQUIRE((cached_position.legal_moves() & poe2::square_bit(*entry->value.best_move)) != 0);
+    return *entry;
+  };
+
+  const poe2::TranspositionEntry root_entry =
+      require_cached_move_legal(position, 4, poe2::TranspositionBound::kExact);
+  REQUIRE(root_entry.value.score == -41);
+
+  poe2::Position b1_child = position;
+  REQUIRE(b1_child.play({0, 1}));
+  static_cast<void>(require_cached_move_legal(b1_child, 3, poe2::TranspositionBound::kLower));
+
+  poe2::Position b1_a1_descendant = b1_child;
+  REQUIRE(b1_a1_descendant.play({0, 0}));
+  static_cast<void>(
+      require_cached_move_legal(b1_a1_descendant, 2, poe2::TranspositionBound::kUpper));
+
+  const poe2::engine::EngineResult second =
+      search.run(position, timed_limits(std::chrono::milliseconds{100}), {});
+  REQUIRE(second.depth == 4);
+  REQUIRE(second.score == first.score);
+  REQUIRE(second.best_move == first.best_move);
+  REQUIRE(second.principal_variation == first.principal_variation);
+
+  const std::optional<poe2::TranspositionEntry> repeated_root_entry =
+      search.transposition_table().probe(position);
+  if (!repeated_root_entry.has_value()) {
+    FAIL("repeated search should preserve the completed root entry");
+    return;
+  }
+  REQUIRE(repeated_root_entry->value.depth == 4);
+  REQUIRE(repeated_root_entry->value.bound == poe2::TranspositionBound::kExact);
+  REQUIRE(repeated_root_entry->value.score == first.score);
+}
+
 TEST_CASE("minimax search handles a full board", "[minimax]") {
   const poe2::Position position = position_with_empty_squares(0);
 
@@ -335,6 +418,7 @@ TEST_CASE("an interrupted root is not stored at its unfinished depth", "[minimax
     return;
   }
   REQUIRE(root_entry->value.depth == result.depth);
+  REQUIRE(root_entry->value.bound == poe2::TranspositionBound::kExact);
 }
 
 TEST_CASE("newgame clears cached entries while per-search counters reset", "[minimax][tt]") {
@@ -356,6 +440,7 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
   REQUIRE(idle_diagnostics.tt_probes == 0);
   REQUIRE(idle_diagnostics.tt_hits == 0);
   REQUIRE(idle_diagnostics.tt_cutoffs == 0);
+  REQUIRE(idle_diagnostics.alpha_beta_cutoffs == 0);
   REQUIRE(idle_diagnostics.tt_stores == 0);
   REQUIRE(idle_diagnostics.symmetry_prunes == 0);
   REQUIRE(idle_diagnostics.hash_entries == populated_entries);

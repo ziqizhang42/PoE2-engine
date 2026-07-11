@@ -5,6 +5,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -21,6 +22,7 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t kChildKeySetCapacity = 64;
 constexpr std::size_t kPlyCount = static_cast<std::size_t>(kCellCount) + 1;
+constexpr Score kSearchInfinity = std::numeric_limits<Score>::max();
 static_assert(std::has_single_bit(kChildKeySetCapacity));
 static_assert(kChildKeySetCapacity > static_cast<std::size_t>(kCellCount));
 
@@ -49,6 +51,7 @@ class SearchState final {
   }
 
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
+  void record_alpha_beta_cutoff() noexcept { ++alpha_beta_cutoffs_; }
 
   void store(PositionKey key, PositionHash hash, TranspositionValue value) {
     if (table_.store(key, hash, value)) {
@@ -94,6 +97,7 @@ class SearchState final {
   [[nodiscard]] std::uint64_t tt_probes() const noexcept { return tt_probes_; }
   [[nodiscard]] std::uint64_t tt_hits() const noexcept { return tt_hits_; }
   [[nodiscard]] std::uint64_t tt_cutoffs() const noexcept { return tt_cutoffs_; }
+  [[nodiscard]] std::uint64_t alpha_beta_cutoffs() const noexcept { return alpha_beta_cutoffs_; }
   [[nodiscard]] std::uint64_t tt_stores() const noexcept { return tt_stores_; }
   [[nodiscard]] std::uint64_t symmetry_prunes() const noexcept { return symmetry_prunes_; }
 
@@ -106,6 +110,7 @@ class SearchState final {
   std::uint64_t tt_probes_ = 0;
   std::uint64_t tt_hits_ = 0;
   std::uint64_t tt_cutoffs_ = 0;
+  std::uint64_t alpha_beta_cutoffs_ = 0;
   std::uint64_t tt_stores_ = 0;
   std::uint64_t symmetry_prunes_ = 0;
 };
@@ -263,8 +268,8 @@ using SearchPositionView =
   return Move{.square = live_square};
 }
 
-void store_exact(SearchState& state, const CanonicalPositionView& view, int depth, Score value,
-                 std::optional<Move> best_move) {
+void store_result(SearchState& state, const CanonicalPositionView& view, int depth, Score value,
+                  TranspositionBound bound, std::optional<Move> best_move) {
   std::optional<Square> canonical_best_move;
   if (best_move.has_value()) {
     canonical_best_move = transform_square(view.transform, best_move->square);
@@ -274,35 +279,52 @@ void store_exact(SearchState& state, const CanonicalPositionView& view, int dept
               TranspositionValue{
                   .score = value,
                   .depth = depth,
-                  .bound = TranspositionBound::kExact,
+                  .bound = bound,
                   .best_move = canonical_best_move,
               });
 }
 
 template <typename Policy, bool UseTable>
-[[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, int ply,
-                                                SearchState& state, Policy& policy,
+[[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, int ply, Score alpha,
+                                                Score beta, SearchState& state, Policy& policy,
                                                 SearchPositionView<Policy, UseTable> view) {
   state.clear_principal_variation(ply);
   if (!state.enter_node()) {
     return std::nullopt;
   }
 
+  const Score original_alpha = alpha;
+  const Score original_beta = beta;
   const Bitboard legal_moves = position.legal_moves();
   std::optional<Move> cached_move;
   if constexpr (UseTable) {
     const std::optional<TranspositionEntry> cached = state.probe(view.key, view.hash);
     if (cached.has_value()) {
       cached_move = remap_cached_move(*cached, view, legal_moves);
-      const bool can_return_score =
-          cached->value.bound == TranspositionBound::kExact && cached->value.depth >= depth;
       const bool has_required_move = depth == 0 || legal_moves == 0 || cached_move.has_value();
-      if (can_return_score && has_required_move) {
-        state.record_tt_cutoff();
-        if (depth > 0 && cached_move.has_value()) {
-          state.set_cached_principal_variation(ply, *cached_move);
+      if (cached->value.depth >= depth) {
+        if (cached->value.bound == TranspositionBound::kExact && has_required_move) {
+          state.record_tt_cutoff();
+          if (depth > 0 && cached_move.has_value()) {
+            state.set_cached_principal_variation(ply, *cached_move);
+          }
+          return NodeResult{.value = cached->value.score, .best_move = cached_move};
         }
-        return NodeResult{.value = cached->value.score, .best_move = cached_move};
+
+        if (cached->value.bound == TranspositionBound::kLower && cached->value.score > alpha) {
+          alpha = cached->value.score;
+        } else if (cached->value.bound == TranspositionBound::kUpper &&
+                   cached->value.score < beta) {
+          beta = cached->value.score;
+        }
+
+        if (alpha >= beta) {
+          state.record_tt_cutoff();
+          if (depth > 0 && cached_move.has_value()) {
+            state.set_cached_principal_variation(ply, *cached_move);
+          }
+          return NodeResult{.value = cached->value.score, .best_move = cached_move};
+        }
       }
     }
   }
@@ -310,7 +332,7 @@ template <typename Policy, bool UseTable>
   if (depth == 0 || legal_moves == 0) {
     const Score value = evaluate(position);
     if constexpr (UseTable) {
-      store_exact(state, view, depth, value, std::nullopt);
+      store_result(state, view, depth, value, TranspositionBound::kExact, std::nullopt);
     }
     return NodeResult{.value = value};
   }
@@ -345,8 +367,8 @@ template <typename Policy, bool UseTable>
     }
     policy.make_move(move.square);
 
-    std::optional<NodeResult> child =
-        negamax<Policy, UseTable>(position, depth - 1, ply + 1, state, policy, child_view);
+    std::optional<NodeResult> child = negamax<Policy, UseTable>(position, depth - 1, ply + 1, -beta,
+                                                                -alpha, state, policy, child_view);
 
     policy.unmake_move(move.square);
     position.unmake_move(undo);
@@ -361,6 +383,12 @@ template <typename Policy, bool UseTable>
       best.best_move = move;
       state.prepend_principal_variation(ply, move);
     }
+    if (value > alpha) {
+      alpha = value;
+    }
+    if (alpha >= beta) {
+      state.record_alpha_beta_cutoff();
+    }
     return true;
   };
 
@@ -368,7 +396,7 @@ template <typename Policy, bool UseTable>
     return std::nullopt;
   }
 
-  while (remaining_moves != 0) {
+  while (remaining_moves != 0 && alpha < beta) {
     const int move_index = std::countr_zero(remaining_moves);
     const Move move{.square = square_from_index(move_index)};
     if (!search_move(move)) {
@@ -378,7 +406,13 @@ template <typename Policy, bool UseTable>
 
   assert(found_move);
   if constexpr (UseTable) {
-    store_exact(state, view, depth, best.value, best.best_move);
+    TranspositionBound bound = TranspositionBound::kExact;
+    if (best.value <= original_alpha) {
+      bound = TranspositionBound::kUpper;
+    } else if (best.value >= original_beta) {
+      bound = TranspositionBound::kLower;
+    }
+    store_result(state, view, depth, best.value, bound, best.best_move);
   }
   return best;
 }
@@ -495,9 +529,10 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
 
   std::ostringstream diagnostics;
   diagnostics << "ttprobes " << state.tt_probes() << " tthits " << state.tt_hits() << " ttcutoffs "
-              << state.tt_cutoffs() << " ttstores " << state.tt_stores() << " symmetryprunes "
-              << state.symmetry_prunes() << " hashentries " << table.size() << " hashcapacity "
-              << table.capacity() << " hashbytes " << table.storage_bytes();
+              << state.tt_cutoffs() << " abcutoffs " << state.alpha_beta_cutoffs() << " ttstores "
+              << state.tt_stores() << " symmetryprunes " << state.symmetry_prunes()
+              << " hashentries " << table.size() << " hashcapacity " << table.capacity()
+              << " hashbytes " << table.storage_bytes();
   info(diagnostics.str());
 }
 
@@ -517,8 +552,8 @@ template <typename Policy, bool UseTable>
   }
 
   for (int depth = 1; depth <= maximum_depth; ++depth) {
-    std::optional<NodeResult> iteration =
-        negamax<Policy, UseTable>(search_position, depth, 0, state, policy, root_view);
+    std::optional<NodeResult> iteration = negamax<Policy, UseTable>(
+        search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view);
     if (!iteration.has_value()) {
       break;
     }
