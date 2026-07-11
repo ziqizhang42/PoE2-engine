@@ -20,7 +20,7 @@ SPRT_ALT ?= 0.55
 SPRT_ALPHA ?= 0.05
 SPRT_BETA ?= 0.05
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check clean debug release require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
+.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
 
 configure:
 	cmake --preset $(PRESET)
@@ -44,13 +44,21 @@ tidy-fix: build
 	cmake --build --preset $(PRESET) --target tidy-fix
 
 fix:
-	$(MAKE) format PRESET=$(PRESET)
 	$(MAKE) tidy-fix PRESET=$(PRESET)
+	$(MAKE) format PRESET=$(PRESET)
 
 check:
 	$(MAKE) test PRESET=$(PRESET)
 	$(MAKE) format-check PRESET=$(PRESET)
 	$(MAKE) tidy PRESET=$(PRESET)
+
+full-check:
+	$(MAKE) check PRESET=debug
+	$(MAKE) check PRESET=release
+
+ready:
+	$(MAKE) fix PRESET=debug
+	$(MAKE) full-check
 
 clean:
 	cmake -E rm -rf build/debug build/release

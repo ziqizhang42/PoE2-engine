@@ -7,6 +7,7 @@ LLVM provides clang-format and clang-tidy.
 ## Commands
 
 ```bash
+make ready
 make
 make PRESET=release
 make format
@@ -20,8 +21,7 @@ make eval-gate BASE=<baseline-build-id> PRESET=release
 make clean
 ```
 
-`make` defaults to the debug preset and runs configure, build, tests, format check, and clang-tidy. Use `PRESET=release` for the release preset.
-`make format`, `make tidy-fix`, and `make fix` edit source files.
+`make ready` is the standard post-edit command: it fixes formatting/tidy issues, then builds, tests, and checks Debug and Release.
 
 ## Release Optimization
 
