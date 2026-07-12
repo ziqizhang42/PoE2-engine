@@ -177,13 +177,16 @@ void print_usage(std::ostream& output) {
       << "  poe2_runner series --engine-one <command> --engine-two <command> --games <n>\n"
       << "                     [--timeout-ms <ms>] [--fixed-sides] [--summary-only]\n"
       << "                     [--opening-book <path>] [--shuffle-openings]\n"
-      << "                     [--verbose-games] [--sprt-stop] [--sprt-null <p>] [--sprt-alt <p>]\n"
-      << "                     [--sprt-alpha <p>] [--sprt-beta <p>]\n"
+      << "                     [--verbose-games] [--sequential-stop] [--sequential-null <p>] "
+         "[--sequential-alt <p>]\n"
+      << "                     [--sequential-alpha <p>] [--sequential-beta <p>]\n"
       << "                     [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
       << "  poe2_runner eval --new-build <dir> --base <id|dir|binary>\n"
       << "                   --new-engine <name> --base-engine <name>\n"
       << "                   [--new-engine-args <args>] [--base-engine-args <args>]\n"
-      << "                   [--games <n>] [--timeout-ms <ms>] [--sprt-stop]\n"
+      << "                   [--games <n>] [--timeout-ms <ms>] [--sequential-stop]\n"
+      << "                   [--sequential-null <p>] [--sequential-alt <p>]\n"
+      << "                   [--sequential-alpha <p>] [--sequential-beta <p>]\n"
       << "                   [--opening-book <path>] [--shuffle-openings]\n"
       << "                   [--require-accept-alt] [--ledger <path>] [--no-ledger]\n"
       << "                   [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
@@ -316,52 +319,52 @@ void print_usage(std::ostream& output) {
       options.verbose_games = true;
       continue;
     }
-    if (argument == "--sprt-stop") {
-      options.sprt_stop = true;
+    if (argument == "--sequential-stop") {
+      options.sequential_stop = true;
       continue;
     }
-    if (argument == "--sprt-null") {
+    if (argument == "--sequential-null") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-null requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
       }
       const std::optional<double> rate = parse_probability(argv[++index]);
       if (!rate.has_value()) {
-        throw std::invalid_argument{"--sprt-null requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
       }
-      options.sprt_null_rate = *rate;
+      options.sequential_null_rate = *rate;
       continue;
     }
-    if (argument == "--sprt-alt") {
+    if (argument == "--sequential-alt") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-alt requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
       }
       const std::optional<double> rate = parse_probability(argv[++index]);
       if (!rate.has_value()) {
-        throw std::invalid_argument{"--sprt-alt requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
       }
-      options.sprt_alt_rate = *rate;
+      options.sequential_alt_rate = *rate;
       continue;
     }
-    if (argument == "--sprt-alpha") {
+    if (argument == "--sequential-alpha") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-alpha requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alpha requires a probability between 0 and 1"};
       }
       const std::optional<double> alpha = parse_probability(argv[++index]);
       if (!alpha.has_value()) {
-        throw std::invalid_argument{"--sprt-alpha requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alpha requires a probability between 0 and 1"};
       }
-      options.sprt_alpha = *alpha;
+      options.sequential_alpha = *alpha;
       continue;
     }
-    if (argument == "--sprt-beta") {
+    if (argument == "--sequential-beta") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-beta requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-beta requires a probability between 0 and 1"};
       }
       const std::optional<double> beta = parse_probability(argv[++index]);
       if (!beta.has_value()) {
-        throw std::invalid_argument{"--sprt-beta requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-beta requires a probability between 0 and 1"};
       }
-      options.sprt_beta = *beta;
+      options.sequential_beta = *beta;
       continue;
     }
     if (parse_go_limit_option(argument, index, argc, argv, options.go_limits)) {
@@ -377,8 +380,8 @@ void print_usage(std::ostream& output) {
   if (options.engine_two_command.empty()) {
     throw std::invalid_argument{"missing --engine-two command"};
   }
-  if (options.sprt_alt_rate <= options.sprt_null_rate) {
-    throw std::invalid_argument{"--sprt-alt must be greater than --sprt-null"};
+  if (options.sequential_alt_rate <= options.sequential_null_rate) {
+    throw std::invalid_argument{"--sequential-alt must be greater than --sequential-null"};
   }
 
   return options;
@@ -409,9 +412,11 @@ int run_series(int argc, char** argv) {
             << (options.opening_book.path.empty() ? "none" : options.opening_book.path)
             << " opening_count=" << options.opening_book.lines.size()
             << " shuffle_openings=" << (options.shuffle_openings ? 1 : 0)
-            << " sprt_stop=" << (options.sprt_stop ? 1 : 0)
-            << " sprt_null=" << options.sprt_null_rate << " sprt_alt=" << options.sprt_alt_rate
-            << " sprt_alpha=" << options.sprt_alpha << " sprt_beta=" << options.sprt_beta;
+            << " sequential_stop=" << (options.sequential_stop ? 1 : 0)
+            << " sequential_null=" << options.sequential_null_rate
+            << " sequential_alt=" << options.sequential_alt_rate
+            << " sequential_alpha=" << options.sequential_alpha
+            << " sequential_beta=" << options.sequential_beta;
   print_go_limits(options.go_limits, std::cout);
   std::cout << '\n';
   std::cout << "engine engine_one " << options.engine_one_command << '\n';

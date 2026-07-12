@@ -36,21 +36,23 @@ This target:
 - builds and tests the current commit,
 - runs the current engine as `engine_one` against the baseline,
 - randomly shuffles the opening suite while preserving adjacent side-swapped pairs,
-- enables SPRT early stopping,
+- enables pair-aware sequential early stopping,
 - appends one row to `eval/results.csv`,
-- fails unless SPRT reports `accept_alt`.
+- fails unless the sequential test reports `accept_alt`.
 
 Default gate settings are intentionally simple:
 
 ```text
 BOOK=eval/openings/systematic-2ply-v1.txt
-SPRT_NULL=0.50
-SPRT_ALT=0.55
-SPRT_ALPHA=0.05
-SPRT_BETA=0.05
+SEQUENTIAL_NULL=0.50
+SEQUENTIAL_ALT=0.55
+SEQUENTIAL_ALPHA=0.05
+SEQUENTIAL_BETA=0.05
 GO_MOVETIME_MS=900
 TIMEOUT_MS=1000
 ```
+
+Analysis version 1 uses completed side-swapped opening pairs. It reports an anytime-valid betting confidence sequence and uses a betting e-process for early stopping. This avoids treating the two correlated games from one opening as independent. The configured alpha and beta bounds remain valid when evidence is checked after every completed pair, without requiring an assumed pair split rate.
 
 Adjust them at the command line:
 
@@ -65,7 +67,7 @@ make eval-smoke BASE=build/by-commit/000015-d74d255e5cfd/release \
   NEW_ENGINE=poe2_greedy \
   BASE_ENGINE=poe2_random_legal \
   BASE_ENGINE_ARGS='--seed 1' \
-  GAMES=630
+  SMOKE_GAMES=630
 ```
 
 ## Opening Suites
@@ -131,9 +133,9 @@ The committed master ledger is:
 eval/results.csv
 ```
 
-It stores one summary row per evaluation run. Keep the raw logs in `build/eval/runs/`; they are intentionally not committed.
-Each row records both artifact identities as `new_id + new_engine + new_engine_args` and
-`base_id + base_engine + base_engine_args`.
+It stores one summary row per evaluation run. Keep the raw logs in `build/eval/runs/`; they are intentionally not committed. Each row records both artifact identities as `new_id + new_engine + new_engine_args` and `base_id + base_engine + base_engine_args`.
+
+Every ledger row includes the analysis version, statistical unit, sample and game counts, five pair-score counts, confidence method, sequential-test method, and an analysis note. Historical game-level rows are retained as `analysis_version=0` and carry an `* legacy` note; their original rates, confidence intervals, and decisions are approximate context rather than results directly comparable with pair-aware v1 rows. Pair-score fields are blank where the old ledger did not record them. `summary.json` contains the current method metadata and normalized statistical-score histogram. `games.csv` remains the raw source of truth. All newly generated rows use only the pair-aware v1 analysis path.
 
 ## Direct Runner Usage
 
@@ -151,7 +153,7 @@ build/by-commit/000015-d74d255e5cfd/release/runner/poe2_runner eval \
   --games 2000 \
   --go-movetime-ms 100 \
   --timeout-ms 200 \
-  --sprt-stop \
+  --sequential-stop \
   --require-accept-alt
 ```
 

@@ -15,10 +15,10 @@ GAMES ?= 1000
 SMOKE_GAMES ?= 100
 TIMEOUT_MS ?= 1000
 GO_MOVETIME_MS ?= 900
-SPRT_NULL ?= 0.50
-SPRT_ALT ?= 0.55
-SPRT_ALPHA ?= 0.05
-SPRT_BETA ?= 0.05
+SEQUENTIAL_NULL ?= 0.50
+SEQUENTIAL_ALT ?= 0.55
+SEQUENTIAL_ALPHA ?= 0.05
+SEQUENTIAL_BETA ?= 0.05
 
 .PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
 
@@ -112,11 +112,11 @@ eval-gate: require-base require-eval-engines git-test
 	  --games $(GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS) \
-	  --sprt-stop \
-	  --sprt-null $(SPRT_NULL) \
-	  --sprt-alt $(SPRT_ALT) \
-	  --sprt-alpha $(SPRT_ALPHA) \
-	  --sprt-beta $(SPRT_BETA) \
+	  --sequential-stop \
+	  --sequential-null $(SEQUENTIAL_NULL) \
+	  --sequential-alt $(SEQUENTIAL_ALT) \
+	  --sequential-alpha $(SEQUENTIAL_ALPHA) \
+	  --sequential-beta $(SEQUENTIAL_BETA) \
 	  --require-accept-alt
 
 eval-smoke: require-base require-eval-engines git-test

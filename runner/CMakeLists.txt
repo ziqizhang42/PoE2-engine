@@ -52,7 +52,7 @@ add_test(
           --engine-one $<TARGET_FILE:poe2_first_legal>
           --engine-two "$<TARGET_FILE:poe2_random_legal> --seed 1"
           --games 4
-          --sprt-stop
+          --sequential-stop
           --timeout-ms 1000
           --go-depth 1
           --go-movetime-ms 100

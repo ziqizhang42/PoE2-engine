@@ -1,6 +1,7 @@
 #ifndef POE2_MATCH_RUNNER_HPP
 #define POE2_MATCH_RUNNER_HPP
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <iosfwd>
@@ -16,10 +17,11 @@ namespace poe2::match_runner {
 
 inline constexpr std::chrono::milliseconds kDefaultMoveTimeout{5000};
 inline constexpr double kDefaultConfidenceLevel = 0.95;
-inline constexpr double kDefaultSprtNullRate = 0.50;
-inline constexpr double kDefaultSprtAltRate = 0.55;
-inline constexpr double kDefaultSprtAlpha = 0.05;
-inline constexpr double kDefaultSprtBeta = 0.05;
+inline constexpr double kDefaultSequentialNullRate = 0.50;
+inline constexpr double kDefaultSequentialAltRate = 0.55;
+inline constexpr double kDefaultSequentialAlpha = 0.05;
+inline constexpr double kDefaultSequentialBeta = 0.05;
+inline constexpr int kAnalysisVersion = 1;
 
 struct MatchOptions {
   std::string player_one_command;
@@ -50,11 +52,16 @@ enum class MatchEndReason : std::uint8_t {
   kProtocolError,
 };
 
-enum class SprtDecision : std::uint8_t {
+enum class SequentialDecision : std::uint8_t {
   kContinue,
   kAcceptNull,
   kAcceptAlternative,
   kInvalid,
+};
+
+enum class StatisticalUnit : std::uint8_t {
+  kGame,
+  kOpeningPair,
 };
 
 struct MatchResult {
@@ -76,11 +83,11 @@ struct SeriesOptions {
   bool alternate_sides = true;
   bool print_game_results = true;
   bool verbose_games = false;
-  bool sprt_stop = false;
-  double sprt_null_rate = kDefaultSprtNullRate;
-  double sprt_alt_rate = kDefaultSprtAltRate;
-  double sprt_alpha = kDefaultSprtAlpha;
-  double sprt_beta = kDefaultSprtBeta;
+  bool sequential_stop = false;
+  double sequential_null_rate = kDefaultSequentialNullRate;
+  double sequential_alt_rate = kDefaultSequentialAltRate;
+  double sequential_alpha = kDefaultSequentialAlpha;
+  double sequential_beta = kDefaultSequentialBeta;
 };
 
 struct SeriesGameResult {
@@ -106,27 +113,35 @@ struct SeriesResult {
   long long engine_one_score_total = 0;
   long long engine_two_score_total = 0;
   long long plies_total = 0;
+  StatisticalUnit statistical_unit = StatisticalUnit::kGame;
   int statistical_samples = 0;
+  int statistical_games = 0;
+  std::array<int, 5> statistical_score_counts{};
   double engine_one_result_score = 0.0;
   double engine_one_result_rate = 0.0;
   double confidence_level = kDefaultConfidenceLevel;
   double confidence_low = 0.0;
   double confidence_high = 0.0;
-  double sprt_null_rate = kDefaultSprtNullRate;
-  double sprt_alt_rate = kDefaultSprtAltRate;
-  double sprt_alpha = kDefaultSprtAlpha;
-  double sprt_beta = kDefaultSprtBeta;
-  double sprt_log_likelihood_ratio = 0.0;
-  double sprt_lower_bound = 0.0;
-  double sprt_upper_bound = 0.0;
-  SprtDecision sprt_decision = SprtDecision::kContinue;
+  double sequential_null_rate = kDefaultSequentialNullRate;
+  double sequential_alt_rate = kDefaultSequentialAltRate;
+  double sequential_alpha = kDefaultSequentialAlpha;
+  double sequential_beta = kDefaultSequentialBeta;
+  double sequential_alt_log_evidence = 0.0;
+  double sequential_null_log_evidence = 0.0;
+  double sequential_signed_log_evidence = 0.0;
+  double sequential_lower_bound = 0.0;
+  double sequential_upper_bound = 0.0;
+  SequentialDecision sequential_decision = SequentialDecision::kContinue;
   std::vector<SeriesGameResult> games;
   std::string detail;
 };
 
 [[nodiscard]] std::string_view player_name(Player player) noexcept;
 [[nodiscard]] std::string_view reason_name(MatchEndReason reason) noexcept;
-[[nodiscard]] std::string_view sprt_decision_name(SprtDecision decision) noexcept;
+[[nodiscard]] std::string_view sequential_decision_name(SequentialDecision decision) noexcept;
+[[nodiscard]] std::string_view statistical_unit_name(StatisticalUnit unit) noexcept;
+[[nodiscard]] std::string_view confidence_method_name(StatisticalUnit unit) noexcept;
+[[nodiscard]] std::string_view sequential_test_method_name(StatisticalUnit unit) noexcept;
 [[nodiscard]] std::string_view engine_name_from_winner(const SeriesGameResult& game) noexcept;
 [[nodiscard]] std::string format_opening_moves(const std::vector<std::string>& moves);
 [[nodiscard]] OpeningBook parse_opening_book_text(std::string_view path, std::string_view text);
@@ -136,6 +151,7 @@ void print_state(const Position& position, std::ostream& output);
 void print_final(const GameResult& result, std::ostream& output);
 void print_match_result(const MatchResult& result, std::ostream& output);
 void print_series_result(const SeriesResult& result, std::ostream& output);
+void analyze_series_result(SeriesResult& result, const SeriesOptions& options) noexcept;
 
 [[nodiscard]] MatchResult run_process_match(const MatchOptions& options, std::ostream& output);
 [[nodiscard]] SeriesResult run_process_series(const SeriesOptions& options, std::ostream& output);

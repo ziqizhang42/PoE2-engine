@@ -51,19 +51,40 @@ std::string_view reason_name(MatchEndReason reason) noexcept {
   return "unknown";
 }
 
-std::string_view sprt_decision_name(SprtDecision decision) noexcept {
+std::string_view sequential_decision_name(SequentialDecision decision) noexcept {
   switch (decision) {
-    case SprtDecision::kContinue:
+    case SequentialDecision::kContinue:
       return "continue";
-    case SprtDecision::kAcceptNull:
+    case SequentialDecision::kAcceptNull:
       return "accept_null";
-    case SprtDecision::kAcceptAlternative:
+    case SequentialDecision::kAcceptAlternative:
       return "accept_alt";
-    case SprtDecision::kInvalid:
+    case SequentialDecision::kInvalid:
       return "invalid";
   }
 
   return "unknown";
+}
+
+std::string_view statistical_unit_name(StatisticalUnit unit) noexcept {
+  switch (unit) {
+    case StatisticalUnit::kGame:
+      return "game";
+    case StatisticalUnit::kOpeningPair:
+      return "opening_pair";
+  }
+
+  return "unknown";
+}
+
+std::string_view confidence_method_name(StatisticalUnit unit) noexcept {
+  return unit == StatisticalUnit::kOpeningPair ? "paired_betting_confidence_sequence"
+                                               : "game_betting_confidence_sequence";
+}
+
+std::string_view sequential_test_method_name(StatisticalUnit unit) noexcept {
+  return unit == StatisticalUnit::kOpeningPair ? "paired_betting_eprocess"
+                                               : "game_betting_eprocess";
 }
 
 std::string_view engine_name_from_winner(const SeriesGameResult& game) noexcept {
@@ -119,19 +140,34 @@ void print_series_result(const SeriesResult& result, std::ostream& output) {
          << " protocol_error=" << result.protocol_error_games << '\n';
   output << "series_confidence"
          << " confidence_pct=" << std::fixed << std::setprecision(1)
-         << percent_from_rate(result.confidence_level) << " samples=" << result.statistical_samples
+         << percent_from_rate(result.confidence_level)
+         << " method=" << confidence_method_name(result.statistical_unit)
+         << " unit=" << statistical_unit_name(result.statistical_unit)
+         << " samples=" << result.statistical_samples << " games=" << result.statistical_games
+         << " unpaired_games=" << result.games_played - result.statistical_games
          << " engine_one_score_pct=" << percent_from_rate(result.engine_one_result_rate)
          << " low_pct=" << percent_from_rate(result.confidence_low)
          << " high_pct=" << percent_from_rate(result.confidence_high) << '\n';
-  output << "series_sprt"
+  if (result.statistical_unit == StatisticalUnit::kOpeningPair) {
+    output << "series_pairs"
+           << " score_0=" << result.statistical_score_counts[0]
+           << " score_0_5=" << result.statistical_score_counts[1]
+           << " score_1=" << result.statistical_score_counts[2]
+           << " score_1_5=" << result.statistical_score_counts[3]
+           << " score_2=" << result.statistical_score_counts[4] << '\n';
+  }
+  output << "series_sequential"
+         << " method=" << sequential_test_method_name(result.statistical_unit)
          << " null_pct=" << std::fixed << std::setprecision(1)
-         << percent_from_rate(result.sprt_null_rate)
-         << " alt_pct=" << percent_from_rate(result.sprt_alt_rate)
-         << " alpha_pct=" << percent_from_rate(result.sprt_alpha)
-         << " beta_pct=" << percent_from_rate(result.sprt_beta) << " llr=" << std::setprecision(3)
-         << result.sprt_log_likelihood_ratio << " lower=" << result.sprt_lower_bound
-         << " upper=" << result.sprt_upper_bound
-         << " decision=" << sprt_decision_name(result.sprt_decision) << '\n';
+         << percent_from_rate(result.sequential_null_rate)
+         << " alt_pct=" << percent_from_rate(result.sequential_alt_rate)
+         << " alpha_pct=" << percent_from_rate(result.sequential_alpha)
+         << " beta_pct=" << percent_from_rate(result.sequential_beta)
+         << " alt_log_e=" << std::setprecision(3) << result.sequential_alt_log_evidence
+         << " null_log_e=" << result.sequential_null_log_evidence
+         << " evidence=" << result.sequential_signed_log_evidence
+         << " lower=" << result.sequential_lower_bound << " upper=" << result.sequential_upper_bound
+         << " decision=" << sequential_decision_name(result.sequential_decision) << '\n';
   if (!result.detail.empty()) {
     output << "detail " << result.detail << '\n';
   }

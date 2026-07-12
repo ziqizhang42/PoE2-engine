@@ -72,9 +72,9 @@ build/debug/runner/poe2_runner series \
   --timeout-ms 1000 \
   --go-movetime-ms 900 \
   --summary-only \
-  --sprt-stop \
-  --sprt-null 0.50 \
-  --sprt-alt 0.55
+  --sequential-stop \
+  --sequential-null 0.50 \
+  --sequential-alt 0.55
 ```
 
 Useful options:
@@ -89,20 +89,19 @@ Useful options:
 - `--fixed-sides`: keep engine one as player one for every game.
 - `--summary-only`: suppress per-game result lines for larger local runs.
 - `--verbose-games`: print the full one-game move/state log for every game.
-- `--sprt-stop`: treat `--games` as the maximum game budget and stop early on `accept_alt` or `accept_null`.
-- `--sprt-null <p>`: null score rate for engine one. Defaults to `0.50`.
-- `--sprt-alt <p>`: alternative score rate for engine one. Defaults to `0.55`.
-- `--sprt-alpha <p>`: false-positive risk for accepting the alternative. Defaults to `0.05`.
-- `--sprt-beta <p>`: false-negative risk for accepting the null. Defaults to `0.05`.
+- `--sequential-stop`: treat `--games` as the maximum game budget and stop early on `accept_alt` or `accept_null`.
+- `--sequential-null <p>`: null score rate for engine one. Defaults to `0.50`.
+- `--sequential-alt <p>`: alternative score rate for engine one. Defaults to `0.55`.
+- `--sequential-alpha <p>`: false-positive risk for accepting the alternative. Defaults to `0.05`.
+- `--sequential-beta <p>`: false-negative risk for accepting the null. Defaults to `0.05`.
 
-The summary includes engine-one wins, engine-two wins, average plies, average scores, reason counts, a 95% Wilson confidence interval for engine one's score rate, and an SPRT-style likelihood report. The SPRT decision is `accept_alt`, `accept_null`, or `continue`; `continue` means the current sample is not decisive under the selected null/alternative rates and risk settings. Without `--sprt-stop`, the runner always runs exactly `--games` games and only reports the SPRT decision at the end. With `--sprt-stop`, `--games` becomes a maximum budget and a decisive SPRT result stops the series early.
+The summary includes engine-one wins, engine-two wins, average plies, average scores, reason counts, an anytime-valid 95% betting confidence sequence, and a sequential betting-test report. The decision is `accept_alt`, `accept_null`, or `continue`; `continue` means the current sample is not decisive under the selected null/alternative rates and risk settings. Without `--sequential-stop`, the runner always runs exactly `--games` games and only reports the decision at the end. With `--sequential-stop`, `--games` becomes a maximum budget and a decisive result stops the series early.
 
-SPRT decisions are directional for engine one: `accept_alt` supports engine one's `--sprt-alt` score-rate claim, while `accept_null` rejects it; swap engine order to test the other engine.
+Decisions are directional for engine one. `accept_alt` rejects a score rate at or below `--sequential-null` with risk bounded by `--sequential-alpha`; `accept_null` rejects a score rate at or above `--sequential-alt` with risk bounded by `--sequential-beta`. Either decision is permitted in the indifference region between the two rates. Swap engine order to test the other engine.
 
-When an opening book is provided, series mode cycles through opening lines. `--shuffle-openings`
-randomizes that order once at the start of the series. With alternating sides, each opening is
-still reused for the adjacent swapped-side game before advancing to the next line, and SPRT early
-stopping is checked only after the pair is complete.
+When an opening book is provided, series mode cycles through opening lines. `--shuffle-openings` randomizes that order once at the start of the series. With alternating sides, each opening is still reused for the adjacent swapped-side game before advancing to the next line, and sequential stopping is checked only after the pair is complete.
+
+With alternating sides, the statistical unit is the completed opening pair, not an individual game. A pair contributes an engine-one score of `0`, `0.5`, `1`, `1.5`, or `2`; the middle two values allow for games without a winner. Confidence and sequential evidence are calculated from the normalized pair scores. This accounts for correlation between the two games without assuming a particular split rate. A trailing game from an odd game budget remains in match totals and `games.csv`, but is excluded from statistical inference because it has no side-swapped partner. With `--fixed-sides`, individual games remain the statistical units.
 
 ## Eval Mode
 
@@ -116,7 +115,7 @@ build/release/runner/poe2_runner eval \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \
   --games 2000 \
-  --sprt-stop \
+  --sequential-stop \
   --require-accept-alt
 ```
 

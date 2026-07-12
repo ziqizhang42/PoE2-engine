@@ -1,9 +1,11 @@
 #include "poe2/match_runner.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <random>
@@ -317,86 +319,200 @@ void update_series_result(SeriesResult& result, SeriesGameResult game) {
   result.games.push_back(std::move(game));
 }
 
-[[nodiscard]] double engine_one_result_score(const SeriesResult& result) noexcept {
-  return static_cast<double>(result.engine_one_wins) + (0.5 * result.no_winner);
+constexpr int kStatisticalScoreBinCount = 5;
+constexpr int kBettingMixtureSize = 64;
+constexpr int kConfidenceBisectionSteps = 60;
+constexpr double kMinimumProbability = 1.0e-12;
+static_assert(std::tuple_size_v<decltype(SeriesResult::statistical_score_counts)> ==
+              kStatisticalScoreBinCount);
+
+enum class EvidenceDirection : std::uint8_t {
+  kAbove,
+  kBelow,
+};
+
+[[nodiscard]] int engine_one_game_half_points(const SeriesGameResult& game) noexcept {
+  if (!game.match.winner.has_value()) {
+    return 1;
+  }
+  return *game.match.winner == game.engine_one_player ? 2 : 0;
 }
 
-[[nodiscard]] SprtDecision sprt_decision(double log_likelihood_ratio, double lower_bound,
-                                         double upper_bound) noexcept {
-  if (log_likelihood_ratio >= upper_bound) {
-    return SprtDecision::kAcceptAlternative;
-  }
-  if (log_likelihood_ratio <= lower_bound) {
-    return SprtDecision::kAcceptNull;
-  }
-
-  return SprtDecision::kContinue;
+[[nodiscard]] constexpr double score_rate_for_bin(int bin) noexcept {
+  return static_cast<double>(bin) / static_cast<double>(kStatisticalScoreBinCount - 1);
 }
 
-void update_confidence_interval(SeriesResult& result) noexcept {
-  const int samples = result.statistical_samples;
-  if (samples <= 0) {
-    result.confidence_low = 0.0;
-    result.confidence_high = 0.0;
-    return;
+void collect_statistical_samples(SeriesResult& result, const SeriesOptions& options) noexcept {
+  result.statistical_score_counts.fill(0);
+  result.statistical_unit =
+      options.alternate_sides ? StatisticalUnit::kOpeningPair : StatisticalUnit::kGame;
+
+  if (options.alternate_sides) {
+    const std::size_t complete_pairs = result.games.size() / 2;
+    for (std::size_t pair = 0; pair < complete_pairs; ++pair) {
+      const std::size_t first = pair * 2;
+      const int pair_half_points = engine_one_game_half_points(result.games[first]) +
+                                   engine_one_game_half_points(result.games[first + 1]);
+      ++result.statistical_score_counts[static_cast<std::size_t>(pair_half_points)];
+    }
+    result.statistical_samples = static_cast<int>(complete_pairs);
+    result.statistical_games = result.statistical_samples * 2;
+  } else {
+    for (const SeriesGameResult& game : result.games) {
+      const int score_bin = engine_one_game_half_points(game) * 2;
+      ++result.statistical_score_counts[static_cast<std::size_t>(score_bin)];
+    }
+    result.statistical_samples = static_cast<int>(result.games.size());
+    result.statistical_games = result.statistical_samples;
   }
 
-  constexpr double kWilsonZ95 = 1.959963984540054;
-  const double sample_count = static_cast<double>(samples);
-  const double z_squared = kWilsonZ95 * kWilsonZ95;
-  const double denominator = 1.0 + (z_squared / sample_count);
-  const double center =
-      (result.engine_one_result_rate + (z_squared / (2.0 * sample_count))) / denominator;
-  const double margin =
-      (kWilsonZ95 *
-       std::sqrt((result.engine_one_result_rate * (1.0 - result.engine_one_result_rate) +
-                  (z_squared / (4.0 * sample_count))) /
-                 sample_count)) /
-      denominator;
-
-  result.confidence_low = std::clamp(center - margin, 0.0, 1.0);
-  result.confidence_high = std::clamp(center + margin, 0.0, 1.0);
-}
-
-void update_sprt(SeriesResult& result) noexcept {
-  const int samples = result.statistical_samples;
-  if (samples <= 0 || result.sprt_null_rate <= 0.0 || result.sprt_null_rate >= 1.0 ||
-      result.sprt_alt_rate <= 0.0 || result.sprt_alt_rate >= 1.0 ||
-      result.sprt_alt_rate <= result.sprt_null_rate || result.sprt_alpha <= 0.0 ||
-      result.sprt_alpha >= 1.0 || result.sprt_beta <= 0.0 || result.sprt_beta >= 1.0) {
-    result.sprt_decision = SprtDecision::kInvalid;
-    return;
+  double normalized_score_total = 0.0;
+  for (int bin = 0; bin < kStatisticalScoreBinCount; ++bin) {
+    normalized_score_total +=
+        static_cast<double>(result.statistical_score_counts[static_cast<std::size_t>(bin)]) *
+        score_rate_for_bin(bin);
   }
-
-  const double losses = static_cast<double>(samples) - result.engine_one_result_score;
-  result.sprt_log_likelihood_ratio =
-      (result.engine_one_result_score * std::log(result.sprt_alt_rate / result.sprt_null_rate)) +
-      (losses * std::log((1.0 - result.sprt_alt_rate) / (1.0 - result.sprt_null_rate)));
-  result.sprt_lower_bound = std::log(result.sprt_beta / (1.0 - result.sprt_alpha));
-  result.sprt_upper_bound = std::log((1.0 - result.sprt_beta) / result.sprt_alpha);
-  result.sprt_decision = sprt_decision(result.sprt_log_likelihood_ratio, result.sprt_lower_bound,
-                                       result.sprt_upper_bound);
-}
-
-void update_series_statistics(SeriesResult& result, const SeriesOptions& options) noexcept {
-  result.statistical_samples = result.games_played;
-  result.engine_one_result_score = engine_one_result_score(result);
   result.engine_one_result_rate =
       result.statistical_samples > 0
-          ? result.engine_one_result_score / static_cast<double>(result.statistical_samples)
+          ? normalized_score_total / static_cast<double>(result.statistical_samples)
           : 0.0;
-  result.confidence_level = kDefaultConfidenceLevel;
-  result.sprt_null_rate = options.sprt_null_rate;
-  result.sprt_alt_rate = options.sprt_alt_rate;
-  result.sprt_alpha = options.sprt_alpha;
-  result.sprt_beta = options.sprt_beta;
-
-  update_confidence_interval(result);
-  update_sprt(result);
+  result.engine_one_result_score =
+      result.engine_one_result_rate * static_cast<double>(result.statistical_games);
 }
 
-[[nodiscard]] bool is_decisive_sprt(SprtDecision decision) noexcept {
-  return decision == SprtDecision::kAcceptAlternative || decision == SprtDecision::kAcceptNull;
+[[nodiscard]] double log_betting_evidence(
+    const std::array<int, kStatisticalScoreBinCount>& score_counts, double mean_bound,
+    EvidenceDirection direction) noexcept {
+  // For each fixed betting fraction, 1 + lambda * (score - mean_bound) is non-negative
+  // and has conditional expectation at most one when the score mean is at most the bound.
+  // Products of those factors are e-processes, and the uniform mixture remains an e-process.
+  // Reversing the centered score tests a lower mean bound. This permits optional stopping without
+  // modeling the distribution of the five possible opening-pair scores.
+  const double bounded_mean =
+      std::clamp(mean_bound, kMinimumProbability, 1.0 - kMinimumProbability);
+  std::array<double, kBettingMixtureSize> component_logs{};
+  double maximum_log = -std::numeric_limits<double>::infinity();
+
+  for (int component = 0; component < kBettingMixtureSize; ++component) {
+    const double betting_fraction =
+        (static_cast<double>(component) + 0.5) / static_cast<double>(kBettingMixtureSize);
+    const double lambda = direction == EvidenceDirection::kAbove
+                              ? betting_fraction / bounded_mean
+                              : betting_fraction / (1.0 - bounded_mean);
+    double component_log = 0.0;
+    for (int bin = 0; bin < kStatisticalScoreBinCount; ++bin) {
+      const int count = score_counts[static_cast<std::size_t>(bin)];
+      if (count == 0) {
+        continue;
+      }
+      const double score_rate = score_rate_for_bin(bin);
+      const double centered_score = direction == EvidenceDirection::kAbove
+                                        ? score_rate - bounded_mean
+                                        : bounded_mean - score_rate;
+      const double factor = 1.0 + (lambda * centered_score);
+      component_log += static_cast<double>(count) * std::log(factor);
+    }
+    component_logs[static_cast<std::size_t>(component)] = component_log;
+    maximum_log = std::max(maximum_log, component_log);
+  }
+
+  double scaled_sum = 0.0;
+  for (const double component_log : component_logs) {
+    scaled_sum += std::exp(component_log - maximum_log);
+  }
+  return maximum_log + std::log(scaled_sum / static_cast<double>(kBettingMixtureSize));
+}
+
+void update_confidence_sequence(SeriesResult& result) noexcept {
+  if (result.statistical_samples <= 0 || result.confidence_level <= 0.0 ||
+      result.confidence_level >= 1.0) {
+    result.confidence_low = 0.0;
+    result.confidence_high = 1.0;
+    return;
+  }
+
+  // Invert the two one-sided e-processes. Splitting the error probability between the tails
+  // produces an anytime-valid confidence sequence at every completed statistical unit.
+  const double tail_probability = (1.0 - result.confidence_level) / 2.0;
+  const double threshold = std::log(1.0 / tail_probability);
+
+  double rejected_low = 0.0;
+  double retained_low = result.engine_one_result_rate;
+  if (log_betting_evidence(result.statistical_score_counts, rejected_low,
+                           EvidenceDirection::kAbove) >= threshold) {
+    for (int step = 0; step < kConfidenceBisectionSteps; ++step) {
+      const double candidate = (rejected_low + retained_low) / 2.0;
+      if (log_betting_evidence(result.statistical_score_counts, candidate,
+                               EvidenceDirection::kAbove) >= threshold) {
+        rejected_low = candidate;
+      } else {
+        retained_low = candidate;
+      }
+    }
+  }
+  result.confidence_low = retained_low;
+
+  double retained_high = result.engine_one_result_rate;
+  double rejected_high = 1.0;
+  if (log_betting_evidence(result.statistical_score_counts, rejected_high,
+                           EvidenceDirection::kBelow) >= threshold) {
+    for (int step = 0; step < kConfidenceBisectionSteps; ++step) {
+      const double candidate = (retained_high + rejected_high) / 2.0;
+      if (log_betting_evidence(result.statistical_score_counts, candidate,
+                               EvidenceDirection::kBelow) >= threshold) {
+        rejected_high = candidate;
+      } else {
+        retained_high = candidate;
+      }
+    }
+  }
+  result.confidence_high = retained_high;
+}
+
+void update_sequential_test(SeriesResult& result) noexcept {
+  if (result.statistical_samples <= 0 || result.sequential_null_rate <= 0.0 ||
+      result.sequential_null_rate >= 1.0 || result.sequential_alt_rate <= 0.0 ||
+      result.sequential_alt_rate >= 1.0 ||
+      result.sequential_alt_rate <= result.sequential_null_rate || result.sequential_alpha <= 0.0 ||
+      result.sequential_alpha >= 1.0 || result.sequential_beta <= 0.0 ||
+      result.sequential_beta >= 1.0) {
+    result.sequential_decision = SequentialDecision::kInvalid;
+    return;
+  }
+
+  result.sequential_alt_log_evidence = log_betting_evidence(
+      result.statistical_score_counts, result.sequential_null_rate, EvidenceDirection::kAbove);
+  result.sequential_null_log_evidence = log_betting_evidence(
+      result.statistical_score_counts, result.sequential_alt_rate, EvidenceDirection::kBelow);
+  result.sequential_lower_bound = -std::log(1.0 / result.sequential_beta);
+  result.sequential_upper_bound = std::log(1.0 / result.sequential_alpha);
+  result.sequential_signed_log_evidence =
+      result.sequential_alt_log_evidence >= result.sequential_null_log_evidence
+          ? result.sequential_alt_log_evidence
+          : -result.sequential_null_log_evidence;
+
+  const bool accept_alternative =
+      result.sequential_alt_log_evidence >= result.sequential_upper_bound;
+  const bool accept_null = result.sequential_null_log_evidence >= -result.sequential_lower_bound;
+  if (accept_alternative && accept_null) {
+    const double alternative_ratio =
+        result.sequential_alt_log_evidence / result.sequential_upper_bound;
+    const double null_ratio = result.sequential_null_log_evidence / -result.sequential_lower_bound;
+    result.sequential_decision = alternative_ratio >= null_ratio
+                                     ? SequentialDecision::kAcceptAlternative
+                                     : SequentialDecision::kAcceptNull;
+  } else if (accept_alternative) {
+    result.sequential_decision = SequentialDecision::kAcceptAlternative;
+  } else if (accept_null) {
+    result.sequential_decision = SequentialDecision::kAcceptNull;
+  } else {
+    result.sequential_decision = SequentialDecision::kContinue;
+  }
+}
+
+[[nodiscard]] bool is_decisive_sequential(SequentialDecision decision) noexcept {
+  return decision == SequentialDecision::kAcceptAlternative ||
+         decision == SequentialDecision::kAcceptNull;
 }
 
 [[nodiscard]] bool is_side_pair_complete(int zero_based_game_index, bool alternate_sides) noexcept {
@@ -417,6 +533,24 @@ void print_series_game(const SeriesGameResult& game, std::ostream& output) {
 }
 
 }  // namespace
+
+void analyze_series_result(SeriesResult& result, const SeriesOptions& options) noexcept {
+  result.confidence_level = kDefaultConfidenceLevel;
+  result.sequential_null_rate = options.sequential_null_rate;
+  result.sequential_alt_rate = options.sequential_alt_rate;
+  result.sequential_alpha = options.sequential_alpha;
+  result.sequential_beta = options.sequential_beta;
+  result.sequential_alt_log_evidence = 0.0;
+  result.sequential_null_log_evidence = 0.0;
+  result.sequential_signed_log_evidence = 0.0;
+  result.sequential_lower_bound = 0.0;
+  result.sequential_upper_bound = 0.0;
+  result.sequential_decision = SequentialDecision::kContinue;
+
+  collect_statistical_samples(result, options);
+  update_confidence_sequence(result);
+  update_sequential_test(result);
+}
 
 MatchResult run_process_match(const MatchOptions& options, std::ostream& output) {
   std::signal(SIGPIPE, SIG_IGN);
@@ -450,13 +584,13 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
   if (!wait_for_ready(engine_one, options.move_timeout, detail)) {
     result.detail = "engine_one startup failed: " + detail;
     ++result.protocol_error_games;
-    update_series_statistics(result, options);
+    analyze_series_result(result, options);
     return result;
   }
   if (!wait_for_ready(engine_two, options.move_timeout, detail)) {
     result.detail = "engine_two startup failed: " + detail;
     ++result.protocol_error_games;
-    update_series_statistics(result, options);
+    analyze_series_result(result, options);
     return result;
   }
 
@@ -502,17 +636,17 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
       break;
     }
 
-    if (options.sprt_stop && is_side_pair_complete(game_index, options.alternate_sides)) {
-      update_series_statistics(result, options);
-      if (is_decisive_sprt(result.sprt_decision)) {
-        result.detail = "series stopped after sprt decision: ";
-        result.detail += sprt_decision_name(result.sprt_decision);
+    if (options.sequential_stop && is_side_pair_complete(game_index, options.alternate_sides)) {
+      analyze_series_result(result, options);
+      if (is_decisive_sequential(result.sequential_decision)) {
+        result.detail = "series stopped after sequential decision: ";
+        result.detail += sequential_decision_name(result.sequential_decision);
         break;
       }
     }
   }
 
-  update_series_statistics(result, options);
+  analyze_series_result(result, options);
   return result;
 }
 

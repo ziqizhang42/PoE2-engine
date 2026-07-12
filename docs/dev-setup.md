@@ -52,4 +52,4 @@ The build output stays under `build/by-commit/<zero-padded-commit-count>-<short-
 
 ## Engine Evaluation
 
-Use `make eval-gate BASE=<baseline-build-id> PRESET=release` for a SPRT strength gate. Evaluation runs are saved under `build/eval/runs/`, and summary rows are appended to `eval/results.csv`. See `docs/evaluation.md` for the full workflow.
+Use `make eval-gate BASE=<baseline-build-id> PRESET=release` for a pair-aware sequential strength gate. Evaluation runs are saved under `build/eval/runs/`, and summary rows are appended to `eval/results.csv`. See `docs/evaluation.md` for the full workflow.

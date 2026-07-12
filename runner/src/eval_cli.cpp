@@ -405,9 +405,13 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   if (options.series.go_limits.nodes.has_value()) {
     output << " --go-nodes " << *options.series.go_limits.nodes;
   }
-  if (options.series.sprt_stop) {
-    output << " --sprt-stop";
+  if (options.series.sequential_stop) {
+    output << " --sequential-stop";
   }
+  output << " --sequential-null " << options.series.sequential_null_rate << " --sequential-alt "
+         << options.series.sequential_alt_rate << " --sequential-alpha "
+         << options.series.sequential_alpha << " --sequential-beta "
+         << options.series.sequential_beta;
   if (options.require_accept_alt) {
     output << " --require-accept-alt";
   }
@@ -429,18 +433,39 @@ void write_summary_json(const fs::path& path, const match_runner::SeriesResult& 
   }
 
   output << "{\n"
+         << "  \"analysis_version\": " << match_runner::kAnalysisVersion << ",\n"
          << "  \"games_requested\": " << result.games_requested << ",\n"
          << "  \"games_played\": " << result.games_played << ",\n"
          << "  \"engine_one_wins\": " << result.engine_one_wins << ",\n"
          << "  \"engine_two_wins\": " << result.engine_two_wins << ",\n"
          << "  \"no_winner\": " << result.no_winner << ",\n"
+         << "  \"statistical_unit\": \""
+         << match_runner::statistical_unit_name(result.statistical_unit) << "\",\n"
+         << "  \"statistical_samples\": " << result.statistical_samples << ",\n"
+         << "  \"statistical_games\": " << result.statistical_games << ",\n"
+         << "  \"unpaired_games\": " << result.games_played - result.statistical_games << ",\n"
+         << "  \"statistical_score_rate_counts\": {\n"
+         << "    \"0\": " << result.statistical_score_counts[0] << ",\n"
+         << "    \"0.25\": " << result.statistical_score_counts[1] << ",\n"
+         << "    \"0.5\": " << result.statistical_score_counts[2] << ",\n"
+         << "    \"0.75\": " << result.statistical_score_counts[3] << ",\n"
+         << "    \"1\": " << result.statistical_score_counts[4] << "\n"
+         << "  },\n"
          << "  \"engine_one_score_rate\": " << score_text(result.engine_one_result_rate) << ",\n"
+         << "  \"confidence_method\": \""
+         << match_runner::confidence_method_name(result.statistical_unit) << "\",\n"
          << "  \"confidence_low\": " << score_text(result.confidence_low) << ",\n"
          << "  \"confidence_high\": " << score_text(result.confidence_high) << ",\n"
-         << "  \"sprt_decision\": \"" << match_runner::sprt_decision_name(result.sprt_decision)
-         << "\",\n"
-         << "  \"sprt_log_likelihood_ratio\": " << score_text(result.sprt_log_likelihood_ratio)
-         << "\n"
+         << "  \"sequential_test_method\": \""
+         << match_runner::sequential_test_method_name(result.statistical_unit) << "\",\n"
+         << "  \"sequential_decision\": \""
+         << match_runner::sequential_decision_name(result.sequential_decision) << "\",\n"
+         << "  \"sequential_alt_log_evidence\": " << score_text(result.sequential_alt_log_evidence)
+         << ",\n"
+         << "  \"sequential_null_log_evidence\": "
+         << score_text(result.sequential_null_log_evidence) << ",\n"
+         << "  \"sequential_signed_log_evidence\": "
+         << score_text(result.sequential_signed_log_evidence) << "\n"
          << "}\n";
 }
 
@@ -500,6 +525,13 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
     output << "\"" << json_escape(book_digest) << "\"";
   }
   output << ",\n"
+         << "  \"analysis_version\": " << match_runner::kAnalysisVersion << ",\n"
+         << "  \"statistical_unit\": \""
+         << match_runner::statistical_unit_name(result.statistical_unit) << "\",\n"
+         << "  \"confidence_method\": \""
+         << match_runner::confidence_method_name(result.statistical_unit) << "\",\n"
+         << "  \"sequential_test_method\": \""
+         << match_runner::sequential_test_method_name(result.statistical_unit) << "\",\n"
          << "  \"opening_count\": " << options.series.opening_book.lines.size() << ",\n"
          << "  \"shuffle_openings\": " << (options.series.shuffle_openings ? "true" : "false")
          << ",\n"
@@ -527,13 +559,14 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
     output << "null";
   }
   output << ",\n"
-         << "  \"sprt_stop\": " << (options.series.sprt_stop ? "true" : "false") << ",\n"
-         << "  \"sprt_null\": " << options.series.sprt_null_rate << ",\n"
-         << "  \"sprt_alt\": " << options.series.sprt_alt_rate << ",\n"
-         << "  \"sprt_alpha\": " << options.series.sprt_alpha << ",\n"
-         << "  \"sprt_beta\": " << options.series.sprt_beta << ",\n"
-         << "  \"sprt_decision\": \"" << match_runner::sprt_decision_name(result.sprt_decision)
-         << "\"\n"
+         << "  \"sequential_stop\": " << (options.series.sequential_stop ? "true" : "false")
+         << ",\n"
+         << "  \"sequential_null\": " << options.series.sequential_null_rate << ",\n"
+         << "  \"sequential_alt\": " << options.series.sequential_alt_rate << ",\n"
+         << "  \"sequential_alpha\": " << options.series.sequential_alpha << ",\n"
+         << "  \"sequential_beta\": " << options.series.sequential_beta << ",\n"
+         << "  \"sequential_decision\": \""
+         << match_runner::sequential_decision_name(result.sequential_decision) << "\"\n"
          << "}\n";
 }
 
@@ -545,17 +578,29 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
       "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
       "base_engine_args,games_requested,games_played,"
       "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
-      "confidence_high_pct,sprt_decision,sprt_null,sprt_alt,opening_book,opening_book_digest,"
-      "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir\n";
+      "confidence_high_pct,sequential_decision,sequential_null,sequential_alt,opening_book,opening_"
+      "book_digest,"
+      "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir,analysis_version,"
+      "statistical_unit,statistical_samples,statistical_games,pair_score_0,pair_score_0_5,"
+      "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
+      "analysis_note";
 
   create_parent_directories(path);
   const bool needs_header = !is_file(path) || fs::file_size(path) == 0;
+  if (!needs_header) {
+    std::ifstream existing{path};
+    std::string existing_header;
+    std::getline(existing, existing_header);
+    if (existing_header != kHeader) {
+      throw std::runtime_error{"unsupported ledger schema: " + path.string()};
+    }
+  }
   std::ofstream output{path, std::ios::app};
   if (!output) {
     throw std::runtime_error{"failed to append " + path.string()};
   }
   if (needs_header) {
-    output << kHeader;
+    output << kHeader << '\n';
   }
 
   write_csv_field(output, run_id);
@@ -580,8 +625,9 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
          << ',' << score_text(result.engine_one_result_rate * 100.0) << ','
          << score_text(result.confidence_low * 100.0) << ','
          << score_text(result.confidence_high * 100.0) << ',';
-  write_csv_field(output, match_runner::sprt_decision_name(result.sprt_decision));
-  output << ',' << options.series.sprt_null_rate << ',' << options.series.sprt_alt_rate << ',';
+  write_csv_field(output, match_runner::sequential_decision_name(result.sequential_decision));
+  output << ',' << options.series.sequential_null_rate << ',' << options.series.sequential_alt_rate
+         << ',';
   write_csv_field(output, options.series.opening_book.path);
   output << ',';
   write_csv_field(output, opening_book_digest(options.series.opening_book));
@@ -599,6 +645,22 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
   }
   output << ',' << options.series.move_timeout.count() << ',';
   write_csv_field(output, run_dir.string());
+  output << ',' << match_runner::kAnalysisVersion << ',';
+  write_csv_field(output, match_runner::statistical_unit_name(result.statistical_unit));
+  output << ',' << result.statistical_samples << ',' << result.statistical_games << ',';
+  if (result.statistical_unit == match_runner::StatisticalUnit::kOpeningPair) {
+    output << result.statistical_score_counts[0] << ',' << result.statistical_score_counts[1] << ','
+           << result.statistical_score_counts[2] << ',' << result.statistical_score_counts[3] << ','
+           << result.statistical_score_counts[4];
+  } else {
+    output << ",,,,";
+  }
+  output << ',';
+  write_csv_field(output, match_runner::confidence_method_name(result.statistical_unit));
+  output << ',';
+  write_csv_field(output, match_runner::sequential_test_method_name(result.statistical_unit));
+  output << ',';
+  write_csv_field(output, "pair-aware v1");
   output << '\n';
 }
 
@@ -728,52 +790,52 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
       options.series.shuffle_openings = true;
       continue;
     }
-    if (argument == "--sprt-stop") {
-      options.series.sprt_stop = true;
+    if (argument == "--sequential-stop") {
+      options.series.sequential_stop = true;
       continue;
     }
-    if (argument == "--sprt-null") {
+    if (argument == "--sequential-null") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-null requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
       }
       const std::optional<double> rate = parse_probability(argv[++index]);
       if (!rate.has_value()) {
-        throw std::invalid_argument{"--sprt-null requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
       }
-      options.series.sprt_null_rate = *rate;
+      options.series.sequential_null_rate = *rate;
       continue;
     }
-    if (argument == "--sprt-alt") {
+    if (argument == "--sequential-alt") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-alt requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
       }
       const std::optional<double> rate = parse_probability(argv[++index]);
       if (!rate.has_value()) {
-        throw std::invalid_argument{"--sprt-alt requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
       }
-      options.series.sprt_alt_rate = *rate;
+      options.series.sequential_alt_rate = *rate;
       continue;
     }
-    if (argument == "--sprt-alpha") {
+    if (argument == "--sequential-alpha") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-alpha requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alpha requires a probability between 0 and 1"};
       }
       const std::optional<double> alpha = parse_probability(argv[++index]);
       if (!alpha.has_value()) {
-        throw std::invalid_argument{"--sprt-alpha requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alpha requires a probability between 0 and 1"};
       }
-      options.series.sprt_alpha = *alpha;
+      options.series.sequential_alpha = *alpha;
       continue;
     }
-    if (argument == "--sprt-beta") {
+    if (argument == "--sequential-beta") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sprt-beta requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-beta requires a probability between 0 and 1"};
       }
       const std::optional<double> beta = parse_probability(argv[++index]);
       if (!beta.has_value()) {
-        throw std::invalid_argument{"--sprt-beta requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-beta requires a probability between 0 and 1"};
       }
-      options.series.sprt_beta = *beta;
+      options.series.sequential_beta = *beta;
       continue;
     }
     if (argument == "--require-accept-alt") {
@@ -799,8 +861,8 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
   if (options.base_engine.empty()) {
     throw std::invalid_argument{"missing --base-engine"};
   }
-  if (options.series.sprt_alt_rate <= options.series.sprt_null_rate) {
-    throw std::invalid_argument{"--sprt-alt must be greater than --sprt-null"};
+  if (options.series.sequential_alt_rate <= options.series.sequential_null_rate) {
+    throw std::invalid_argument{"--sequential-alt must be greater than --sequential-null"};
   }
 
   return options;
@@ -857,10 +919,11 @@ int run_eval(int argc, char** argv) {
       << (options.series.opening_book.path.empty() ? "none" : options.series.opening_book.path)
       << " opening_count=" << options.series.opening_book.lines.size()
       << " shuffle_openings=" << (options.series.shuffle_openings ? 1 : 0)
-      << " sprt_stop=" << (options.series.sprt_stop ? 1 : 0)
-      << " sprt_null=" << options.series.sprt_null_rate
-      << " sprt_alt=" << options.series.sprt_alt_rate << " sprt_alpha=" << options.series.sprt_alpha
-      << " sprt_beta=" << options.series.sprt_beta;
+      << " sequential_stop=" << (options.series.sequential_stop ? 1 : 0)
+      << " sequential_null=" << options.series.sequential_null_rate
+      << " sequential_alt=" << options.series.sequential_alt_rate
+      << " sequential_alpha=" << options.series.sequential_alpha
+      << " sequential_beta=" << options.series.sequential_beta;
   print_go_limits(options.series.go_limits, log);
   log << '\n';
   log << "engine engine_one " << options.series.engine_one_command << '\n';
@@ -885,9 +948,10 @@ int run_eval(int argc, char** argv) {
   match_runner::print_series_result(result, std::cout);
 
   if (options.require_accept_alt &&
-      result.sprt_decision != match_runner::SprtDecision::kAcceptAlternative) {
-    std::cerr << "eval_gate sprt_decision="
-              << match_runner::sprt_decision_name(result.sprt_decision) << " required=accept_alt\n";
+      result.sequential_decision != match_runner::SequentialDecision::kAcceptAlternative) {
+    std::cerr << "eval_gate sequential_decision="
+              << match_runner::sequential_decision_name(result.sequential_decision)
+              << " required=accept_alt\n";
     return 2;
   }
 
