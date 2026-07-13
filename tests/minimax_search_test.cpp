@@ -44,6 +44,7 @@ struct SearchDiagnostics {
   std::uint64_t alpha_beta_cutoffs = 0;
   std::uint64_t tt_stores = 0;
   std::uint64_t symmetry_prunes = 0;
+  std::uint64_t move_order_evaluations = 0;
   std::uint64_t hash_entries = 0;
   std::uint64_t hash_capacity = 0;
   std::uint64_t hash_bytes = 0;
@@ -67,6 +68,8 @@ struct SearchDiagnostics {
       diagnostics.tt_stores = value;
     } else if (name == "symmetryprunes") {
       diagnostics.symmetry_prunes = value;
+    } else if (name == "moveorderevals") {
+      diagnostics.move_order_evaluations = value;
     } else if (name == "hashentries") {
       diagnostics.hash_entries = value;
     } else if (name == "hashcapacity") {
@@ -221,7 +224,8 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   REQUIRE(result.score == value_for(final_position, perspective));
 }
 
-TEST_CASE("fail-soft alpha-beta prunes a deterministic four-move search", "[minimax][alphabeta]") {
+TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
+          "[minimax][alphabeta][move-ordering]") {
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
   const poe2::Position position = position_with_empty_squares(empty_squares);
@@ -242,8 +246,9 @@ TEST_CASE("fail-soft alpha-beta prunes a deterministic four-move search", "[mini
   REQUIRE(result.score == -41);
   REQUIRE(result.best_move == poe2::Move{.square = {0, 0}});
   REQUIRE(result.principal_variation == expected_principal_variation);
-  REQUIRE(result.nodes == 68);
+  REQUIRE(result.nodes == 85);
   REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
+  REQUIRE(diagnostics.move_order_evaluations > 0);
   REQUIRE(diagnostics.tt_probes == 0);
   REQUIRE(diagnostics.symmetry_prunes == 0);
 }
@@ -443,6 +448,7 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
   REQUIRE(idle_diagnostics.alpha_beta_cutoffs == 0);
   REQUIRE(idle_diagnostics.tt_stores == 0);
   REQUIRE(idle_diagnostics.symmetry_prunes == 0);
+  REQUIRE(idle_diagnostics.move_order_evaluations == 0);
   REQUIRE(idle_diagnostics.hash_entries == populated_entries);
 
   search.new_game();

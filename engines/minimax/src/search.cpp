@@ -1,5 +1,6 @@
 #include "poe2/minimax/search.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cassert>
@@ -52,6 +53,9 @@ class SearchState final {
 
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
   void record_alpha_beta_cutoff() noexcept { ++alpha_beta_cutoffs_; }
+  void record_score_gain_evaluations(std::uint64_t count) noexcept {
+    score_gain_evaluations_ += count;
+  }
 
   void store(PositionKey key, PositionHash hash, TranspositionValue value) {
     if (table_.store(key, hash, value)) {
@@ -100,6 +104,9 @@ class SearchState final {
   [[nodiscard]] std::uint64_t alpha_beta_cutoffs() const noexcept { return alpha_beta_cutoffs_; }
   [[nodiscard]] std::uint64_t tt_stores() const noexcept { return tt_stores_; }
   [[nodiscard]] std::uint64_t symmetry_prunes() const noexcept { return symmetry_prunes_; }
+  [[nodiscard]] std::uint64_t score_gain_evaluations() const noexcept {
+    return score_gain_evaluations_;
+  }
 
  private:
   Clock::time_point deadline_;
@@ -113,6 +120,7 @@ class SearchState final {
   std::uint64_t alpha_beta_cutoffs_ = 0;
   std::uint64_t tt_stores_ = 0;
   std::uint64_t symmetry_prunes_ = 0;
+  std::uint64_t score_gain_evaluations_ = 0;
 };
 
 class ChildKeySet final {
@@ -246,6 +254,67 @@ struct NodeResult {
 struct FixedPrincipalVariation {
   std::array<Move, kCellCount> moves{};
   std::size_t size = 0;
+};
+
+class ScoreGainMovePicker final {
+ public:
+  template <typename Policy>
+  ScoreGainMovePicker(Position& position, Bitboard moves, int ply, const Policy& policy,
+                      SearchState& state) {
+    Bitboard unselected_moves = moves;
+    while (unselected_moves != 0) {
+      const int move_index = std::countr_zero(unselected_moves);
+      const Move move{.square = square_from_index(move_index)};
+      moves_[size_++].move = move;
+      unselected_moves &= ~policy.move_orbit(ply, move.square);
+    }
+
+    if (size_ <= 1) {
+      return;
+    }
+
+    const Player player = position.side_to_move();
+    for (std::size_t index = 0; index < size_; ++index) {
+      MoveUndo undo;
+      const bool made_move = position.make_move(moves_[index].move.square, undo);
+      assert(made_move);
+      if (!made_move) {
+        continue;
+      }
+
+      moves_[index].score_gain = position.score(player) - undo.previous_score;
+      position.unmake_move(undo);
+    }
+    state.record_score_gain_evaluations(size_);
+
+    std::sort(moves_.begin(), moves_.begin() + static_cast<std::ptrdiff_t>(size_),
+              [](const ScoredMove& left, const ScoredMove& right) noexcept {
+                if (left.score_gain != right.score_gain) {
+                  return left.score_gain > right.score_gain;
+                }
+                return square_index(left.move.square) < square_index(right.move.square);
+              });
+  }
+
+  [[nodiscard]] std::optional<Move> next(Bitboard remaining_moves) noexcept {
+    while (next_ < size_) {
+      const Move move = moves_[next_++].move;
+      if ((remaining_moves & square_bit(move.square)) != 0) {
+        return move;
+      }
+    }
+    return std::nullopt;
+  }
+
+ private:
+  struct ScoredMove {
+    Move move;
+    Score score_gain = 0;
+  };
+
+  std::array<ScoredMove, kCellCount> moves_{};
+  std::size_t size_ = 0;
+  std::size_t next_ = 0;
 };
 
 struct EmptyPositionView {};
@@ -396,10 +465,11 @@ template <typename Policy, bool UseTable>
     return std::nullopt;
   }
 
+  ScoreGainMovePicker move_picker{position, remaining_moves, ply, policy, state};
   while (remaining_moves != 0 && alpha < beta) {
-    const int move_index = std::countr_zero(remaining_moves);
-    const Move move{.square = square_from_index(move_index)};
-    if (!search_move(move)) {
+    const std::optional<Move> move = move_picker.next(remaining_moves);
+    assert(move.has_value());
+    if (!move.has_value() || !search_move(*move)) {
       return std::nullopt;
     }
   }
@@ -531,8 +601,9 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
   diagnostics << "ttprobes " << state.tt_probes() << " tthits " << state.tt_hits() << " ttcutoffs "
               << state.tt_cutoffs() << " abcutoffs " << state.alpha_beta_cutoffs() << " ttstores "
               << state.tt_stores() << " symmetryprunes " << state.symmetry_prunes()
-              << " hashentries " << table.size() << " hashcapacity " << table.capacity()
-              << " hashbytes " << table.storage_bytes();
+              << " moveorderevals " << state.score_gain_evaluations() << " hashentries "
+              << table.size() << " hashcapacity " << table.capacity() << " hashbytes "
+              << table.storage_bytes();
   info(diagnostics.str());
 }
 
