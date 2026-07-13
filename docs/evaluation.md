@@ -57,7 +57,8 @@ Analysis version 1 uses completed side-swapped opening pairs. It reports an anyt
 Adjust them at the command line:
 
 ```bash
-make eval-gate BASE=000014-abcd1234 GAMES=5000 GO_MOVETIME_MS=100 TIMEOUT_MS=200
+make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy \
+  GAMES=5000 GO_MOVETIME_MS=100 TIMEOUT_MS=200
 ```
 
 Every eval run names both engine binaries explicitly:
@@ -69,6 +70,20 @@ make eval-smoke BASE=build/by-commit/000015-d74d255e5cfd/release \
   BASE_ENGINE_ARGS='--seed 1' \
   SMOKE_GAMES=630
 ```
+
+For a one-pass, 100 ms minimax gate over 315 openings and their side-swapped games, use:
+
+```bash
+make eval-gate \
+  BASE=<baseline-build-id> \
+  NEW_ENGINE=minimax/poe2_minimax \
+  BASE_ENGINE=minimax/poe2_minimax \
+  PRESET=release \
+  GAMES=630 \
+  GO_MOVETIME_MS=100
+```
+
+The new build is always the current `HEAD` build, not the newest directory under `build/by-commit/`. Choose `BASE` explicitly; both engine names are required. The command omits the default book, 1000 ms timeout, and sequential settings.
 
 ## Opening Suites
 

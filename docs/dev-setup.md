@@ -16,8 +16,8 @@ make tidy-fix
 make fix
 make git-build PRESET=release
 make git-test PRESET=release
-make eval-smoke BASE=<baseline-build-id> PRESET=release
-make eval-gate BASE=<baseline-build-id> PRESET=release
+make eval-smoke BASE=<baseline-build-id> NEW_ENGINE=<name> BASE_ENGINE=<name> PRESET=release
+make eval-gate BASE=<baseline-build-id> NEW_ENGINE=<name> BASE_ENGINE=<name> PRESET=release
 make clean
 ```
 
@@ -52,4 +52,5 @@ The build output stays under `build/by-commit/<zero-padded-commit-count>-<short-
 
 ## Engine Evaluation
 
-Use `make eval-gate BASE=<baseline-build-id> PRESET=release` for a pair-aware sequential strength gate. Evaluation runs are saved under `build/eval/runs/`, and summary rows are appended to `eval/results.csv`. See `docs/evaluation.md` for the full workflow.
+Use the standard recipe in `docs/evaluation.md` for a pair-aware sequential strength gate.
+Evaluation runs are saved under `build/eval/runs/`, and summary rows are appended to `eval/results.csv`.
