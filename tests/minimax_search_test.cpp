@@ -43,6 +43,8 @@ struct SearchDiagnostics {
   std::uint64_t tt_cutoffs = 0;
   std::uint64_t alpha_beta_cutoffs = 0;
   std::uint64_t tt_stores = 0;
+  std::uint64_t pvs_null_window_searches = 0;
+  std::uint64_t pvs_researches = 0;
   std::uint64_t symmetry_prunes = 0;
   std::uint64_t move_order_evaluations = 0;
   std::uint64_t hash_entries = 0;
@@ -66,6 +68,10 @@ struct SearchDiagnostics {
       diagnostics.alpha_beta_cutoffs = value;
     } else if (name == "ttstores") {
       diagnostics.tt_stores = value;
+    } else if (name == "pvsnullsearches") {
+      diagnostics.pvs_null_window_searches = value;
+    } else if (name == "pvsresearches") {
+      diagnostics.pvs_researches = value;
     } else if (name == "symmetryprunes") {
       diagnostics.symmetry_prunes = value;
     } else if (name == "moveorderevals") {
@@ -224,8 +230,8 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   REQUIRE(result.score == value_for(final_position, perspective));
 }
 
-TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
-          "[minimax][alphabeta][move-ordering]") {
+TEST_CASE("principal variation search remains exact with score-gain move ordering",
+          "[minimax][alphabeta][pvs][move-ordering]") {
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
   const poe2::Position position = position_with_empty_squares(empty_squares);
@@ -246,8 +252,10 @@ TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
   REQUIRE(result.score == -41);
   REQUIRE(result.best_move == poe2::Move{.square = {0, 0}});
   REQUIRE(result.principal_variation == expected_principal_variation);
-  REQUIRE(result.nodes == 85);
+  REQUIRE(result.nodes == 118);
   REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
+  REQUIRE(diagnostics.pvs_null_window_searches > 0);
+  REQUIRE(diagnostics.pvs_researches > 0);
   REQUIRE(diagnostics.move_order_evaluations > 0);
   REQUIRE(diagnostics.tt_probes == 0);
   REQUIRE(diagnostics.symmetry_prunes == 0);
@@ -447,6 +455,8 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
   REQUIRE(idle_diagnostics.tt_cutoffs == 0);
   REQUIRE(idle_diagnostics.alpha_beta_cutoffs == 0);
   REQUIRE(idle_diagnostics.tt_stores == 0);
+  REQUIRE(idle_diagnostics.pvs_null_window_searches == 0);
+  REQUIRE(idle_diagnostics.pvs_researches == 0);
   REQUIRE(idle_diagnostics.symmetry_prunes == 0);
   REQUIRE(idle_diagnostics.move_order_evaluations == 0);
   REQUIRE(idle_diagnostics.hash_entries == populated_entries);
