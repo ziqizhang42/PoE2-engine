@@ -3,12 +3,14 @@
 The rules of Powers of Exponent 2 are as follows:
 
 ### Setup
+
 - The game is played on a rectangular grid of width 7 and height 7
 - The game starts with an empty grid
 - **Player 1** starts with a score of 0
 - **Player 2** starts with a handicap of 5.5 (effectively player 2 starts with +5 and wins ties).
 
 ### Gameplay
+
 - Players alternate turns, with **Player 1** going first
 - On each turn, a player places their digit (1 or 2, matching their player number) in an empty cell
 - The game continues until the board is completely filled (winner is the player with the higher score)
@@ -20,6 +22,7 @@ The total score is the sum of all individual line scores, calculated as follows:
 **Line Score Formula:** For a contiguous line of length X: **2^(X-1)**
 
 Examples:
+
 - Line of 1 piece: 2^0 = 1 point
 - Line of 2 pieces: 2^1 = 2 points
 - Line of 3 pieces: 2^2 = 4 points
@@ -33,7 +36,7 @@ Examples:
    - Vertical
    - Diagonal (both directions)
 
-2. **Longest Lines Only:** Lines which are a subset of another line are NOT counted. Only the longest line in each direction counts.
+2. **Maximal Lines Only:** Every maximal contiguous line counts. Shorter lines that are subsets of a maximal line in the same direction are not counted separately.
 
 3. **Overlapping Lines:** Lines can overlap as long as they are not subsets of each other. One piece can count for multiple lines in different directions.
 
