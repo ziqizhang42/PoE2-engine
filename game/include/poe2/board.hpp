@@ -50,7 +50,7 @@ struct PositionKey {
 
 struct MoveUndo {
   Player player = Player::kOne;
-  Square square;
+  std::uint8_t move_index = 0;
   PositionHash previous_hash = 0;
   Score previous_score = 0;
   Bitboard previous_pieces_in_lines = 0;
@@ -115,6 +115,11 @@ class Board final {
   [[nodiscard]] bool remove(Player player, Square square) noexcept;
 
  private:
+  friend class Position;
+
+  void place_unchecked(Player player, int move_index) noexcept;
+  void remove_unchecked(Player player, int move_index) noexcept;
+
   std::array<Bitboard, 2> pieces_{};
 };
 
@@ -132,6 +137,10 @@ class Position final {
   [[nodiscard]] std::optional<Score> score_gain(Player player, Square square) const noexcept;
   // Hot-path equivalent of score_gain() for callers that already know square is legal and empty.
   [[nodiscard]] Score score_gain_unchecked(Player player, Square square) const noexcept;
+  // Index-based hot path for bitboard callers. move_index must name a legal empty square.
+  [[nodiscard]] Score score_gain_unchecked(Player player, int move_index) const noexcept;
+  // Calculates both players' gains together, sharing line-coordinate work between them.
+  [[nodiscard]] ScoreByPlayer score_gains_unchecked(int move_index) const noexcept;
   [[nodiscard]] ScoreByPlayer scores() const noexcept;
   [[nodiscard]] PositionKey key() const noexcept;
   [[nodiscard]] PositionHash hash() const noexcept;
@@ -139,6 +148,7 @@ class Position final {
 
   [[nodiscard]] bool play(Square square) noexcept;
   [[nodiscard]] bool make_move(Square square, MoveUndo& undo) noexcept;
+  void make_move_unchecked(int move_index, MoveUndo& undo) noexcept;
   void unmake_move(const MoveUndo& undo) noexcept;
 
  private:
@@ -162,6 +172,8 @@ struct GameResult {
 [[nodiscard]] PositionHash position_key_hash(PositionKey key) noexcept;
 [[nodiscard]] PositionHash update_position_hash(PositionHash hash, Player player,
                                                 Square square) noexcept;
+[[nodiscard]] PositionHash update_position_hash(PositionHash hash, Player player,
+                                                int move_index) noexcept;
 [[nodiscard]] Player leader_after_handicap(ScoreByPlayer scores) noexcept;
 [[nodiscard]] std::optional<GameResult> result_if_full(const Board& board) noexcept;
 [[nodiscard]] std::optional<GameResult> result_if_full(const Position& position) noexcept;

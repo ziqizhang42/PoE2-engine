@@ -107,16 +107,21 @@ CanonicalPositionView PositionSymmetryTracker::canonical_view() const noexcept {
 
 CanonicalPositionView PositionSymmetryTracker::preview_move(Square square) const noexcept {
   assert(is_valid(square));
-  assert((pieces_[0][0] & square_bit(square)) == 0);
-  assert((pieces_[0][1] & square_bit(square)) == 0);
+  return preview_move(square_index(square));
+}
+
+CanonicalPositionView PositionSymmetryTracker::preview_move(int move_index) const noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  const Bitboard live_move = Bitboard{1} << move_index;
+  assert((pieces_[0][0] & live_move) == 0);
+  assert((pieces_[0][1] & live_move) == 0);
 
   const int player = player_index(side_to_move_);
-  const int move_index = square_index(square);
   const Bitboard first_move_bit = transformed_move_bits[0][move_index];
   PositionKey canonical_key = make_position_key(pieces_[0][0] | (player == 0 ? first_move_bit : 0),
                                                 pieces_[0][1] | (player == 1 ? first_move_bit : 0),
                                                 opponent(side_to_move_));
-  PositionHash canonical_hash = update_position_hash(hashes_[0], side_to_move_, square);
+  PositionHash canonical_hash = update_position_hash(hashes_[0], side_to_move_, move_index);
   std::size_t canonical_index = 0;
 
   for (std::size_t index = 1; index < kAllSymmetries.size(); ++index) {
@@ -126,8 +131,8 @@ CanonicalPositionView PositionSymmetryTracker::preview_move(Square square) const
         pieces_[index][1] | (player == 1 ? move_bit : 0), opponent(side_to_move_));
     if (position_key_less(candidate, canonical_key)) {
       canonical_key = candidate;
-      canonical_hash = update_position_hash(hashes_[index], side_to_move_,
-                                            square_from_index(std::countr_zero(move_bit)));
+      canonical_hash =
+          update_position_hash(hashes_[index], side_to_move_, std::countr_zero(move_bit));
       canonical_index = index;
     }
   }
@@ -142,12 +147,11 @@ CanonicalPositionView PositionSymmetryTracker::preview_move(Square square) const
 }
 
 std::uint8_t PositionSymmetryTracker::stabilizer_mask() const noexcept {
-  const PositionKey identity = key();
   std::uint8_t mask = 0;
 
-  for (const Symmetry symmetry : kAllSymmetries) {
-    if (key(symmetry) == identity) {
-      mask |= static_cast<std::uint8_t>(std::uint8_t{1} << symmetry_index(symmetry));
+  for (std::size_t symmetry = 0; symmetry < kAllSymmetries.size(); ++symmetry) {
+    if (pieces_[symmetry] == pieces_[0]) {
+      mask |= static_cast<std::uint8_t>(std::uint8_t{1} << symmetry);
     }
   }
 
@@ -158,6 +162,9 @@ Bitboard PositionSymmetryTracker::transformed_move_orbit(Square square) const no
   assert(is_valid(square));
   const std::uint8_t mask = stabilizer_mask();
   const int index = square_index(square);
+  if (mask == 1) {
+    return transformed_move_bits[0][index];
+  }
   Bitboard orbit = 0;
 
   for (std::size_t symmetry = 0; symmetry < kAllSymmetries.size(); ++symmetry) {
@@ -173,18 +180,24 @@ bool PositionSymmetryTracker::make_move(Square square) noexcept {
   if (!is_valid(square)) {
     return false;
   }
-  const Bitboard live_move = square_bit(square);
+  return make_move(square_index(square));
+}
+
+bool PositionSymmetryTracker::make_move(int move_index) noexcept {
+  if (move_index < 0 || move_index >= kCellCount) {
+    return false;
+  }
+  const Bitboard live_move = Bitboard{1} << move_index;
   if (((pieces_[0][0] | pieces_[0][1]) & live_move) != 0) {
     return false;
   }
 
   const int player = player_index(side_to_move_);
-  const int move_index = square_index(square);
   for (std::size_t index = 0; index < kAllSymmetries.size(); ++index) {
     const Bitboard move_bit = transformed_move_bits[index][move_index];
     pieces_[index][player] |= move_bit;
-    hashes_[index] = update_position_hash(hashes_[index], side_to_move_,
-                                          square_from_index(std::countr_zero(move_bit)));
+    hashes_[index] =
+        update_position_hash(hashes_[index], side_to_move_, std::countr_zero(move_bit));
   }
   side_to_move_ = opponent(side_to_move_);
   return true;
@@ -192,16 +205,19 @@ bool PositionSymmetryTracker::make_move(Square square) noexcept {
 
 void PositionSymmetryTracker::unmake_move(Square square) noexcept {
   assert(is_valid(square));
+  unmake_move(square_index(square));
+}
+
+void PositionSymmetryTracker::unmake_move(int move_index) noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
   const Player player = opponent(side_to_move_);
   const int player_array_index = player_index(player);
-  const int move_index = square_index(square);
 
   for (std::size_t index = 0; index < kAllSymmetries.size(); ++index) {
     const Bitboard move_bit = transformed_move_bits[index][move_index];
     assert((pieces_[index][player_array_index] & move_bit) != 0);
     pieces_[index][player_array_index] ^= move_bit;
-    hashes_[index] =
-        update_position_hash(hashes_[index], player, square_from_index(std::countr_zero(move_bit)));
+    hashes_[index] = update_position_hash(hashes_[index], player, std::countr_zero(move_bit));
   }
   side_to_move_ = player;
 }

@@ -222,6 +222,7 @@ TEST_CASE("incremental symmetry keys previews and hashes match brute force throu
       const poe2::PositionKey tracker_key_before = tracker.key();
       const poe2::PositionHash tracker_hash_before = tracker.hash();
       const poe2::CanonicalPositionView preview = tracker.preview_move(move);
+      REQUIRE(tracker.preview_move(poe2::square_index(move)) == preview);
 
       poe2::Position child = position;
       REQUIRE(child.play(move));
@@ -235,7 +236,7 @@ TEST_CASE("incremental symmetry keys previews and hashes match brute force throu
 
       poe2::MoveUndo undo;
       REQUIRE(position.make_move(move, undo));
-      REQUIRE(tracker.make_move(move));
+      REQUIRE(tracker.make_move(poe2::square_index(move)));
       undos.push_back(undo);
       moves.push_back(move);
       require_tracker_matches(position, tracker);
@@ -243,7 +244,7 @@ TEST_CASE("incremental symmetry keys previews and hashes match brute force throu
     }
 
     while (!moves.empty()) {
-      tracker.unmake_move(moves.back());
+      tracker.unmake_move(poe2::square_index(moves.back()));
       position.unmake_move(undos.back());
       moves.pop_back();
       undos.pop_back();

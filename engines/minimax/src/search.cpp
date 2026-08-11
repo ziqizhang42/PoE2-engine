@@ -23,9 +23,11 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t kChildKeySetCapacity = 64;
 constexpr std::size_t kPlyCount = static_cast<std::size_t>(kCellCount) + 1;
+constexpr std::uint64_t kDeadlineCheckInterval = 256;
 constexpr Score kSearchInfinity = std::numeric_limits<Score>::max();
 static_assert(std::has_single_bit(kChildKeySetCapacity));
 static_assert(kChildKeySetCapacity > static_cast<std::size_t>(kCellCount));
+static_assert(std::has_single_bit(kDeadlineCheckInterval));
 
 class SearchState final {
  public:
@@ -33,7 +35,10 @@ class SearchState final {
       : deadline_(Clock::now() + move_time), table_(table) {}
 
   [[nodiscard]] bool enter_node() noexcept {
-    if (Clock::now() >= deadline_) {
+    // A steady-clock query at every node is measurable work in this very small-node search.
+    // Sampling still bounds deadline overshoot to a small fraction of a millisecond at normal
+    // search rates, while keeping the hot path to an increment and a predictable branch.
+    if ((nodes_ & (kDeadlineCheckInterval - 1)) == 0 && Clock::now() >= deadline_) {
       return false;
     }
 
@@ -181,28 +186,28 @@ class IdentityPolicy final {
   }
 
   [[nodiscard]] static CanonicalPositionView preview_move(const CanonicalPositionView& current,
-                                                          Square square) noexcept {
+                                                          int move_index) noexcept {
     const Player player = position_key_side_to_move(current.key);
     Bitboard player_one = position_key_bits(current.key, Player::kOne);
     Bitboard player_two = position_key_bits(current.key, Player::kTwo);
     if (player == Player::kOne) {
-      player_one |= square_bit(square);
+      player_one |= Bitboard{1} << move_index;
     } else {
-      player_two |= square_bit(square);
+      player_two |= Bitboard{1} << move_index;
     }
 
     return CanonicalPositionView{
         .key = make_position_key(player_one, player_two, opponent(player)),
-        .hash = update_position_hash(current.hash, player, square),
+        .hash = update_position_hash(current.hash, player, move_index),
     };
   }
 
   static void start_node(int) noexcept {}
-  [[nodiscard]] static Bitboard move_orbit(int, Square square) noexcept {
-    return square_bit(square);
+  [[nodiscard]] static Bitboard move_orbit(int, int move_index) noexcept {
+    return Bitboard{1} << move_index;
   }
-  static void make_move(Square) noexcept {}
-  static void unmake_move(Square) noexcept {}
+  static void make_move(int) noexcept {}
+  static void unmake_move(int) noexcept {}
 };
 
 class D4Policy final {
@@ -218,8 +223,8 @@ class D4Policy final {
   }
 
   [[nodiscard]] CanonicalPositionView preview_move(const CanonicalPositionView&,
-                                                   Square square) const noexcept {
-    return tracker_.preview_move(square);
+                                                   int move_index) const noexcept {
+    return tracker_.preview_move(move_index);
   }
 
   void start_node(int ply) noexcept {
@@ -228,9 +233,11 @@ class D4Policy final {
     stabilizer_masks_[index] = tracker_.stabilizer_mask();
   }
 
-  [[nodiscard]] Bitboard move_orbit(int ply, Square square) const noexcept {
+  [[nodiscard]] Bitboard move_orbit(int ply, int move_index) const noexcept {
     const std::uint8_t stabilizer_mask = stabilizer_masks_[static_cast<std::size_t>(ply)];
-    const int move_index = square_index(square);
+    if (stabilizer_mask == 1) {
+      return transformed_move_bits[0][move_index];
+    }
     Bitboard orbit = 0;
 
     for (std::size_t symmetry = 0; symmetry < kAllSymmetries.size(); ++symmetry) {
@@ -245,13 +252,13 @@ class D4Policy final {
     return child_keys_[static_cast<std::size_t>(ply)].insert(child.key, child.hash);
   }
 
-  void make_move(Square square) noexcept {
-    const bool made_move = tracker_.make_move(square);
+  void make_move(int move_index) noexcept {
+    const bool made_move = tracker_.make_move(move_index);
     assert(made_move);
     (void)made_move;
   }
 
-  void unmake_move(Square square) noexcept { tracker_.unmake_move(square); }
+  void unmake_move(int move_index) noexcept { tracker_.unmake_move(move_index); }
 
  private:
   PositionSymmetryTracker tracker_;
@@ -277,9 +284,8 @@ class ScoreGainMovePicker final {
     Bitboard unselected_moves = moves;
     while (unselected_moves != 0) {
       const int move_index = std::countr_zero(unselected_moves);
-      const Move move{.square = square_from_index(move_index)};
-      moves_[size_++].move = move;
-      unselected_moves &= ~policy.move_orbit(ply, move.square);
+      moves_[size_++].move_index = move_index;
+      unselected_moves &= ~policy.move_orbit(ply, move_index);
     }
 
     if (size_ <= 1) {
@@ -288,7 +294,7 @@ class ScoreGainMovePicker final {
 
     const Player player = position.side_to_move();
     for (std::size_t index = 0; index < size_; ++index) {
-      moves_[index].score_gain = position.score_gain_unchecked(player, moves_[index].move.square);
+      moves_[index].score_gain = position.score_gain_unchecked(player, moves_[index].move_index);
     }
     state.record_score_gain_evaluations(size_);
 
@@ -297,15 +303,15 @@ class ScoreGainMovePicker final {
                 if (left.score_gain != right.score_gain) {
                   return left.score_gain > right.score_gain;
                 }
-                return square_index(left.move.square) < square_index(right.move.square);
+                return left.move_index < right.move_index;
               });
   }
 
-  [[nodiscard]] std::optional<Move> next(Bitboard remaining_moves) noexcept {
+  [[nodiscard]] std::optional<int> next(Bitboard remaining_moves) noexcept {
     while (next_ < size_) {
-      const Move move = moves_[next_++].move;
-      if ((remaining_moves & square_bit(move.square)) != 0) {
-        return move;
+      const int move_index = moves_[next_++].move_index;
+      if ((remaining_moves & (Bitboard{1} << move_index)) != 0) {
+        return move_index;
       }
     }
     return std::nullopt;
@@ -313,7 +319,7 @@ class ScoreGainMovePicker final {
 
  private:
   struct ScoredMove {
-    Move move;
+    int move_index = 0;
     Score score_gain = 0;
   };
 
@@ -426,13 +432,14 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
   NodeResult best;
   bool found_move = false;
 
-  const auto search_move = [&](Move move) -> bool {
-    const Bitboard equivalent_moves = remaining_moves & policy.move_orbit(ply, move.square);
-    assert((equivalent_moves & square_bit(move.square)) != 0);
+  const auto search_move = [&](int move_index) -> bool {
+    const Bitboard move_bit = Bitboard{1} << move_index;
+    const Bitboard equivalent_moves = remaining_moves & policy.move_orbit(ply, move_index);
+    assert((equivalent_moves & move_bit) != 0);
     remaining_moves &= ~equivalent_moves;
     SearchPositionView<Policy, UseTable> child_view;
     if constexpr (UseTable || Policy::kUsesSymmetry) {
-      child_view = policy.preview_move(view, move.square);
+      child_view = policy.preview_move(view, move_index);
     }
 
     if constexpr (Policy::kUsesSymmetry) {
@@ -444,17 +451,13 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     }
 
     MoveUndo undo;
-    const bool made_move = position.make_move(move.square, undo);
-    assert(made_move);
-    if (!made_move) {
-      return false;
-    }
-    policy.make_move(move.square);
+    position.make_move_unchecked(move_index, undo);
+    policy.make_move(move_index);
 
     std::optional<NodeResult> child = negamax<Policy, UseTable, UseTwoPlyClosure>(
         position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view);
 
-    policy.unmake_move(move.square);
+    policy.unmake_move(move_index);
     position.unmake_move(undo);
     if (!child.has_value()) {
       return false;
@@ -462,6 +465,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 
     const Score value = -child->value;
     if (!found_move || value > best.value) {
+      const Move move{.square = square_from_index(move_index)};
       found_move = true;
       best.value = value;
       best.best_move = move;
@@ -476,15 +480,15 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     return true;
   };
 
-  if (cached_move.has_value() && !search_move(*cached_move)) {
+  if (cached_move.has_value() && !search_move(square_index(cached_move->square))) {
     return std::nullopt;
   }
 
   ScoreGainMovePicker move_picker{position, remaining_moves, ply, policy, state};
   while (remaining_moves != 0 && alpha < beta) {
-    const std::optional<Move> move = move_picker.next(remaining_moves);
-    assert(move.has_value());
-    if (!move.has_value() || !search_move(*move)) {
+    const std::optional<int> move_index = move_picker.next(remaining_moves);
+    assert(move_index.has_value());
+    if (!move_index.has_value() || !search_move(*move_index)) {
       return std::nullopt;
     }
   }

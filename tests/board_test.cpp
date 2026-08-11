@@ -111,6 +111,15 @@ void require_all_score_gains_match_full_recalculation(const poe2::Position& posi
     }
   }
 
+  poe2::Bitboard legal_moves = position.legal_moves();
+  while (legal_moves != 0) {
+    const int move_index = std::countr_zero(legal_moves);
+    legal_moves &= legal_moves - poe2::Bitboard{1};
+    const poe2::ScoreByPlayer gains = position.score_gains_unchecked(move_index);
+    REQUIRE(position.score_gain_unchecked(poe2::Player::kOne, move_index) == gains.player_one);
+    REQUIRE(position.score_gain_unchecked(poe2::Player::kTwo, move_index) == gains.player_two);
+  }
+
   require_snapshot(position, before);
 }
 
@@ -239,9 +248,14 @@ TEST_CASE("position make and unmake restore board cache and key", "[position][sc
   snapshots.reserve(sequence.size() + 1);
   snapshots.push_back(snapshot(position));
 
-  for (const poe2::Square square : sequence) {
+  for (std::size_t index = 0; index < sequence.size(); ++index) {
+    const poe2::Square square = sequence[index];
     poe2::MoveUndo undo;
-    REQUIRE(position.make_move(square, undo));
+    if (index % 2 == 0) {
+      REQUIRE(position.make_move(square, undo));
+    } else {
+      position.make_move_unchecked(poe2::square_index(square), undo);
+    }
     undos.push_back(undo);
     require_cached_scores_match(position);
     snapshots.push_back(snapshot(position));
@@ -433,6 +447,8 @@ TEST_CASE("position hash move updates are reversible and match full recomputatio
   const poe2::Square move{2, 4};
   const poe2::PositionHash child_hash =
       poe2::update_position_hash(initial_hash, position.side_to_move(), move);
+  REQUIRE(child_hash == poe2::update_position_hash(initial_hash, position.side_to_move(),
+                                                   poe2::square_index(move)));
 
   REQUIRE(position.play(move));
   REQUIRE(position.hash() == child_hash);

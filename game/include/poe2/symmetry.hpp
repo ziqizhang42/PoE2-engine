@@ -116,11 +116,14 @@ class PositionSymmetryTracker final {
   [[nodiscard]] PositionHash hash(Symmetry symmetry = Symmetry::kIdentity) const noexcept;
   [[nodiscard]] CanonicalPositionView canonical_view() const noexcept;
   [[nodiscard]] CanonicalPositionView preview_move(Square square) const noexcept;
+  [[nodiscard]] CanonicalPositionView preview_move(int move_index) const noexcept;
   [[nodiscard]] std::uint8_t stabilizer_mask() const noexcept;
   [[nodiscard]] Bitboard transformed_move_orbit(Square square) const noexcept;
 
   [[nodiscard]] bool make_move(Square square) noexcept;
+  [[nodiscard]] bool make_move(int move_index) noexcept;
   void unmake_move(Square square) noexcept;
+  void unmake_move(int move_index) noexcept;
 
  private:
   std::array<std::array<Bitboard, 2>, kAllSymmetries.size()> pieces_{};

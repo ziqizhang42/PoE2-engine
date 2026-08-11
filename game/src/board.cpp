@@ -69,10 +69,6 @@ constexpr std::array<std::array<PositionHash, kCellCount>, 2> kZobristPieceHashe
     make_zobrist_piece_hashes();
 constexpr PositionHash kZobristSideToMoveHash = mix64(0xbb67ae8584caa73bULL);
 
-[[nodiscard]] PositionHash zobrist_piece_hash(Player player, Square square) noexcept {
-  return kZobristPieceHashes[player_index(player)][square_index(square)];
-}
-
 [[nodiscard]] constexpr Square step(Square square, Direction direction) noexcept {
   return Square{square.row + direction.row_delta, square.col + direction.col_delta};
 }
@@ -235,13 +231,12 @@ const auto kLineScoreUpdates = make_line_score_updates();
 
 [[nodiscard]] ScoreUpdate score_update_for_move(const Board& board,
                                                 Bitboard existing_pieces_in_lines, Player player,
-                                                Square square,
+                                                int move_index,
                                                 const LineOccupancies& occupancies) noexcept {
   const Bitboard pieces = board.bits(player);
-  const Bitboard move_bit = square_bit(square);
+  const Bitboard move_bit = Bitboard{1} << move_index;
   ScoreUpdate update;
 
-  const int move_index = square_index(square);
   for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
     const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
     const Bitboard cached =
@@ -300,7 +295,7 @@ bool Board::place(Player player, Square square) noexcept {
     return false;
   }
 
-  pieces_[player_index(player)] |= square_bit(square);
+  place_unchecked(player, square_index(square));
   return true;
 }
 
@@ -309,14 +304,28 @@ bool Board::remove(Player player, Square square) noexcept {
     return false;
   }
 
-  const Bitboard bit = square_bit(square);
-  Bitboard& pieces = pieces_[player_index(player)];
-  if ((pieces & bit) == 0) {
+  const int move_index = square_index(square);
+  if ((pieces_[player_index(player)] & (Bitboard{1} << move_index)) == 0) {
     return false;
   }
 
-  pieces &= ~bit;
+  remove_unchecked(player, move_index);
   return true;
+}
+
+void Board::place_unchecked(Player player, int move_index) noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  const Bitboard bit = Bitboard{1} << move_index;
+  assert((occupied() & bit) == 0);
+  pieces_[player_index(player)] |= bit;
+}
+
+void Board::remove_unchecked(Player player, int move_index) noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  const Bitboard bit = Bitboard{1} << move_index;
+  Bitboard& pieces = pieces_[player_index(player)];
+  assert((pieces & bit) != 0);
+  pieces &= ~bit;
 }
 
 const Board& Position::board() const noexcept { return board_; }
@@ -339,10 +348,48 @@ std::optional<Score> Position::score_gain(Player player, Square square) const no
 
 Score Position::score_gain_unchecked(Player player, Square square) const noexcept {
   assert(board_.can_place(square));
+  return score_gain_unchecked(player, square_index(square));
+}
+
+Score Position::score_gain_unchecked(Player player, int move_index) const noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  assert((board_.occupied() & (Bitboard{1} << move_index)) == 0);
   const int index = player_index(player);
-  return score_update_for_move(board_, pieces_in_lines_[index], player, square,
+  return score_update_for_move(board_, pieces_in_lines_[index], player, move_index,
                                line_occupancies_[index])
       .delta;
+}
+
+ScoreByPlayer Position::score_gains_unchecked(int move_index) const noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  assert((board_.occupied() & (Bitboard{1} << move_index)) == 0);
+
+  const Bitboard move_bit = Bitboard{1} << move_index;
+  std::array<ScoreUpdate, 2> updates{};
+  for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
+    const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
+    for (int player = 0; player < 2; ++player) {
+      const Bitboard cached =
+          kLineScoreUpdates[move_index][direction]
+                           [line_occupancies_[player][direction][coordinate.line]];
+      updates[player].delta += static_cast<Score>(cached >> kCachedLineDeltaShift);
+      updates[player].pieces_in_lines |= cached & kBoardMask;
+    }
+  }
+
+  const auto finish = [this, move_bit](int player, ScoreUpdate update) noexcept {
+    const Bitboard pieces = board_.bits(player == 0 ? Player::kOne : Player::kTwo);
+    update.delta -= std::popcount(update.pieces_in_lines & pieces & ~pieces_in_lines_[player]);
+    if ((update.pieces_in_lines & move_bit) == 0) {
+      ++update.delta;
+    }
+    return update.delta;
+  };
+
+  return ScoreByPlayer{
+      .player_one = finish(0, updates[0]),
+      .player_two = finish(1, updates[1]),
+  };
 }
 
 ScoreByPlayer Position::scores() const noexcept { return scores_; }
@@ -365,23 +412,28 @@ bool Position::make_move(Square square, MoveUndo& undo) noexcept {
     return false;
   }
 
+  make_move_unchecked(square_index(square), undo);
+  return true;
+}
+
+void Position::make_move_unchecked(int move_index, MoveUndo& undo) noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  assert((board_.occupied() & (Bitboard{1} << move_index)) == 0);
+
   const Player player = side_to_move_;
   const int index = player_index(player);
-  const ScoreUpdate update = score_update_for_move(board_, pieces_in_lines_[index], player, square,
-                                                   line_occupancies_[index]);
+  const ScoreUpdate update = score_update_for_move(board_, pieces_in_lines_[index], player,
+                                                   move_index, line_occupancies_[index]);
   undo = MoveUndo{
       .player = player,
-      .square = square,
+      .move_index = static_cast<std::uint8_t>(move_index),
       .previous_hash = hash_,
       .previous_score = score_for_player(scores_, player),
       .previous_pieces_in_lines = pieces_in_lines_[index],
   };
 
-  if (!board_.place(player, square)) {
-    return false;
-  }
+  board_.place_unchecked(player, move_index);
 
-  const int move_index = square_index(square);
   for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
     const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
     line_occupancies_[index][direction][coordinate.line] |=
@@ -390,22 +442,18 @@ bool Position::make_move(Square square, MoveUndo& undo) noexcept {
 
   mutable_score_for_player(scores_, player) += update.delta;
   pieces_in_lines_[index] |= update.pieces_in_lines;
-  hash_ = update_position_hash(hash_, player, square);
+  hash_ = update_position_hash(hash_, player, move_index);
   side_to_move_ = opponent(side_to_move_);
   ++ply_;
-  return true;
 }
 
 void Position::unmake_move(const MoveUndo& undo) noexcept {
   assert(ply_ > 0);
   assert(side_to_move_ == opponent(undo.player));
 
-  const bool removed = board_.remove(undo.player, undo.square);
-  assert(removed);
-  (void)removed;
-
   const int index = player_index(undo.player);
-  const int move_index = square_index(undo.square);
+  const int move_index = undo.move_index;
+  board_.remove_unchecked(undo.player, move_index);
   for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
     const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
     line_occupancies_[index][direction][coordinate.line] &=
@@ -448,7 +496,12 @@ PositionHash position_key_hash(PositionKey key) noexcept {
 
 PositionHash update_position_hash(PositionHash hash, Player player, Square square) noexcept {
   assert(is_valid(square));
-  return hash ^ zobrist_piece_hash(player, square) ^ kZobristSideToMoveHash;
+  return update_position_hash(hash, player, square_index(square));
+}
+
+PositionHash update_position_hash(PositionHash hash, Player player, int move_index) noexcept {
+  assert(move_index >= 0 && move_index < kCellCount);
+  return hash ^ kZobristPieceHashes[player_index(player)][move_index] ^ kZobristSideToMoveHash;
 }
 
 Player leader_after_handicap(ScoreByPlayer scores) noexcept {
