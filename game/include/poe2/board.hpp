@@ -130,6 +130,8 @@ class Position final {
   // Returns the score gained if player occupies square, or nullopt unless square is legal and
   // empty. The query does not change the position and player need not be the side to move.
   [[nodiscard]] std::optional<Score> score_gain(Player player, Square square) const noexcept;
+  // Hot-path equivalent of score_gain() for callers that already know square is legal and empty.
+  [[nodiscard]] Score score_gain_unchecked(Player player, Square square) const noexcept;
   [[nodiscard]] ScoreByPlayer scores() const noexcept;
   [[nodiscard]] PositionKey key() const noexcept;
   [[nodiscard]] PositionHash hash() const noexcept;
@@ -146,6 +148,8 @@ class Position final {
   int ply_ = 0;
   ScoreByPlayer scores_{};
   std::array<Bitboard, 2> pieces_in_lines_{};
+  // Seven-bit occupancy patterns make score-gain queries constant-time for each line direction.
+  std::array<std::array<std::array<std::uint8_t, 2 * kBoardSize - 1>, 4>, 2> line_occupancies_{};
 };
 
 struct GameResult {

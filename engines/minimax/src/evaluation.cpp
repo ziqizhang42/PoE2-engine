@@ -14,13 +14,6 @@ constexpr Score kConservativeMaximumPlayerScore =
 static_assert(6 * kConservativeMaximumPlayerScore + kPlayerTwoHandicapHalfPoints <=
               std::numeric_limits<Score>::max());
 
-[[nodiscard]] Score legal_score_gain(const Position& position, Player player,
-                                     Square square) noexcept {
-  const std::optional<Score> gain = position.score_gain(player, square);
-  assert(gain.has_value());
-  return gain.value_or(0);
-}
-
 }  // namespace
 
 Score evaluate(const Position& position) noexcept {
@@ -43,7 +36,7 @@ Score evaluate_two_ply_closure(const Position& position) noexcept {
   const Player player = position.side_to_move();
   if (empty_count == 1) {
     const Square square = square_from_index(std::countr_zero(legal_moves));
-    return base + 2 * legal_score_gain(position, player, square);
+    return base + 2 * position.score_gain_unchecked(player, square);
   }
 
   const Player reply_player = opponent(player);
@@ -56,7 +49,7 @@ Score evaluate_two_ply_closure(const Position& position) noexcept {
     const int move_index = std::countr_zero(reply_moves);
     reply_moves &= reply_moves - Bitboard{1};
     const Square square = square_from_index(move_index);
-    const Score gain = legal_score_gain(position, reply_player, square);
+    const Score gain = position.score_gain_unchecked(reply_player, square);
 
     if (gain > best_reply_gain) {
       second_reply_gain = best_reply_gain;
@@ -72,7 +65,7 @@ Score evaluate_two_ply_closure(const Position& position) noexcept {
     const int move_index = std::countr_zero(legal_moves);
     legal_moves &= legal_moves - Bitboard{1};
     const Square square = square_from_index(move_index);
-    const Score gain = legal_score_gain(position, player, square);
+    const Score gain = position.score_gain_unchecked(player, square);
 
     const Score reply_gain = square == best_reply_square ? second_reply_gain : best_reply_gain;
     best_pair_value = std::max(best_pair_value, gain - reply_gain);

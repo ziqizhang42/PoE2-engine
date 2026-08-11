@@ -288,9 +288,7 @@ class ScoreGainMovePicker final {
 
     const Player player = position.side_to_move();
     for (std::size_t index = 0; index < size_; ++index) {
-      const std::optional<Score> gain = position.score_gain(player, moves_[index].move.square);
-      assert(gain.has_value());
-      moves_[index].score_gain = gain.value_or(0);
+      moves_[index].score_gain = position.score_gain_unchecked(player, moves_[index].move.square);
     }
     state.record_score_gain_evaluations(size_);
 
