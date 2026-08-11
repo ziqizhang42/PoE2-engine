@@ -41,6 +41,10 @@ std::optional<SearchOptions> parse_search_options(std::span<const std::string_vi
       options.use_symmetry = false;
       continue;
     }
+    if (argument == "--no-two-ply-closure") {
+      options.use_two_ply_closure = false;
+      continue;
+    }
     if (argument == "--hash-mb") {
       ++index;
       if (index == arguments.size()) {

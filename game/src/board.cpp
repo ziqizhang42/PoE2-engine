@@ -235,6 +235,15 @@ Bitboard Position::legal_moves() const noexcept { return board_.empty_squares();
 
 Score Position::score(Player player) const noexcept { return score_for_player(scores_, player); }
 
+std::optional<Score> Position::score_gain(Player player, Square square) const noexcept {
+  if (!board_.can_place(square)) {
+    return std::nullopt;
+  }
+
+  return score_update_for_move(board_, pieces_in_lines_[player_index(player)], player, square)
+      .delta;
+}
+
 ScoreByPlayer Position::scores() const noexcept { return scores_; }
 
 PositionKey Position::key() const noexcept {

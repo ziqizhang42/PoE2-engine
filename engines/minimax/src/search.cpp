@@ -56,6 +56,11 @@ class SearchState final {
   void record_score_gain_evaluations(std::uint64_t count) noexcept {
     score_gain_evaluations_ += count;
   }
+  void record_static_evaluation() noexcept { ++static_evaluations_; }
+  void record_closure_evaluation(std::uint64_t gain_queries) noexcept {
+    ++closure_evaluations_;
+    closure_gain_queries_ += gain_queries;
+  }
 
   void store(PositionKey key, PositionHash hash, TranspositionValue value) {
     if (table_.store(key, hash, value)) {
@@ -107,6 +112,11 @@ class SearchState final {
   [[nodiscard]] std::uint64_t score_gain_evaluations() const noexcept {
     return score_gain_evaluations_;
   }
+  [[nodiscard]] std::uint64_t static_evaluations() const noexcept { return static_evaluations_; }
+  [[nodiscard]] std::uint64_t closure_evaluations() const noexcept { return closure_evaluations_; }
+  [[nodiscard]] std::uint64_t closure_gain_queries() const noexcept {
+    return closure_gain_queries_;
+  }
 
  private:
   Clock::time_point deadline_;
@@ -121,6 +131,9 @@ class SearchState final {
   std::uint64_t tt_stores_ = 0;
   std::uint64_t symmetry_prunes_ = 0;
   std::uint64_t score_gain_evaluations_ = 0;
+  std::uint64_t static_evaluations_ = 0;
+  std::uint64_t closure_evaluations_ = 0;
+  std::uint64_t closure_gain_queries_ = 0;
 };
 
 class ChildKeySet final {
@@ -259,7 +272,7 @@ struct FixedPrincipalVariation {
 class ScoreGainMovePicker final {
  public:
   template <typename Policy>
-  ScoreGainMovePicker(Position& position, Bitboard moves, int ply, const Policy& policy,
+  ScoreGainMovePicker(const Position& position, Bitboard moves, int ply, const Policy& policy,
                       SearchState& state) {
     Bitboard unselected_moves = moves;
     while (unselected_moves != 0) {
@@ -275,15 +288,9 @@ class ScoreGainMovePicker final {
 
     const Player player = position.side_to_move();
     for (std::size_t index = 0; index < size_; ++index) {
-      MoveUndo undo;
-      const bool made_move = position.make_move(moves_[index].move.square, undo);
-      assert(made_move);
-      if (!made_move) {
-        continue;
-      }
-
-      moves_[index].score_gain = position.score(player) - undo.previous_score;
-      position.unmake_move(undo);
+      const std::optional<Score> gain = position.score_gain(player, moves_[index].move.square);
+      assert(gain.has_value());
+      moves_[index].score_gain = gain.value_or(0);
     }
     state.record_score_gain_evaluations(size_);
 
@@ -353,7 +360,7 @@ void store_result(SearchState& state, const CanonicalPositionView& view, int dep
               });
 }
 
-template <typename Policy, bool UseTable>
+template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 [[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, int ply, Score alpha,
                                                 Score beta, SearchState& state, Policy& policy,
                                                 SearchPositionView<Policy, UseTable> view) {
@@ -399,7 +406,17 @@ template <typename Policy, bool UseTable>
   }
 
   if (depth == 0 || legal_moves == 0) {
-    const Score value = evaluate(position);
+    state.record_static_evaluation();
+    Score value = 0;
+    if constexpr (UseTwoPlyClosure) {
+      const int empty_count = std::popcount(legal_moves);
+      const std::uint64_t gain_queries =
+          empty_count == 1 ? 1 : static_cast<std::uint64_t>(2 * empty_count);
+      state.record_closure_evaluation(gain_queries);
+      value = evaluate_two_ply_closure(position);
+    } else {
+      value = evaluate(position);
+    }
     if constexpr (UseTable) {
       store_result(state, view, depth, value, TranspositionBound::kExact, std::nullopt);
     }
@@ -436,8 +453,8 @@ template <typename Policy, bool UseTable>
     }
     policy.make_move(move.square);
 
-    std::optional<NodeResult> child = negamax<Policy, UseTable>(position, depth - 1, ply + 1, -beta,
-                                                                -alpha, state, policy, child_view);
+    std::optional<NodeResult> child = negamax<Policy, UseTable, UseTwoPlyClosure>(
+        position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view);
 
     policy.unmake_move(move.square);
     position.unmake_move(undo);
@@ -601,29 +618,31 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
   diagnostics << "ttprobes " << state.tt_probes() << " tthits " << state.tt_hits() << " ttcutoffs "
               << state.tt_cutoffs() << " abcutoffs " << state.alpha_beta_cutoffs() << " ttstores "
               << state.tt_stores() << " symmetryprunes " << state.symmetry_prunes()
-              << " moveorderevals " << state.score_gain_evaluations() << " hashentries "
+              << " moveorderevals " << state.score_gain_evaluations() << " staticevals "
+              << state.static_evaluations() << " closureevals " << state.closure_evaluations()
+              << " closuregainqueries " << state.closure_gain_queries() << " gainqueries "
+              << state.score_gain_evaluations() + state.closure_gain_queries() << " hashentries "
               << table.size() << " hashcapacity " << table.capacity() << " hashbytes "
               << table.storage_bytes();
   info(diagnostics.str());
 }
 
-template <typename Policy, bool UseTable>
+template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 [[nodiscard]] engine::EngineResult run_timed_search(const Position& position,
                                                     std::chrono::milliseconds move_time,
-                                                    const engine::InfoSink& info,
+                                                    int maximum_depth, const engine::InfoSink& info,
                                                     TranspositionTable& table,
                                                     engine::EngineResult result) {
   SearchState state{move_time, table};
   Position search_position = position;
   Policy policy{search_position};
-  const int maximum_depth = search_position.board().empty_count();
   SearchPositionView<Policy, UseTable> root_view;
   if constexpr (UseTable || Policy::kUsesSymmetry) {
     root_view = policy.current_view(search_position);
   }
 
   for (int depth = 1; depth <= maximum_depth; ++depth) {
-    std::optional<NodeResult> iteration = negamax<Policy, UseTable>(
+    std::optional<NodeResult> iteration = negamax<Policy, UseTable, UseTwoPlyClosure>(
         search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view);
     if (!iteration.has_value()) {
       break;
@@ -637,9 +656,31 @@ template <typename Policy, bool UseTable>
   return result;
 }
 
+template <bool UseTwoPlyClosure>
+[[nodiscard]] engine::EngineResult run_configured_search(
+    const Position& position, std::chrono::milliseconds move_time, int maximum_depth,
+    const engine::InfoSink& info, bool use_symmetry, TranspositionTable& table,
+    engine::EngineResult result) {
+  if (use_symmetry) {
+    if (table.capacity() == 0) {
+      return run_timed_search<D4Policy, false, UseTwoPlyClosure>(position, move_time, maximum_depth,
+                                                                 info, table, std::move(result));
+    }
+    return run_timed_search<D4Policy, true, UseTwoPlyClosure>(position, move_time, maximum_depth,
+                                                              info, table, std::move(result));
+  }
+  if (table.capacity() == 0) {
+    return run_timed_search<IdentityPolicy, false, UseTwoPlyClosure>(
+        position, move_time, maximum_depth, info, table, std::move(result));
+  }
+  return run_timed_search<IdentityPolicy, true, UseTwoPlyClosure>(
+      position, move_time, maximum_depth, info, table, std::move(result));
+}
+
 }  // namespace
 
-Search::Search(SearchOptions options) : use_symmetry_(options.use_symmetry) {
+Search::Search(SearchOptions options)
+    : use_symmetry_(options.use_symmetry), use_two_ply_closure_(options.use_two_ply_closure) {
   table_.resize_bytes(options.hash_bytes);
 }
 
@@ -669,20 +710,21 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
     return result;
   }
 
-  if (use_symmetry_) {
-    if (table_.capacity() == 0) {
-      return run_timed_search<D4Policy, false>(position, *limits.move_time, info, table_,
-                                               std::move(result));
-    }
-    return run_timed_search<D4Policy, true>(position, *limits.move_time, info, table_,
-                                            std::move(result));
+  const int empty_count = position.board().empty_count();
+  // A closure leaf resolves up to two remaining placements. Keep one explicit root ply so the
+  // search still returns a move when two or fewer squares remain.
+  const int terminal_depth = use_two_ply_closure_ ? std::max(1, empty_count - 2) : empty_count;
+  int maximum_depth = terminal_depth;
+  if (limits.depth.has_value()) {
+    maximum_depth = std::clamp(*limits.depth, 0, terminal_depth);
   }
-  if (table_.capacity() == 0) {
-    return run_timed_search<IdentityPolicy, false>(position, *limits.move_time, info, table_,
-                                                   std::move(result));
+
+  if (use_two_ply_closure_) {
+    return run_configured_search<true>(position, *limits.move_time, maximum_depth, info,
+                                       use_symmetry_, table_, std::move(result));
   }
-  return run_timed_search<IdentityPolicy, true>(position, *limits.move_time, info, table_,
-                                                std::move(result));
+  return run_configured_search<false>(position, *limits.move_time, maximum_depth, info,
+                                      use_symmetry_, table_, std::move(result));
 }
 
 }  // namespace poe2::minimax

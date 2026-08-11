@@ -127,6 +127,9 @@ class Position final {
   [[nodiscard]] int ply() const noexcept;
   [[nodiscard]] Bitboard legal_moves() const noexcept;
   [[nodiscard]] Score score(Player player) const noexcept;
+  // Returns the score gained if player occupies square, or nullopt unless square is legal and
+  // empty. The query does not change the position and player need not be the side to move.
+  [[nodiscard]] std::optional<Score> score_gain(Player player, Square square) const noexcept;
   [[nodiscard]] ScoreByPlayer scores() const noexcept;
   [[nodiscard]] PositionKey key() const noexcept;
   [[nodiscard]] PositionHash hash() const noexcept;

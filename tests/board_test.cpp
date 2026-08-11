@@ -1,16 +1,25 @@
 #include "poe2/board.hpp"
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 #include <initializer_list>
+#include <numeric>
 #include <optional>
+#include <random>
 #include <vector>
+
+#include "poe2/symmetry.hpp"
 
 namespace {
 
 struct PositionSnapshot {
   poe2::PositionKey key;
   poe2::PositionHash hash = 0;
+  poe2::Bitboard player_one = 0;
+  poe2::Bitboard player_two = 0;
   poe2::Player side_to_move = poe2::Player::kOne;
   int ply = 0;
   poe2::Bitboard legal_moves = poe2::kBoardMask;
@@ -54,6 +63,8 @@ PositionSnapshot snapshot(const poe2::Position& position) {
   return PositionSnapshot{
       .key = position.key(),
       .hash = position.hash(),
+      .player_one = position.board().bits(poe2::Player::kOne),
+      .player_two = position.board().bits(poe2::Player::kTwo),
       .side_to_move = position.side_to_move(),
       .ply = position.ply(),
       .legal_moves = position.legal_moves(),
@@ -66,11 +77,50 @@ void require_snapshot(const poe2::Position& position, const PositionSnapshot& ex
 
   REQUIRE(key == expected.key);
   REQUIRE(position.hash() == expected.hash);
+  REQUIRE(position.board().bits(poe2::Player::kOne) == expected.player_one);
+  REQUIRE(position.board().bits(poe2::Player::kTwo) == expected.player_two);
   REQUIRE(position.side_to_move() == expected.side_to_move);
   REQUIRE(position.ply() == expected.ply);
   REQUIRE(position.legal_moves() == expected.legal_moves);
   REQUIRE(position.scores().player_one == expected.scores.player_one);
   REQUIRE(position.scores().player_two == expected.scores.player_two);
+}
+
+[[nodiscard]] std::optional<poe2::Score> full_recalculation_gain(const poe2::Position& position,
+                                                                 poe2::Player player,
+                                                                 poe2::Square square) {
+  if (!position.board().can_place(square)) {
+    return std::nullopt;
+  }
+
+  poe2::Board board = position.board();
+  const poe2::Score before = poe2::score(board, player);
+  REQUIRE(board.place(player, square));
+  return poe2::score(board, player) - before;
+}
+
+void require_all_score_gains_match_full_recalculation(const poe2::Position& position) {
+  const PositionSnapshot before = snapshot(position);
+
+  for (const poe2::Player player : {poe2::Player::kOne, poe2::Player::kTwo}) {
+    for (int index = 0; index < poe2::kCellCount; ++index) {
+      const poe2::Square square = poe2::square_from_index(index);
+      CAPTURE(position.ply(), player, square.row, square.col);
+      REQUIRE(position.score_gain(player, square) ==
+              full_recalculation_gain(position, player, square));
+    }
+  }
+
+  require_snapshot(position, before);
+}
+
+[[nodiscard]] poe2::Position position_from_history(
+    const std::vector<poe2::Square>& history, poe2::Symmetry symmetry = poe2::Symmetry::kIdentity) {
+  poe2::Position position;
+  for (const poe2::Square square : history) {
+    REQUIRE(position.play(poe2::transform_square(symmetry, square)));
+  }
+  return position;
 }
 
 }  // namespace
@@ -228,6 +278,133 @@ TEST_CASE("position cached scores handle crossing lines", "[position][score]") {
 
   REQUIRE(position.score(poe2::Player::kOne) == 12);
   REQUIRE(position.score(poe2::Player::kTwo) == 8);
+}
+
+TEST_CASE("position score gain matches full scoring for runs bridges and crossings",
+          "[position][score][gain]") {
+  for (int run_length = 1; run_length <= 6; ++run_length) {
+    poe2::Position position;
+    for (int col = 0; col < run_length; ++col) {
+      REQUIRE(position.play({3, col}));
+      REQUIRE(position.play({0, col}));
+    }
+
+    const poe2::Score expected_extension_gain = poe2::Score{1} << (run_length - 1);
+    REQUIRE(position.score_gain(poe2::Player::kOne, {3, run_length}) == expected_extension_gain);
+    REQUIRE(position.score_gain(poe2::Player::kOne, {6, 6}) == 1);
+    require_all_score_gains_match_full_recalculation(position);
+  }
+
+  const std::vector<std::vector<poe2::Square>> motif_histories{
+      {
+          {3, 0},
+          {0, 0},
+          {3, 1},
+          {0, 2},
+          {3, 3},
+          {0, 4},
+          {3, 4},
+          {0, 6},
+          {3, 5},
+      },
+      {
+          {0, 0},
+          {0, 6},
+          {1, 1},
+          {1, 5},
+          {2, 2},
+          {2, 4},
+          {4, 4},
+          {4, 2},
+          {5, 5},
+          {5, 1},
+          {6, 6},
+          {6, 0},
+      },
+      {
+          {3, 2},
+          {0, 0},
+          {3, 4},
+          {0, 1},
+          {2, 3},
+          {0, 5},
+          {4, 3},
+          {0, 6},
+          {2, 2},
+          {1, 0},
+          {4, 4},
+          {1, 6},
+          {2, 4},
+          {5, 0},
+          {4, 2},
+          {5, 6},
+      },
+  };
+
+  const poe2::Position bridge = position_from_history(motif_histories.front());
+  REQUIRE(bridge.score_gain(poe2::Player::kOne, {3, 2}) == 26);
+
+  for (const std::vector<poe2::Square>& history : motif_histories) {
+    for (const poe2::Symmetry symmetry : poe2::kAllSymmetries) {
+      require_all_score_gains_match_full_recalculation(position_from_history(history, symmetry));
+    }
+  }
+}
+
+TEST_CASE("position score gain matches a deterministic all-ply D4 oracle corpus",
+          "[position][score][gain][symmetry]") {
+  std::array<int, poe2::kCellCount> move_order{};
+  std::iota(move_order.begin(), move_order.end(), 0);
+  // A fixed seed makes this oracle corpus exactly reproducible.
+  std::mt19937_64 generator{UINT64_C(0x8b5ad4cef1972360)};  // NOLINT
+  std::shuffle(move_order.begin(), move_order.end(), generator);
+
+  for (const poe2::Symmetry symmetry : poe2::kAllSymmetries) {
+    poe2::Position position;
+    require_all_score_gains_match_full_recalculation(position);
+
+    for (const int move_index : move_order) {
+      const poe2::Square square =
+          poe2::transform_square(symmetry, poe2::square_from_index(move_index));
+      REQUIRE(position.play(square));
+      require_all_score_gains_match_full_recalculation(position);
+    }
+  }
+}
+
+TEST_CASE("position score gain rejects nonempty and invalid squares without mutation",
+          "[position][score][gain]") {
+  const std::vector<poe2::Square> history{
+      {3, 1}, {0, 0}, {3, 2}, {0, 1}, {2, 3}, {0, 2}, {4, 3}, {0, 3}, {3, 3},
+  };
+  poe2::Position position = position_from_history(history);
+  const PositionSnapshot before = snapshot(position);
+
+  for (int repetition = 0; repetition < 8; ++repetition) {
+    for (const poe2::Player player : {poe2::Player::kOne, poe2::Player::kTwo}) {
+      REQUIRE_FALSE(position.score_gain(player, history.front()).has_value());
+      REQUIRE_FALSE(position.score_gain(player, {-1, 0}).has_value());
+      REQUIRE_FALSE(position.score_gain(player, {0, -1}).has_value());
+      REQUIRE_FALSE(position.score_gain(player, {poe2::kBoardSize, 0}).has_value());
+      REQUIRE_FALSE(position.score_gain(player, {0, poe2::kBoardSize}).has_value());
+      REQUIRE(position.score_gain(player, {6, 6}) ==
+              full_recalculation_gain(position, player, {6, 6}));
+    }
+  }
+  require_snapshot(position, before);
+
+  poe2::Bitboard legal_moves = position.legal_moves();
+  while (legal_moves != 0) {
+    const int move_index = std::countr_zero(legal_moves);
+    legal_moves &= legal_moves - poe2::Bitboard{1};
+    const poe2::Square square = poe2::square_from_index(move_index);
+    const PositionSnapshot child_before = snapshot(position);
+    poe2::MoveUndo undo;
+    REQUIRE(position.make_move(square, undo));
+    require_cached_scores_match(position);
+    position.unmake_move(undo);
+    require_snapshot(position, child_before);
+  }
 }
 
 TEST_CASE("position key packs both bitboards and side to move", "[key]") {

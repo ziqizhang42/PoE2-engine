@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -16,8 +18,9 @@
 
 namespace {
 
-[[nodiscard]] poe2::engine::EngineLimits timed_limits(std::chrono::milliseconds move_time) {
-  return poe2::engine::EngineLimits{.move_time = move_time};
+[[nodiscard]] poe2::engine::EngineLimits timed_limits(std::chrono::milliseconds move_time,
+                                                      std::optional<int> depth = std::nullopt) {
+  return poe2::engine::EngineLimits{.depth = depth, .move_time = move_time};
 }
 
 [[nodiscard]] poe2::Score value_for(const poe2::Position& position, poe2::Player perspective) {
@@ -45,6 +48,10 @@ struct SearchDiagnostics {
   std::uint64_t tt_stores = 0;
   std::uint64_t symmetry_prunes = 0;
   std::uint64_t move_order_evaluations = 0;
+  std::uint64_t static_evaluations = 0;
+  std::uint64_t closure_evaluations = 0;
+  std::uint64_t closure_gain_queries = 0;
+  std::uint64_t gain_queries = 0;
   std::uint64_t hash_entries = 0;
   std::uint64_t hash_capacity = 0;
   std::uint64_t hash_bytes = 0;
@@ -70,6 +77,14 @@ struct SearchDiagnostics {
       diagnostics.symmetry_prunes = value;
     } else if (name == "moveorderevals") {
       diagnostics.move_order_evaluations = value;
+    } else if (name == "staticevals") {
+      diagnostics.static_evaluations = value;
+    } else if (name == "closureevals") {
+      diagnostics.closure_evaluations = value;
+    } else if (name == "closuregainqueries") {
+      diagnostics.closure_gain_queries = value;
+    } else if (name == "gainqueries") {
+      diagnostics.gain_queries = value;
     } else if (name == "hashentries") {
       diagnostics.hash_entries = value;
     } else if (name == "hashcapacity") {
@@ -88,6 +103,17 @@ struct SearchDiagnostics {
   std::string message;
   const poe2::engine::EngineResult result = search.run(
       position, timed_limits(move_time), [&message](std::string_view text) { message = text; });
+  diagnostics = parse_diagnostics(message);
+  return result;
+}
+
+[[nodiscard]] poe2::engine::EngineResult run_fixed_depth_with_diagnostics(
+    poe2::minimax::Search& search, const poe2::Position& position, int depth,
+    SearchDiagnostics& diagnostics) {
+  std::string message;
+  const poe2::engine::EngineResult result =
+      search.run(position, timed_limits(std::chrono::seconds{5}, depth),
+                 [&message](std::string_view text) { message = text; });
   diagnostics = parse_diagnostics(message);
   return result;
 }
@@ -122,6 +148,60 @@ void require_legal_principal_variation(const poe2::Position& root,
   for (const poe2::Move move : result.principal_variation) {
     REQUIRE(position.play(move.square));
   }
+}
+
+[[nodiscard]] poe2::Score ordinary_negamax_oracle(poe2::Position& position, int depth) {
+  if (depth == 0 || position.legal_moves() == 0) {
+    return poe2::minimax::evaluate(position);
+  }
+
+  poe2::Score best = std::numeric_limits<poe2::Score>::lowest();
+  poe2::Bitboard moves = position.legal_moves();
+  while (moves != 0) {
+    const int move_index = std::countr_zero(moves);
+    moves &= moves - poe2::Bitboard{1};
+    poe2::MoveUndo undo;
+    REQUIRE(position.make_move(poe2::square_from_index(move_index), undo));
+    best = std::max(best, -ordinary_negamax_oracle(position, depth - 1));
+    position.unmake_move(undo);
+  }
+  return best;
+}
+
+struct RootOracleResult {
+  poe2::Score value = std::numeric_limits<poe2::Score>::lowest();
+  poe2::Bitboard optimal_moves = 0;
+};
+
+[[nodiscard]] RootOracleResult ordinary_root_oracle(const poe2::Position& root, int depth) {
+  REQUIRE(depth > 0);
+  RootOracleResult result;
+  poe2::Position position = root;
+  poe2::Bitboard moves = position.legal_moves();
+  while (moves != 0) {
+    const int move_index = std::countr_zero(moves);
+    moves &= moves - poe2::Bitboard{1};
+    const poe2::Square square = poe2::square_from_index(move_index);
+    poe2::MoveUndo undo;
+    REQUIRE(position.make_move(square, undo));
+    const poe2::Score value = -ordinary_negamax_oracle(position, depth - 1);
+    position.unmake_move(undo);
+
+    if (value > result.value) {
+      result.value = value;
+      result.optimal_moves = poe2::square_bit(square);
+    } else if (value == result.value) {
+      result.optimal_moves |= poe2::square_bit(square);
+    }
+  }
+  return result;
+}
+
+void require_result_move_is_optimal(const poe2::engine::EngineResult& result,
+                                    poe2::Bitboard optimal_moves) {
+  REQUIRE(result.best_move.has_value());
+  const poe2::Move best_move = result.best_move.value_or(poe2::Move{.square = {-1, -1}});
+  REQUIRE((optimal_moves & poe2::square_bit(best_move.square)) != 0);
 }
 
 }  // namespace
@@ -171,7 +251,180 @@ TEST_CASE("iterative deepening keeps the last completed negamax result", "[minim
     REQUIRE(leaf.play(move.square));
   }
   if (result.principal_variation.size() == static_cast<std::size_t>(result.depth)) {
-    REQUIRE(result.score == value_for(leaf, perspective));
+    const poe2::Score leaf_value = poe2::minimax::evaluate_two_ply_closure(leaf);
+    const poe2::Score expected_value =
+        perspective == leaf.side_to_move() ? leaf_value : -leaf_value;
+    REQUIRE(result.score == expected_value);
+  }
+}
+
+TEST_CASE("minimax honors a positive maximum depth without changing uncapped behavior",
+          "[minimax][depth]") {
+  const poe2::Position position;
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
+  SearchDiagnostics diagnostics;
+  const poe2::engine::EngineResult result =
+      run_fixed_depth_with_diagnostics(search, position, 2, diagnostics);
+
+  REQUIRE(result.depth == 2);
+  REQUIRE(result.score.has_value());
+  REQUIRE(result.nodes > 0);
+  REQUIRE(diagnostics.static_evaluations > 0);
+  REQUIRE(diagnostics.closure_evaluations == 0);
+  require_legal_principal_variation(position, result);
+}
+
+TEST_CASE("closure stops at its exact terminal horizon with one two or three empty squares",
+          "[minimax][closure][depth][terminal]") {
+  const std::array<poe2::Bitboard, 3> empty_square_sets{{
+      poe2::square_bit({0, 0}),
+      poe2::square_bit({0, 0}) | poe2::square_bit({3, 4}),
+      poe2::square_bit({0, 0}) | poe2::square_bit({3, 4}) | poe2::square_bit({6, 6}),
+  }};
+
+  for (const poe2::Bitboard empty_squares : empty_square_sets) {
+    const poe2::Position position = position_with_empty_squares(empty_squares);
+    const int empty_count = position.board().empty_count();
+    const RootOracleResult oracle = ordinary_root_oracle(position, empty_count);
+    poe2::minimax::Search closure{poe2::minimax::SearchOptions{
+        .hash_bytes = 0,
+        .use_symmetry = false,
+        .use_two_ply_closure = true,
+    }};
+    SearchDiagnostics diagnostics;
+    const poe2::engine::EngineResult result =
+        run_with_diagnostics(closure, position, std::chrono::milliseconds{100}, diagnostics);
+
+    CAPTURE(empty_count);
+    REQUIRE(result.depth == 1);
+    REQUIRE(result.score == oracle.value);
+    require_result_move_is_optimal(result, oracle.optimal_moves);
+    require_legal_principal_variation(position, result);
+    REQUIRE(diagnostics.static_evaluations > 0);
+    REQUIRE(diagnostics.closure_evaluations == diagnostics.static_evaluations);
+  }
+}
+
+TEST_CASE("closure search depth d equals ordinary search depth d plus two without TT or symmetry",
+          "[minimax][closure][depth]") {
+  struct EquivalenceCase {
+    poe2::Bitboard empty_squares = 0;
+    int closure_depth = 1;
+  };
+  const std::array<EquivalenceCase, 5> cases{{
+      {
+          .empty_squares = poe2::square_bit({0, 0}),
+          .closure_depth = 1,
+      },
+      {
+          .empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({6, 6}),
+          .closure_depth = 1,
+      },
+      {
+          .empty_squares = poe2::square_bit({0, 1}) | poe2::square_bit({1, 4}) |
+                           poe2::square_bit({2, 6}) | poe2::square_bit({4, 0}) |
+                           poe2::square_bit({5, 3}) | poe2::square_bit({6, 5}),
+          .closure_depth = 1,
+      },
+      {
+          .empty_squares = poe2::square_bit({0, 1}) | poe2::square_bit({1, 4}) |
+                           poe2::square_bit({2, 6}) | poe2::square_bit({4, 0}) |
+                           poe2::square_bit({5, 3}) | poe2::square_bit({6, 5}),
+          .closure_depth = 2,
+      },
+      {
+          .empty_squares = poe2::square_bit({0, 1}) | poe2::square_bit({1, 4}) |
+                           poe2::square_bit({2, 6}) | poe2::square_bit({3, 2}) |
+                           poe2::square_bit({4, 0}) | poe2::square_bit({5, 3}) |
+                           poe2::square_bit({6, 5}),
+          .closure_depth = 3,
+      },
+  }};
+
+  for (const EquivalenceCase& test_case : cases) {
+    const poe2::Position position = position_with_empty_squares(test_case.empty_squares);
+    const int ordinary_depth =
+        std::min(test_case.closure_depth + 2, position.board().empty_count());
+    const RootOracleResult oracle = ordinary_root_oracle(position, ordinary_depth);
+    poe2::minimax::Search control{poe2::minimax::SearchOptions{
+        .hash_bytes = 0,
+        .use_symmetry = false,
+        .use_two_ply_closure = false,
+    }};
+    poe2::minimax::Search closure{poe2::minimax::SearchOptions{
+        .hash_bytes = 0,
+        .use_symmetry = false,
+        .use_two_ply_closure = true,
+    }};
+    SearchDiagnostics control_diagnostics;
+    SearchDiagnostics closure_diagnostics;
+    const poe2::engine::EngineResult control_result = run_fixed_depth_with_diagnostics(
+        control, position, test_case.closure_depth + 2, control_diagnostics);
+    const poe2::engine::EngineResult closure_result = run_fixed_depth_with_diagnostics(
+        closure, position, test_case.closure_depth, closure_diagnostics);
+
+    CAPTURE(position.board().empty_count(), test_case.closure_depth, ordinary_depth);
+    REQUIRE(control_result.depth == ordinary_depth);
+    REQUIRE(closure_result.depth ==
+            std::min(test_case.closure_depth, position.board().empty_count()));
+    REQUIRE(control_result.score == oracle.value);
+    REQUIRE(closure_result.score == oracle.value);
+    require_result_move_is_optimal(control_result, oracle.optimal_moves);
+    require_result_move_is_optimal(closure_result, oracle.optimal_moves);
+    require_legal_principal_variation(position, control_result);
+    require_legal_principal_variation(position, closure_result);
+    REQUIRE(control_diagnostics.static_evaluations > 0);
+    REQUIRE(control_diagnostics.closure_evaluations == 0);
+    REQUIRE(control_diagnostics.closure_gain_queries == 0);
+    REQUIRE(closure_diagnostics.static_evaluations > 0);
+    REQUIRE(closure_diagnostics.closure_evaluations == closure_diagnostics.static_evaluations);
+    REQUIRE(closure_diagnostics.gain_queries ==
+            closure_diagnostics.move_order_evaluations + closure_diagnostics.closure_gain_queries);
+  }
+}
+
+TEST_CASE("closure depth equivalence holds with production TT and D4 pruning",
+          "[minimax][closure][depth][tt][symmetry]") {
+  const poe2::Bitboard empty_squares =
+      poe2::square_bit({0, 1}) | poe2::square_bit({1, 4}) | poe2::square_bit({2, 6}) |
+      poe2::square_bit({3, 2}) | poe2::square_bit({4, 0}) | poe2::square_bit({4, 5}) |
+      poe2::square_bit({5, 3}) | poe2::square_bit({6, 0}) | poe2::square_bit({6, 5});
+  const std::vector<poe2::Square> history = history_with_empty_squares(empty_squares);
+
+  for (const poe2::Symmetry symmetry : poe2::kAllSymmetries) {
+    const poe2::Position position = position_from_history(history, symmetry);
+    const RootOracleResult oracle = ordinary_root_oracle(position, 4);
+    poe2::minimax::Search control{poe2::minimax::SearchOptions{
+        .hash_bytes = poe2::minimax::kMebibyte,
+        .use_symmetry = true,
+        .use_two_ply_closure = false,
+    }};
+    poe2::minimax::Search closure{poe2::minimax::SearchOptions{
+        .hash_bytes = poe2::minimax::kMebibyte,
+        .use_symmetry = true,
+        .use_two_ply_closure = true,
+    }};
+    SearchDiagnostics control_diagnostics;
+    SearchDiagnostics closure_diagnostics;
+    const poe2::engine::EngineResult control_result =
+        run_fixed_depth_with_diagnostics(control, position, 4, control_diagnostics);
+    const poe2::engine::EngineResult closure_result =
+        run_fixed_depth_with_diagnostics(closure, position, 2, closure_diagnostics);
+
+    REQUIRE(control_result.depth == 4);
+    REQUIRE(closure_result.depth == 2);
+    REQUIRE(control_result.score == oracle.value);
+    REQUIRE(closure_result.score == oracle.value);
+    require_result_move_is_optimal(control_result, oracle.optimal_moves);
+    require_result_move_is_optimal(closure_result, oracle.optimal_moves);
+    require_legal_principal_variation(position, control_result);
+    require_legal_principal_variation(position, closure_result);
+    REQUIRE(control_diagnostics.tt_probes > 0);
+    REQUIRE(closure_diagnostics.tt_probes > 0);
   }
 }
 
@@ -202,8 +455,11 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
     }
   }
 
-  poe2::minimax::Search search{
-      poe2::minimax::SearchOptions{.hash_bytes = poe2::minimax::kMebibyte, .use_symmetry = false}};
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
   SearchDiagnostics diagnostics;
   const poe2::engine::EngineResult result =
       run_with_diagnostics(search, position, std::chrono::milliseconds{100}, diagnostics);
@@ -229,8 +485,11 @@ TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
   const poe2::Position position = position_with_empty_squares(empty_squares);
-  poe2::minimax::Search search{
-      poe2::minimax::SearchOptions{.hash_bytes = 0, .use_symmetry = false}};
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
 
   SearchDiagnostics diagnostics;
   const poe2::engine::EngineResult result =
@@ -257,8 +516,11 @@ TEST_CASE("fail-soft bounds are cached and reused", "[minimax][alphabeta][tt]") 
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
   const poe2::Position position = position_with_empty_squares(empty_squares);
-  poe2::minimax::Search search{
-      poe2::minimax::SearchOptions{.hash_bytes = poe2::minimax::kMebibyte, .use_symmetry = false}};
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
 
   const poe2::engine::EngineResult first =
       search.run(position, timed_limits(std::chrono::milliseconds{100}), {});
@@ -327,14 +589,20 @@ TEST_CASE("symmetry pruning works without a transposition table", "[minimax][sym
   REQUIRE(poe2::transform_position_key(poe2::Symmetry::kReflectVertical, position.key()) ==
           position.key());
 
-  poe2::minimax::Search symmetric_search{
-      poe2::minimax::SearchOptions{.hash_bytes = 0, .use_symmetry = true}};
+  poe2::minimax::Search symmetric_search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = true,
+      .use_two_ply_closure = false,
+  }};
   SearchDiagnostics symmetric_diagnostics;
   const poe2::engine::EngineResult symmetric_result = run_with_diagnostics(
       symmetric_search, position, std::chrono::milliseconds{100}, symmetric_diagnostics);
 
-  poe2::minimax::Search raw_search{
-      poe2::minimax::SearchOptions{.hash_bytes = 0, .use_symmetry = false}};
+  poe2::minimax::Search raw_search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
   SearchDiagnostics raw_diagnostics;
   const poe2::engine::EngineResult raw_result =
       run_with_diagnostics(raw_search, position, std::chrono::milliseconds{100}, raw_diagnostics);
@@ -357,8 +625,11 @@ TEST_CASE("all board orientations reuse canonical entries and remap cached moves
       poe2::square_bit({0, 1}) | poe2::square_bit({2, 5}) | poe2::square_bit({5, 3});
   const std::vector<poe2::Square> history = history_with_empty_squares(empty_squares);
   const poe2::Position seed_position = position_from_history(history);
-  poe2::minimax::Search search{
-      poe2::minimax::SearchOptions{.hash_bytes = poe2::minimax::kMebibyte, .use_symmetry = true}};
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = true,
+      .use_two_ply_closure = false,
+  }};
 
   SearchDiagnostics seed_diagnostics;
   const poe2::engine::EngineResult seed_result =
@@ -386,8 +657,11 @@ TEST_CASE("raw-key transposition entries are reused when symmetry is disabled", 
   const poe2::Bitboard empty_squares =
       poe2::square_bit({0, 1}) | poe2::square_bit({2, 5}) | poe2::square_bit({5, 3});
   const poe2::Position position = position_from_history(history_with_empty_squares(empty_squares));
-  poe2::minimax::Search search{
-      poe2::minimax::SearchOptions{.hash_bytes = poe2::minimax::kMebibyte, .use_symmetry = false}};
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
 
   SearchDiagnostics first_diagnostics;
   const poe2::engine::EngineResult first =
@@ -462,8 +736,11 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
 }
 
 TEST_CASE("collision-broken cached principal variations remain legal prefixes", "[minimax][tt]") {
-  poe2::minimax::Search search{
-      poe2::minimax::SearchOptions{.hash_bytes = 64, .use_symmetry = true}};
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 64,
+      .use_symmetry = true,
+      .use_two_ply_closure = false,
+  }};
   REQUIRE(search.transposition_table().capacity() == 2);
   REQUIRE(search.transposition_table().storage_bytes() == 64);
 

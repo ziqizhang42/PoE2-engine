@@ -14,6 +14,7 @@ inline constexpr std::size_t kDefaultHashBytes = std::size_t{64} * kMebibyte;
 struct SearchOptions {
   std::size_t hash_bytes = kDefaultHashBytes;
   bool use_symmetry = true;
+  bool use_two_ply_closure = true;
 
   friend constexpr bool operator==(const SearchOptions&, const SearchOptions&) = default;
 };
@@ -30,6 +31,7 @@ class Search final {
 
  private:
   bool use_symmetry_ = true;
+  bool use_two_ply_closure_ = true;
   TranspositionTable table_;
 };
 

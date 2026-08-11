@@ -30,13 +30,14 @@ TEST_CASE("minimax command-line options have stable defaults", "[minimax][cli]")
   REQUIRE(value == poe2::minimax::SearchOptions{});
   REQUIRE(value.hash_bytes == 64 * poe2::minimax::kMebibyte);
   REQUIRE(value.use_symmetry);
+  REQUIRE(value.use_two_ply_closure);
   REQUIRE(error.empty());
 }
 
-TEST_CASE("minimax command-line options allow zero hash and disabling symmetry", "[minimax][cli]") {
+TEST_CASE("minimax command-line options allow disabling search features", "[minimax][cli]") {
   std::string error;
   const std::optional<poe2::minimax::SearchOptions> options =
-      parse({"--hash-mb", "0", "--no-symmetry"}, error);
+      parse({"--hash-mb", "0", "--no-symmetry", "--no-two-ply-closure"}, error);
 
   if (!options.has_value()) {
     FAIL("explicit minimax options should parse");
@@ -45,6 +46,7 @@ TEST_CASE("minimax command-line options allow zero hash and disabling symmetry",
   const poe2::minimax::SearchOptions value = *options;
   REQUIRE(value.hash_bytes == 0);
   REQUIRE_FALSE(value.use_symmetry);
+  REQUIRE_FALSE(value.use_two_ply_closure);
   REQUIRE(error.empty());
 }
 
