@@ -53,6 +53,8 @@ class SearchState final {
 
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
   void record_alpha_beta_cutoff() noexcept { ++alpha_beta_cutoffs_; }
+  void record_pvs_null_window_search() noexcept { ++pvs_null_window_searches_; }
+  void record_pvs_research() noexcept { ++pvs_researches_; }
   void record_score_gain_evaluations(std::uint64_t count) noexcept {
     score_gain_evaluations_ += count;
   }
@@ -107,6 +109,10 @@ class SearchState final {
   [[nodiscard]] std::uint64_t tt_hits() const noexcept { return tt_hits_; }
   [[nodiscard]] std::uint64_t tt_cutoffs() const noexcept { return tt_cutoffs_; }
   [[nodiscard]] std::uint64_t alpha_beta_cutoffs() const noexcept { return alpha_beta_cutoffs_; }
+  [[nodiscard]] std::uint64_t pvs_null_window_searches() const noexcept {
+    return pvs_null_window_searches_;
+  }
+  [[nodiscard]] std::uint64_t pvs_researches() const noexcept { return pvs_researches_; }
   [[nodiscard]] std::uint64_t tt_stores() const noexcept { return tt_stores_; }
   [[nodiscard]] std::uint64_t symmetry_prunes() const noexcept { return symmetry_prunes_; }
   [[nodiscard]] std::uint64_t score_gain_evaluations() const noexcept {
@@ -128,6 +134,8 @@ class SearchState final {
   std::uint64_t tt_hits_ = 0;
   std::uint64_t tt_cutoffs_ = 0;
   std::uint64_t alpha_beta_cutoffs_ = 0;
+  std::uint64_t pvs_null_window_searches_ = 0;
+  std::uint64_t pvs_researches_ = 0;
   std::uint64_t tt_stores_ = 0;
   std::uint64_t symmetry_prunes_ = 0;
   std::uint64_t score_gain_evaluations_ = 0;
@@ -453,8 +461,28 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     }
     policy.make_move(move.square);
 
-    std::optional<NodeResult> child = negamax<Policy, UseTable, UseTwoPlyClosure>(
-        position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view);
+    assert(alpha < beta);
+    const Score null_window_beta = alpha + 1;
+    const bool use_null_window = found_move && depth > 1 && null_window_beta < beta;
+
+    std::optional<NodeResult> child;
+    if (!use_null_window) {
+      child = negamax<Policy, UseTable, UseTwoPlyClosure>(position, depth - 1, ply + 1, -beta,
+                                                          -alpha, state, policy, child_view);
+    } else {
+      state.record_pvs_null_window_search();
+      child = negamax<Policy, UseTable, UseTwoPlyClosure>(
+          position, depth - 1, ply + 1, -null_window_beta, -alpha, state, policy, child_view);
+
+      if (child.has_value()) {
+        const Score null_window_value = -child->value;
+        if (null_window_value > alpha && null_window_value < beta) {
+          state.record_pvs_research();
+          child = negamax<Policy, UseTable, UseTwoPlyClosure>(position, depth - 1, ply + 1, -beta,
+                                                              -alpha, state, policy, child_view);
+        }
+      }
+    }
 
     policy.unmake_move(move.square);
     position.unmake_move(undo);
@@ -617,10 +645,12 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
   std::ostringstream diagnostics;
   diagnostics << "ttprobes " << state.tt_probes() << " tthits " << state.tt_hits() << " ttcutoffs "
               << state.tt_cutoffs() << " abcutoffs " << state.alpha_beta_cutoffs() << " ttstores "
-              << state.tt_stores() << " symmetryprunes " << state.symmetry_prunes()
-              << " moveorderevals " << state.score_gain_evaluations() << " staticevals "
-              << state.static_evaluations() << " closureevals " << state.closure_evaluations()
-              << " closuregainqueries " << state.closure_gain_queries() << " gainqueries "
+              << state.tt_stores() << " pvsnullsearches " << state.pvs_null_window_searches()
+              << " pvsresearches " << state.pvs_researches() << " symmetryprunes "
+              << state.symmetry_prunes() << " moveorderevals " << state.score_gain_evaluations()
+              << " staticevals " << state.static_evaluations() << " closureevals "
+              << state.closure_evaluations() << " closuregainqueries "
+              << state.closure_gain_queries() << " gainqueries "
               << state.score_gain_evaluations() + state.closure_gain_queries() << " hashentries "
               << table.size() << " hashcapacity " << table.capacity() << " hashbytes "
               << table.storage_bytes();
