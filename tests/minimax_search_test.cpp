@@ -480,54 +480,7 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   REQUIRE(result.score == value_for(final_position, perspective));
 }
 
-TEST_CASE("two-ply tactical ordering prioritizes a uniquely valuable denial",
-          "[minimax][move-ordering]") {
-  const std::vector<poe2::Square> history{
-      {5, 5}, {2, 1}, {4, 0}, {2, 3}, {1, 6}, {2, 0},
-  };
-  const poe2::Position position = position_from_history(history);
-  const poe2::Player player = position.side_to_move();
-  const poe2::Player reply_player = poe2::opponent(player);
-  const poe2::Square row_major_tie{0, 0};
-  const poe2::Square denial{2, 2};
-
-  const poe2::Score tied_own_gain = position.score_gain_unchecked(player, row_major_tie);
-  poe2::Score best_reply_gain = std::numeric_limits<poe2::Score>::lowest();
-  poe2::Bitboard best_reply_squares = 0;
-  poe2::Bitboard legal_moves = position.legal_moves();
-  while (legal_moves != 0) {
-    const int move_index = std::countr_zero(legal_moves);
-    legal_moves &= legal_moves - poe2::Bitboard{1};
-    const poe2::Square square = poe2::square_from_index(move_index);
-    REQUIRE(position.score_gain_unchecked(player, square) == tied_own_gain);
-
-    const poe2::Score reply_gain = position.score_gain_unchecked(reply_player, square);
-    if (reply_gain > best_reply_gain) {
-      best_reply_gain = reply_gain;
-      best_reply_squares = poe2::square_bit(square);
-    } else if (reply_gain == best_reply_gain) {
-      best_reply_squares |= poe2::square_bit(square);
-    }
-  }
-  REQUIRE(best_reply_squares == poe2::square_bit(denial));
-
-  poe2::minimax::Search search{poe2::minimax::SearchOptions{
-      .hash_bytes = 0,
-      .use_symmetry = false,
-      .use_two_ply_closure = false,
-  }};
-  SearchDiagnostics diagnostics;
-  const poe2::engine::EngineResult result =
-      run_fixed_depth_with_diagnostics(search, position, 2, diagnostics);
-
-  REQUIRE(result.depth == 2);
-  REQUIRE(result.best_move == poe2::Move{.square = denial});
-  REQUIRE(diagnostics.move_order_evaluations >
-          static_cast<std::uint64_t>(2 * std::popcount(position.legal_moves())));
-  REQUIRE(diagnostics.gain_queries == diagnostics.move_order_evaluations);
-}
-
-TEST_CASE("fail-soft alpha-beta remains exact with two-ply tactical move ordering",
+TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
           "[minimax][alphabeta][move-ordering]") {
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
@@ -552,7 +505,7 @@ TEST_CASE("fail-soft alpha-beta remains exact with two-ply tactical move orderin
   REQUIRE(result.score == -41);
   REQUIRE(result.best_move == poe2::Move{.square = {0, 0}});
   REQUIRE(result.principal_variation == expected_principal_variation);
-  REQUIRE(result.nodes == 68);
+  REQUIRE(result.nodes == 85);
   REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
   REQUIRE(diagnostics.move_order_evaluations > 0);
   REQUIRE(diagnostics.tt_probes == 0);
