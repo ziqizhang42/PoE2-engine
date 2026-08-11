@@ -269,11 +269,11 @@ struct FixedPrincipalVariation {
   std::size_t size = 0;
 };
 
-class ScoreGainMovePicker final {
+class TwoPlyTacticalMovePicker final {
  public:
   template <typename Policy>
-  ScoreGainMovePicker(const Position& position, Bitboard moves, int ply, const Policy& policy,
-                      SearchState& state) {
+  TwoPlyTacticalMovePicker(const Position& position, Bitboard moves, int depth, int ply,
+                           const Policy& policy, SearchState& state) {
     Bitboard unselected_moves = moves;
     while (unselected_moves != 0) {
       const int move_index = std::countr_zero(unselected_moves);
@@ -288,14 +288,54 @@ class ScoreGainMovePicker final {
 
     const Player player = position.side_to_move();
     for (std::size_t index = 0; index < size_; ++index) {
-      moves_[index].score_gain = position.score_gain_unchecked(player, moves_[index].move.square);
+      const Square square = moves_[index].move.square;
+      moves_[index].tactical_value = position.score_gain_unchecked(player, square);
     }
-    state.record_score_gain_evaluations(size_);
+    std::uint64_t gain_queries = size_;
+
+    if (depth > 1) {
+      const Bitboard legal_moves = position.legal_moves();
+      const Player reply_player = opponent(player);
+      Score best_reply_gain = std::numeric_limits<Score>::lowest();
+      Score second_reply_gain = std::numeric_limits<Score>::lowest();
+      Square best_reply_square;
+
+      // Score one representative per current-position orbit. Every square in an orbit has the
+      // same reply gain; an orbit with multiple legal squares also supplies both top replies.
+      Bitboard reply_moves = legal_moves;
+      while (reply_moves != 0) {
+        const int move_index = std::countr_zero(reply_moves);
+        const Square square = square_from_index(move_index);
+        const Bitboard reply_orbit = reply_moves & policy.move_orbit(ply, square);
+        assert((reply_orbit & square_bit(square)) != 0);
+        reply_moves &= ~reply_orbit;
+        const Score gain = position.score_gain_unchecked(reply_player, square);
+        ++gain_queries;
+
+        if (gain > best_reply_gain) {
+          second_reply_gain = std::popcount(reply_orbit) > 1 ? gain : best_reply_gain;
+          best_reply_gain = gain;
+          best_reply_square = square;
+        } else if (gain == best_reply_gain) {
+          second_reply_gain = best_reply_gain;
+        } else if (gain > second_reply_gain) {
+          second_reply_gain = gain;
+        }
+      }
+      assert(second_reply_gain != std::numeric_limits<Score>::lowest());
+
+      for (std::size_t index = 0; index < size_; ++index) {
+        const Square square = moves_[index].move.square;
+        const Score reply_gain = square == best_reply_square ? second_reply_gain : best_reply_gain;
+        moves_[index].tactical_value -= reply_gain;
+      }
+    }
+    state.record_score_gain_evaluations(gain_queries);
 
     std::sort(moves_.begin(), moves_.begin() + static_cast<std::ptrdiff_t>(size_),
               [](const ScoredMove& left, const ScoredMove& right) noexcept {
-                if (left.score_gain != right.score_gain) {
-                  return left.score_gain > right.score_gain;
+                if (left.tactical_value != right.tactical_value) {
+                  return left.tactical_value > right.tactical_value;
                 }
                 return square_index(left.move.square) < square_index(right.move.square);
               });
@@ -314,7 +354,7 @@ class ScoreGainMovePicker final {
  private:
   struct ScoredMove {
     Move move;
-    Score score_gain = 0;
+    Score tactical_value = 0;
   };
 
   std::array<ScoredMove, kCellCount> moves_{};
@@ -480,7 +520,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     return std::nullopt;
   }
 
-  ScoreGainMovePicker move_picker{position, remaining_moves, ply, policy, state};
+  TwoPlyTacticalMovePicker move_picker{position, remaining_moves, depth, ply, policy, state};
   while (remaining_moves != 0 && alpha < beta) {
     const std::optional<Move> move = move_picker.next(remaining_moves);
     assert(move.has_value());
