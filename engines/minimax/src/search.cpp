@@ -25,9 +25,15 @@ constexpr std::size_t kChildKeySetCapacity = 64;
 constexpr std::size_t kPlyCount = static_cast<std::size_t>(kCellCount) + 1;
 constexpr std::uint64_t kDeadlineCheckInterval = 256;
 constexpr Score kSearchInfinity = std::numeric_limits<Score>::max();
+// On a 7x7 board, one placement can join two length-three runs in each of four directions:
+// 4 * (64 - 4 - 4) = 224 points.
+constexpr Score kMaximumMoveScoreGain = 224;
 static_assert(std::has_single_bit(kChildKeySetCapacity));
 static_assert(kChildKeySetCapacity > static_cast<std::size_t>(kCellCount));
 static_assert(std::has_single_bit(kDeadlineCheckInterval));
+static_assert(kBoardSize == 7);
+static_assert(kCellCount <= std::numeric_limits<std::uint8_t>::max());
+static_assert(kMaximumMoveScoreGain <= std::numeric_limits<std::uint8_t>::max());
 
 class SearchState final {
  public:
@@ -77,12 +83,6 @@ class SearchState final {
 
   void clear_principal_variation(int ply) noexcept {
     principal_variation_lengths_[static_cast<std::size_t>(ply)] = 0;
-  }
-
-  void set_cached_principal_variation(int ply, Move move) noexcept {
-    const std::size_t index = static_cast<std::size_t>(ply);
-    principal_variations_[index][0] = move;
-    principal_variation_lengths_[index] = 1;
   }
 
   void prepend_principal_variation(int ply, Move move) noexcept {
@@ -153,10 +153,9 @@ class ChildKeySet final {
       if ((occupied_ & occupied_bit) == 0) {
         occupied_ |= occupied_bit;
         keys_[index] = key;
-        hashes_[index] = hash;
         return true;
       }
-      if (hashes_[index] == hash && keys_[index] == key) {
+      if (keys_[index] == key) {
         return false;
       }
       index = (index + 1) & (kChildKeySetCapacity - 1);
@@ -168,7 +167,6 @@ class ChildKeySet final {
 
  private:
   std::array<PositionKey, kChildKeySetCapacity> keys_{};
-  std::array<PositionHash, kChildKeySetCapacity> hashes_{};
   std::uint64_t occupied_ = 0;
 };
 
@@ -206,8 +204,6 @@ class IdentityPolicy final {
   [[nodiscard]] static Bitboard move_orbit(int, int move_index) noexcept {
     return Bitboard{1} << move_index;
   }
-  static void make_move(int) noexcept {}
-  static void unmake_move(int) noexcept {}
 };
 
 class D4Policy final {
@@ -236,11 +232,11 @@ class D4Policy final {
   [[nodiscard]] Bitboard move_orbit(int ply, int move_index) const noexcept {
     const std::uint8_t stabilizer_mask = stabilizer_masks_[static_cast<std::size_t>(ply)];
     if (stabilizer_mask == 1) {
-      return transformed_move_bits[0][move_index];
+      return Bitboard{1} << move_index;
     }
-    Bitboard orbit = 0;
+    Bitboard orbit = Bitboard{1} << move_index;
 
-    for (std::size_t symmetry = 0; symmetry < kAllSymmetries.size(); ++symmetry) {
+    for (std::size_t symmetry = 1; symmetry < kAllSymmetries.size(); ++symmetry) {
       if ((stabilizer_mask & (std::uint8_t{1} << symmetry)) != 0) {
         orbit |= transformed_move_bits[symmetry][move_index];
       }
@@ -284,7 +280,7 @@ class ScoreGainMovePicker final {
     Bitboard unselected_moves = moves;
     while (unselected_moves != 0) {
       const int move_index = std::countr_zero(unselected_moves);
-      moves_[size_++].move_index = move_index;
+      moves_[size_++].move_index = static_cast<std::uint8_t>(move_index);
       unselected_moves &= ~policy.move_orbit(ply, move_index);
     }
 
@@ -294,17 +290,23 @@ class ScoreGainMovePicker final {
 
     const Player player = position.side_to_move();
     for (std::size_t index = 0; index < size_; ++index) {
-      moves_[index].score_gain = position.score_gain_unchecked(player, moves_[index].move_index);
+      const Score score_gain = position.score_gain_unchecked(player, moves_[index].move_index);
+      assert(score_gain > 0 && score_gain <= kMaximumMoveScoreGain);
+      moves_[index].score_gain = static_cast<std::uint8_t>(score_gain);
     }
     state.record_score_gain_evaluations(size_);
 
-    std::sort(moves_.begin(), moves_.begin() + static_cast<std::ptrdiff_t>(size_),
-              [](const ScoredMove& left, const ScoredMove& right) noexcept {
-                if (left.score_gain != right.score_gain) {
-                  return left.score_gain > right.score_gain;
-                }
-                return left.move_index < right.move_index;
-              });
+    // Moves arrive in increasing index order, which is already the tie-break order. A stable
+    // insertion sort therefore compares only gains and is linear for the common all-equal case.
+    for (std::size_t index = 1; index < size_; ++index) {
+      const ScoredMove candidate = moves_[index];
+      std::size_t insertion = index;
+      while (insertion > 0 && moves_[insertion - 1].score_gain < candidate.score_gain) {
+        moves_[insertion] = moves_[insertion - 1];
+        --insertion;
+      }
+      moves_[insertion] = candidate;
+    }
   }
 
   [[nodiscard]] std::optional<int> next(Bitboard remaining_moves) noexcept {
@@ -319,8 +321,8 @@ class ScoreGainMovePicker final {
 
  private:
   struct ScoredMove {
-    int move_index = 0;
-    Score score_gain = 0;
+    std::uint8_t move_index = 0;
+    std::uint8_t score_gain = 0;
   };
 
   std::array<ScoredMove, kCellCount> moves_{};
@@ -367,8 +369,11 @@ void store_result(SearchState& state, const CanonicalPositionView& view, int dep
 template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 [[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, int ply, Score alpha,
                                                 Score beta, SearchState& state, Policy& policy,
-                                                SearchPositionView<Policy, UseTable> view) {
-  state.clear_principal_variation(ply);
+                                                SearchPositionView<Policy, UseTable> view,
+                                                int pending_policy_move) {
+  if constexpr (!UseTable) {
+    state.clear_principal_variation(ply);
+  }
   if (!state.enter_node()) {
     return std::nullopt;
   }
@@ -385,9 +390,6 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
       if (cached->value.depth >= depth) {
         if (cached->value.bound == TranspositionBound::kExact && has_required_move) {
           state.record_tt_cutoff();
-          if (depth > 0 && cached_move.has_value()) {
-            state.set_cached_principal_variation(ply, *cached_move);
-          }
           return NodeResult{.value = cached->value.score, .best_move = cached_move};
         }
 
@@ -400,9 +402,6 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 
         if (alpha >= beta) {
           state.record_tt_cutoff();
-          if (depth > 0 && cached_move.has_value()) {
-            state.set_cached_principal_variation(ply, *cached_move);
-          }
           return NodeResult{.value = cached->value.score, .best_move = cached_move};
         }
       }
@@ -417,7 +416,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
       const std::uint64_t gain_queries =
           empty_count == 1 ? 1 : static_cast<std::uint64_t>(2 * empty_count);
       state.record_closure_evaluation(gain_queries);
-      value = evaluate_two_ply_closure(position);
+      value = evaluate_two_ply_closure(position, legal_moves, empty_count);
     } else {
       value = evaluate(position);
     }
@@ -426,6 +425,23 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     }
     return NodeResult{.value = value};
   }
+
+  // The canonical child view is enough for deadline, TT, and leaf handling, so the symmetry
+  // tracker intentionally remains at the parent until this node is known to expand.
+  if constexpr (Policy::kUsesSymmetry) {
+    if (pending_policy_move >= 0) {
+      policy.make_move(pending_policy_move);
+    }
+  }
+  const auto finish_node = [&policy,
+                            pending_policy_move](std::optional<NodeResult> result) noexcept {
+    if constexpr (Policy::kUsesSymmetry) {
+      if (pending_policy_move >= 0) {
+        policy.unmake_move(pending_policy_move);
+      }
+    }
+    return result;
+  };
 
   policy.start_node(ply);
   Bitboard remaining_moves = legal_moves;
@@ -452,12 +468,10 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 
     MoveUndo undo;
     position.make_move_unchecked(move_index, undo);
-    policy.make_move(move_index);
 
     std::optional<NodeResult> child = negamax<Policy, UseTable, UseTwoPlyClosure>(
-        position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view);
+        position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view, move_index);
 
-    policy.unmake_move(move_index);
     position.unmake_move(undo);
     if (!child.has_value()) {
       return false;
@@ -469,7 +483,9 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
       found_move = true;
       best.value = value;
       best.best_move = move;
-      state.prepend_principal_variation(ply, move);
+      if constexpr (!UseTable) {
+        state.prepend_principal_variation(ply, move);
+      }
     }
     if (value > alpha) {
       alpha = value;
@@ -481,7 +497,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
   };
 
   if (cached_move.has_value() && !search_move(square_index(cached_move->square))) {
-    return std::nullopt;
+    return finish_node(std::nullopt);
   }
 
   ScoreGainMovePicker move_picker{position, remaining_moves, ply, policy, state};
@@ -489,7 +505,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     const std::optional<int> move_index = move_picker.next(remaining_moves);
     assert(move_index.has_value());
     if (!move_index.has_value() || !search_move(*move_index)) {
-      return std::nullopt;
+      return finish_node(std::nullopt);
     }
   }
 
@@ -503,7 +519,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
     }
     store_result(state, view, depth, best.value, bound, best.best_move);
   }
-  return best;
+  return finish_node(best);
 }
 
 [[nodiscard]] FixedPrincipalVariation reconstruct_identity_principal_variation(
@@ -645,7 +661,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
 
   for (int depth = 1; depth <= maximum_depth; ++depth) {
     std::optional<NodeResult> iteration = negamax<Policy, UseTable, UseTwoPlyClosure>(
-        search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view);
+        search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view, -1);
     if (!iteration.has_value()) {
       break;
     }

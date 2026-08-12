@@ -158,8 +158,9 @@ class Position final {
   int ply_ = 0;
   ScoreByPlayer scores_{};
   std::array<Bitboard, 2> pieces_in_lines_{};
-  // Seven-bit occupancy patterns make score-gain queries constant-time for each line direction.
-  std::array<std::array<std::array<std::uint8_t, 2 * kBoardSize - 1>, 4>, 2> line_occupancies_{};
+  // A base-three digit per cell encodes empty, unscored piece, or globally-scored piece. The
+  // compact line state directly indexes score-gain tables that stay in L1 cache.
+  std::array<std::array<std::array<std::uint16_t, 2 * kBoardSize - 1>, 4>, 2> line_states_{};
 };
 
 struct GameResult {

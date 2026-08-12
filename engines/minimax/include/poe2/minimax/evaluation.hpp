@@ -12,6 +12,9 @@ namespace poe2::minimax {
 // Returns the exact minimax value after the next two placements, using evaluate() at the resulting
 // leaf. With fewer than two legal moves, the horizon is truncated at the terminal position.
 [[nodiscard]] Score evaluate_two_ply_closure(const Position& position) noexcept;
+// Hot-path overload for callers that have already computed the position's legal moves and count.
+[[nodiscard]] Score evaluate_two_ply_closure(const Position& position, Bitboard legal_moves,
+                                             int empty_count) noexcept;
 
 }  // namespace poe2::minimax
 

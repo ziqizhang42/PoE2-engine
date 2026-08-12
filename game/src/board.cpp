@@ -3,6 +3,7 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <limits>
 
 namespace poe2 {
 
@@ -40,8 +41,21 @@ constexpr std::array<Direction, 4> kLineDirections{{
     {1, -1},
 }};
 constexpr std::size_t kLineCount = 2 * kBoardSize - 1;
+constexpr std::size_t kLinePatternCount = std::size_t{1} << kBoardSize;
+constexpr std::size_t kLineStateCount = 2187;  // 3^7 states: empty, unscored, or scored per cell.
 constexpr int kCachedLineDeltaShift = 56;
-using LineOccupancies = std::array<std::array<std::uint8_t, kLineCount>, kLineDirections.size()>;
+using LineStates = std::array<std::array<std::uint16_t, kLineCount>, kLineDirections.size()>;
+
+constexpr std::array<std::uint16_t, kBoardSize> kLineStateIncrements = []() consteval {
+  std::array<std::uint16_t, kBoardSize> increments{};
+  std::uint16_t value = 1;
+  for (std::uint16_t& increment : increments) {
+    increment = value;
+    value = static_cast<std::uint16_t>(value * 3);
+  }
+  return increments;
+}();
+static_assert(static_cast<std::size_t>(kLineStateIncrements.back()) * 3 == kLineStateCount);
 
 [[nodiscard]] constexpr PositionHash mix64(PositionHash value) noexcept {
   value += 0x9e3779b97f4a7c15ULL;
@@ -127,8 +141,8 @@ static_assert(line_score(kBoardSize) < (Bitboard{1} << (64 - kCachedLineDeltaShi
 }
 
 [[nodiscard]] constexpr auto make_line_score_updates() noexcept {
-  constexpr std::size_t kLinePatterns = std::size_t{1} << kBoardSize;
-  std::array<std::array<std::array<Bitboard, kLinePatterns>, kLineDirections.size()>, kCellCount>
+  std::array<std::array<std::array<Bitboard, kLinePatternCount>, kLineDirections.size()>,
+             kCellCount>
       updates{};
 
   for (int square_index_value = 0; square_index_value < kCellCount; ++square_index_value) {
@@ -138,7 +152,7 @@ static_assert(line_score(kBoardSize) < (Bitboard{1} << (64 - kCachedLineDeltaShi
       const Direction direction = kLineDirections[direction_index];
       const LineCoordinate coordinate = line_coordinate(square, direction_index);
 
-      for (std::size_t pattern = 0; pattern < kLinePatterns; ++pattern) {
+      for (std::size_t pattern = 0; pattern < kLinePatternCount; ++pattern) {
         int backward_length = 0;
         for (int offset = static_cast<int>(coordinate.offset) - 1;
              offset >= 0 && (pattern & (std::size_t{1} << offset)) != 0; --offset) {
@@ -180,6 +194,85 @@ static_assert(line_score(kBoardSize) < (Bitboard{1} << (64 - kCachedLineDeltaShi
 
 inline constexpr auto kLineCoordinates = make_line_coordinates();
 const auto kLineScoreUpdates = make_line_score_updates();
+
+[[nodiscard]] constexpr auto make_line_gain_updates() noexcept {
+  struct DecodedState {
+    std::uint8_t occupancy = 0;
+    std::uint8_t scored = 0;
+  };
+  std::array<DecodedState, kLineStateCount> decoded_states{};
+  for (std::size_t state = 0; state < kLineStateCount; ++state) {
+    std::size_t remaining = state;
+    for (int offset = 0; offset < kBoardSize; ++offset) {
+      const std::size_t cell = remaining % 3;
+      remaining /= 3;
+      if (cell != 0) {
+        decoded_states[state].occupancy |= static_cast<std::uint8_t>(std::uint8_t{1} << offset);
+      }
+      if (cell == 2) {
+        decoded_states[state].scored |= static_cast<std::uint8_t>(std::uint8_t{1} << offset);
+      }
+    }
+  }
+
+  std::array<std::array<std::int8_t, kLineStateCount>, kBoardSize> updates{};
+
+  for (int move_offset = 0; move_offset < kBoardSize; ++move_offset) {
+    const std::uint8_t move_bit = static_cast<std::uint8_t>(std::uint8_t{1} << move_offset);
+    for (std::size_t state = 0; state < kLineStateCount; ++state) {
+      const std::uint8_t occupancy = decoded_states[state].occupancy;
+      int backward_length = 0;
+      for (int offset = move_offset - 1;
+           offset >= 0 && (occupancy & (std::size_t{1} << offset)) != 0; --offset) {
+        ++backward_length;
+      }
+
+      int forward_length = 0;
+      for (int offset = move_offset + 1;
+           offset < kBoardSize && (occupancy & (std::size_t{1} << offset)) != 0; ++offset) {
+        ++forward_length;
+      }
+
+      const int merged_length = backward_length + 1 + forward_length;
+      Score delta = 0;
+      std::uint8_t existing_run = 0;
+      if (merged_length >= 2) {
+        delta = line_score(merged_length) - line_contribution(backward_length) -
+                line_contribution(forward_length);
+        const std::uint8_t run = static_cast<std::uint8_t>(((std::uint16_t{1} << merged_length) - 1)
+                                                           << (move_offset - backward_length));
+        existing_run = static_cast<std::uint8_t>(run & ~move_bit);
+      }
+
+      const int gain =
+          delta -
+          std::popcount(static_cast<std::uint8_t>(existing_run & ~decoded_states[state].scored));
+      assert(gain >= std::numeric_limits<std::int8_t>::min());
+      assert(gain <= std::numeric_limits<std::int8_t>::max());
+      updates[move_offset][state] = static_cast<std::int8_t>(gain);
+    }
+  }
+
+  return updates;
+}
+
+const auto kLineGainUpdates = make_line_gain_updates();
+
+[[nodiscard]] constexpr auto make_line_state_occupancies() noexcept {
+  std::array<std::uint8_t, kLineStateCount> occupancies{};
+  for (std::size_t state = 0; state < kLineStateCount; ++state) {
+    std::size_t remaining = state;
+    for (int offset = 0; offset < kBoardSize; ++offset) {
+      if (remaining % 3 != 0) {
+        occupancies[state] |= static_cast<std::uint8_t>(std::uint8_t{1} << offset);
+      }
+      remaining /= 3;
+    }
+  }
+  return occupancies;
+}
+
+inline constexpr auto kLineStateOccupancies = make_line_state_occupancies();
 
 [[nodiscard]] Run scan_run(Bitboard pieces, Square start, Direction direction) noexcept {
   Run run;
@@ -229,28 +322,33 @@ const auto kLineScoreUpdates = make_line_score_updates();
   return state;
 }
 
-[[nodiscard]] ScoreUpdate score_update_for_move(const Board& board,
-                                                Bitboard existing_pieces_in_lines, Player player,
-                                                int move_index,
-                                                const LineOccupancies& occupancies) noexcept {
-  const Bitboard pieces = board.bits(player);
-  const Bitboard move_bit = Bitboard{1} << move_index;
+[[nodiscard]] ScoreUpdate score_update_for_move(Bitboard existing_pieces_in_lines, int move_index,
+                                                const LineStates& states) noexcept {
   ScoreUpdate update;
 
   for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
     const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
-    const Bitboard cached =
-        kLineScoreUpdates[move_index][direction][occupancies[direction][coordinate.line]];
+    const std::size_t occupancy = kLineStateOccupancies[states[direction][coordinate.line]];
+    const Bitboard cached = kLineScoreUpdates[move_index][direction][occupancy];
     update.delta += static_cast<Score>(cached >> kCachedLineDeltaShift);
     update.pieces_in_lines |= cached & kBoardMask;
   }
 
-  update.delta -= std::popcount(update.pieces_in_lines & pieces & ~existing_pieces_in_lines);
-  if ((update.pieces_in_lines & move_bit) == 0) {
-    ++update.delta;
-  }
+  // Every cached run contains the new move bit, while all its other bits are existing pieces.
+  // Runs through the move intersect only at that bit, so count it once and cancel it with the
+  // singleton point. This also covers the no-run case, where the popcount is zero.
+  update.delta += 1 - std::popcount(update.pieces_in_lines & ~existing_pieces_in_lines);
 
   return update;
+}
+
+[[nodiscard]] Score score_gain_for_move(int move_index, const LineStates& states) noexcept {
+  Score gain = 0;
+  for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
+    const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
+    gain += kLineGainUpdates[coordinate.offset][states[direction][coordinate.line]];
+  }
+  return gain == 0 ? 1 : gain;
 }
 
 }  // namespace
@@ -355,40 +453,17 @@ Score Position::score_gain_unchecked(Player player, int move_index) const noexce
   assert(move_index >= 0 && move_index < kCellCount);
   assert((board_.occupied() & (Bitboard{1} << move_index)) == 0);
   const int index = player_index(player);
-  return score_update_for_move(board_, pieces_in_lines_[index], player, move_index,
-                               line_occupancies_[index])
-      .delta;
+  return score_gain_for_move(move_index, line_states_[index]);
 }
 
-ScoreByPlayer Position::score_gains_unchecked(int move_index) const noexcept {
+[[gnu::always_inline]] ScoreByPlayer Position::score_gains_unchecked(
+    int move_index) const noexcept {
   assert(move_index >= 0 && move_index < kCellCount);
   assert((board_.occupied() & (Bitboard{1} << move_index)) == 0);
 
-  const Bitboard move_bit = Bitboard{1} << move_index;
-  std::array<ScoreUpdate, 2> updates{};
-  for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
-    const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
-    for (int player = 0; player < 2; ++player) {
-      const Bitboard cached =
-          kLineScoreUpdates[move_index][direction]
-                           [line_occupancies_[player][direction][coordinate.line]];
-      updates[player].delta += static_cast<Score>(cached >> kCachedLineDeltaShift);
-      updates[player].pieces_in_lines |= cached & kBoardMask;
-    }
-  }
-
-  const auto finish = [this, move_bit](int player, ScoreUpdate update) noexcept {
-    const Bitboard pieces = board_.bits(player == 0 ? Player::kOne : Player::kTwo);
-    update.delta -= std::popcount(update.pieces_in_lines & pieces & ~pieces_in_lines_[player]);
-    if ((update.pieces_in_lines & move_bit) == 0) {
-      ++update.delta;
-    }
-    return update.delta;
-  };
-
   return ScoreByPlayer{
-      .player_one = finish(0, updates[0]),
-      .player_two = finish(1, updates[1]),
+      .player_one = score_gain_for_move(move_index, line_states_[0]),
+      .player_two = score_gain_for_move(move_index, line_states_[1]),
   };
 }
 
@@ -422,8 +497,8 @@ void Position::make_move_unchecked(int move_index, MoveUndo& undo) noexcept {
 
   const Player player = side_to_move_;
   const int index = player_index(player);
-  const ScoreUpdate update = score_update_for_move(board_, pieces_in_lines_[index], player,
-                                                   move_index, line_occupancies_[index]);
+  const ScoreUpdate update =
+      score_update_for_move(pieces_in_lines_[index], move_index, line_states_[index]);
   undo = MoveUndo{
       .player = player,
       .move_index = static_cast<std::uint8_t>(move_index),
@@ -436,8 +511,20 @@ void Position::make_move_unchecked(int move_index, MoveUndo& undo) noexcept {
 
   for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
     const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
-    line_occupancies_[index][direction][coordinate.line] |=
-        static_cast<std::uint8_t>(std::uint8_t{1} << coordinate.offset);
+    line_states_[index][direction][coordinate.line] = static_cast<std::uint16_t>(
+        line_states_[index][direction][coordinate.line] + kLineStateIncrements[coordinate.offset]);
+  }
+
+  Bitboard newly_scored = update.pieces_in_lines & ~pieces_in_lines_[index];
+  while (newly_scored != 0) {
+    const int scored_index = std::countr_zero(newly_scored);
+    newly_scored &= newly_scored - Bitboard{1};
+    for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
+      const LineCoordinate coordinate = kLineCoordinates[scored_index][direction];
+      line_states_[index][direction][coordinate.line] =
+          static_cast<std::uint16_t>(line_states_[index][direction][coordinate.line] +
+                                     kLineStateIncrements[coordinate.offset]);
+    }
   }
 
   mutable_score_for_player(scores_, player) += update.delta;
@@ -456,8 +543,19 @@ void Position::unmake_move(const MoveUndo& undo) noexcept {
   board_.remove_unchecked(undo.player, move_index);
   for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
     const LineCoordinate coordinate = kLineCoordinates[move_index][direction];
-    line_occupancies_[index][direction][coordinate.line] &=
-        static_cast<std::uint8_t>(~(std::uint8_t{1} << coordinate.offset));
+    line_states_[index][direction][coordinate.line] = static_cast<std::uint16_t>(
+        line_states_[index][direction][coordinate.line] - kLineStateIncrements[coordinate.offset]);
+  }
+  Bitboard newly_scored = pieces_in_lines_[index] & ~undo.previous_pieces_in_lines;
+  while (newly_scored != 0) {
+    const int scored_index = std::countr_zero(newly_scored);
+    newly_scored &= newly_scored - Bitboard{1};
+    for (std::size_t direction = 0; direction < kLineDirections.size(); ++direction) {
+      const LineCoordinate coordinate = kLineCoordinates[scored_index][direction];
+      line_states_[index][direction][coordinate.line] =
+          static_cast<std::uint16_t>(line_states_[index][direction][coordinate.line] -
+                                     kLineStateIncrements[coordinate.offset]);
+    }
   }
   mutable_score_for_player(scores_, undo.player) = undo.previous_score;
   pieces_in_lines_[index] = undo.previous_pieces_in_lines;
