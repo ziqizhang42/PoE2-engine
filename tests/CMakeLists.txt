@@ -39,11 +39,12 @@ add_executable(poe2_minimax_tests
   minimax_evaluation_test.cpp
   minimax_options_test.cpp
   minimax_search_test.cpp
+  wasm_adapter_test.cpp
 )
 
 target_link_libraries(poe2_minimax_tests
   PRIVATE
-    poe2::minimax_engine
+    poe2::wasm_adapter
     Catch2::Catch2WithMain
 )
 

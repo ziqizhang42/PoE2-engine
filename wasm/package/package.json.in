@@ -1,0 +1,32 @@
+{
+  "name": "@poe2/engine-wasm",
+  "version": "@PROJECT_VERSION@",
+  "description": "Browser WebAssembly build of the PoE2 minimax engine",
+  "type": "module",
+  "sideEffects": false,
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "default": "./index.mjs"
+    },
+    "./poe2-engine.wasm": "./poe2-engine.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.md",
+    "index.d.ts",
+    "index.mjs",
+    "poe2-engine.mjs",
+    "poe2-engine.wasm"
+  ],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ziqizhang42/PoE2-engine.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

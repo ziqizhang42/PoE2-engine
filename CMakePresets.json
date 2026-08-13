@@ -27,6 +27,22 @@
         "POE2_ENABLE_IPO": "ON",
         "POE2_ENABLE_NATIVE_ARCH": "ON"
       }
+    },
+    {
+      "name": "wasm-release",
+      "displayName": "Browser WebAssembly Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/wasm-release",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "POE2_BUILD_NATIVE_APPS": "OFF",
+        "POE2_BUILD_WASM": "ON",
+        "POE2_ENABLE_IPO": "OFF",
+        "POE2_ENABLE_NATIVE_ARCH": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -37,6 +53,10 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "wasm-release",
+      "configurePreset": "wasm-release"
     }
   ],
   "testPresets": [
@@ -50,6 +70,13 @@
     {
       "name": "release",
       "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "wasm-release",
+      "configurePreset": "wasm-release",
       "output": {
         "outputOnFailure": true
       }

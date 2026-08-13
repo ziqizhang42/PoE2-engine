@@ -20,7 +20,7 @@ SEQUENTIAL_ALT ?= 0.55
 SEQUENTIAL_ALPHA ?= 0.05
 SEQUENTIAL_BETA ?= 0.05
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
+.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
 
 configure:
 	cmake --preset $(PRESET)
@@ -61,13 +61,22 @@ ready:
 	$(MAKE) full-check
 
 clean:
-	cmake -E rm -rf build/debug build/release
+	cmake -E rm -rf build/debug build/release build/wasm-release
 
 debug:
 	$(MAKE) check PRESET=debug
 
 release:
 	$(MAKE) check PRESET=release
+
+wasm-configure:
+	cmake --preset wasm-release
+
+wasm-build: wasm-configure
+	cmake --build --preset wasm-release
+
+wasm-test: wasm-build
+	ctest --preset wasm-release
 
 require-clean:
 	@test -z "$$(git status --porcelain)" || \

@@ -16,10 +16,13 @@ make tidy-fix
 make fix
 make git-build PRESET=release
 make git-test PRESET=release
+make wasm-test
 make eval-smoke BASE=<baseline-build-id> NEW_ENGINE=<name> BASE_ENGINE=<name> PRESET=release
 make eval-gate BASE=<baseline-build-id> NEW_ENGINE=<name> BASE_ENGINE=<name> PRESET=release
 make clean
 ```
+
+The WebAssembly build additionally requires the pinned Emscripten SDK described in [`wasm.md`](wasm.md). Native commands do not require or use Emscripten.
 
 `make ready` is the standard post-edit command: it fixes formatting/tidy issues, then builds, tests, and checks Debug and Release.
 

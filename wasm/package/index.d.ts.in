@@ -1,0 +1,67 @@
+export type Move = `${"a" | "b" | "c" | "d" | "e" | "f" | "g"}${
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5
+  | 6
+  | 7}`;
+
+export interface AnalysisRequest {
+  readonly moves: readonly Move[];
+  readonly searchTimeMs: number;
+  readonly maxDepth?: number;
+}
+
+export interface AnalysisSuccess {
+  readonly ok: true;
+  readonly bestMove: Move;
+  /** Signed evaluation in half-points; positive favors Player 1. */
+  readonly evaluationHalfPoints: number;
+  readonly completedDepth: number;
+  readonly nodes: number;
+  readonly principalVariation: readonly Move[];
+  readonly engineVersion: "@PROJECT_VERSION@";
+  readonly apiVersion: 1;
+}
+
+export type AnalysisErrorCode =
+  | "invalid_request"
+  | "invalid_history"
+  | "malformed_history_move"
+  | "illegal_history_move"
+  | "invalid_search_time"
+  | "invalid_max_depth"
+  | "terminal_position"
+  | "search_incomplete";
+
+export interface AnalysisError {
+  readonly code: AnalysisErrorCode;
+  readonly message: string;
+  readonly field?: "request" | "moves" | "searchTimeMs" | "maxDepth";
+  /** Zero-based index in `moves`. */
+  readonly moveIndex?: number;
+  readonly move?: string;
+  readonly reason?: "out_of_bounds" | "game_over" | "occupied";
+}
+
+export interface AnalysisFailure {
+  readonly ok: false;
+  readonly error: AnalysisError;
+  readonly engineVersion: "@PROJECT_VERSION@";
+  readonly apiVersion: 1;
+}
+
+export type AnalysisResponse = AnalysisSuccess | AnalysisFailure;
+
+export interface Engine {
+  /** Synchronous and CPU-bound; call from a Web Worker. */
+  analyze(request: AnalysisRequest): AnalysisResponse;
+}
+
+export interface CreateEngineOptions {
+  /** Override the packaged WASM URL, for example with a Vite `?url` import. */
+  readonly wasmUrl?: string | URL;
+}
+
+export default function createEngine(options?: CreateEngineOptions): Promise<Engine>;

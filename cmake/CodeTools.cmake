@@ -20,7 +20,7 @@ find_program(
 set(POE2_FORMAT_FILES)
 set(POE2_TIDY_FILES)
 
-foreach(POE2_FORMAT_DIR game engines runner tools tests)
+foreach(POE2_FORMAT_DIR game engines runner tools tests wasm)
   if(EXISTS "${PROJECT_SOURCE_DIR}/${POE2_FORMAT_DIR}")
     file(GLOB_RECURSE POE2_FORMAT_DIR_FILES CONFIGURE_DEPENDS
       "${PROJECT_SOURCE_DIR}/${POE2_FORMAT_DIR}/*.c"
@@ -43,6 +43,10 @@ foreach(POE2_FORMAT_DIR game engines runner tools tests)
     list(APPEND POE2_TIDY_FILES ${POE2_TIDY_DIR_FILES})
   endif()
 endforeach()
+
+if(NOT EMSCRIPTEN)
+  list(FILTER POE2_TIDY_FILES EXCLUDE REGEX "/wasm/src/bindings\\.cpp$")
+endif()
 
 if(POE2_CLANG_FORMAT AND POE2_FORMAT_FILES)
   add_custom_target(format
