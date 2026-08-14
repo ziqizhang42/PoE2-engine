@@ -11,6 +11,17 @@ export interface AnalysisRequest {
   readonly moves: readonly Move[];
   readonly searchTimeMs: number;
   readonly maxDepth?: number;
+  readonly multiPv?: 1 | 2 | 3 | 4 | 5;
+}
+
+export interface AnalysisLine {
+  readonly rank: number;
+  readonly move: Move;
+  readonly equivalentMoves: readonly Move[];
+  /** Signed evaluation in half-points; positive favors Player 1. */
+  readonly evaluationHalfPoints: number;
+  /** A legal prefix beginning with `move`. */
+  readonly principalVariation: readonly Move[];
 }
 
 export interface AnalysisSuccess {
@@ -18,9 +29,10 @@ export interface AnalysisSuccess {
   readonly bestMove: Move;
   /** Signed evaluation in half-points; positive favors Player 1. */
   readonly evaluationHalfPoints: number;
+  readonly principalVariation: readonly Move[];
+  readonly lines: readonly AnalysisLine[];
   readonly completedDepth: number;
   readonly nodes: number;
-  readonly principalVariation: readonly Move[];
   readonly engineVersion: "@PROJECT_VERSION@";
   readonly apiVersion: 1;
 }
@@ -32,13 +44,14 @@ export type AnalysisErrorCode =
   | "illegal_history_move"
   | "invalid_search_time"
   | "invalid_max_depth"
+  | "invalid_multi_pv"
   | "terminal_position"
   | "search_incomplete";
 
 export interface AnalysisError {
   readonly code: AnalysisErrorCode;
   readonly message: string;
-  readonly field?: "request" | "moves" | "searchTimeMs" | "maxDepth";
+  readonly field?: "request" | "moves" | "searchTimeMs" | "maxDepth" | "multiPv";
   /** Zero-based index in `moves`. */
   readonly moveIndex?: number;
   readonly move?: string;
@@ -54,9 +67,14 @@ export interface AnalysisFailure {
 
 export type AnalysisResponse = AnalysisSuccess | AnalysisFailure;
 
+export interface AnalyzeOptions {
+  /** Called synchronously after each fully completed common search depth. */
+  readonly onProgress?: (update: AnalysisSuccess) => void;
+}
+
 export interface Engine {
   /** Synchronous and CPU-bound; call from a Web Worker. */
-  analyze(request: AnalysisRequest): AnalysisResponse;
+  analyze(request: AnalysisRequest, options?: AnalyzeOptions): AnalysisResponse;
 }
 
 export interface CreateEngineOptions {

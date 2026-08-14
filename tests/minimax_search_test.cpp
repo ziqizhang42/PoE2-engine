@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "poe2/minimax/evaluation.hpp"
@@ -172,6 +173,76 @@ struct RootOracleResult {
   poe2::Score value = std::numeric_limits<poe2::Score>::lowest();
   poe2::Bitboard optimal_moves = 0;
 };
+
+struct RootGroupOracleLine {
+  poe2::PositionKey canonical_key;
+  poe2::Bitboard moves = 0;
+  poe2::Score value = std::numeric_limits<poe2::Score>::lowest();
+};
+
+[[nodiscard]] std::vector<RootGroupOracleLine> root_group_oracle(const poe2::Position& root,
+                                                                 int depth) {
+  REQUIRE(depth > 0);
+  std::vector<RootGroupOracleLine> result;
+  poe2::Position position = root;
+  poe2::Bitboard moves = root.legal_moves();
+  while (moves != 0) {
+    const int move_index = std::countr_zero(moves);
+    moves &= moves - poe2::Bitboard{1};
+    const poe2::Square square = poe2::square_from_index(move_index);
+    poe2::MoveUndo undo;
+    REQUIRE(position.make_move(square, undo));
+    const poe2::PositionKey canonical_key = poe2::canonicalize_position_key(position.key()).key;
+    const poe2::Score value = -ordinary_negamax_oracle(position, depth - 1);
+    position.unmake_move(undo);
+
+    const auto group = std::find_if(result.begin(), result.end(),
+                                    [canonical_key](const RootGroupOracleLine& candidate) {
+                                      return candidate.canonical_key == canonical_key;
+                                    });
+    if (group == result.end()) {
+      result.push_back(RootGroupOracleLine{
+          .canonical_key = canonical_key,
+          .moves = poe2::square_bit(square),
+          .value = value,
+      });
+    } else {
+      REQUIRE(group->value == value);
+      group->moves |= poe2::square_bit(square);
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] poe2::PositionKey canonical_successor_key(const poe2::Position& root,
+                                                        poe2::Move move) {
+  poe2::Position child = root;
+  REQUIRE(child.play(move.square));
+  return poe2::canonicalize_position_key(child.key()).key;
+}
+
+void require_legal_analysis_line(const poe2::Position& root,
+                                 const poe2::minimax::AnalysisLine& line, int depth) {
+  REQUIRE(line.rank > 0);
+  REQUIRE_FALSE(line.equivalent_moves.empty());
+  REQUIRE_FALSE(line.principal_variation.empty());
+  REQUIRE(line.principal_variation.front() == line.move);
+  REQUIRE(line.principal_variation.size() <= static_cast<std::size_t>(depth));
+
+  const poe2::PositionKey group_key = canonical_successor_key(root, line.move);
+  bool includes_representative = false;
+  for (const poe2::Move equivalent : line.equivalent_moves) {
+    REQUIRE((root.legal_moves() & poe2::square_bit(equivalent.square)) != 0);
+    REQUIRE(canonical_successor_key(root, equivalent) == group_key);
+    includes_representative = includes_representative || equivalent == line.move;
+  }
+  REQUIRE(includes_representative);
+
+  poe2::Position position = root;
+  for (const poe2::Move move : line.principal_variation) {
+    REQUIRE(position.play(move.square));
+  }
+}
 
 [[nodiscard]] RootOracleResult ordinary_root_oracle(const poe2::Position& root, int depth) {
   REQUIRE(depth > 0);
@@ -753,4 +824,160 @@ TEST_CASE("collision-broken cached principal variations remain legal prefixes", 
   REQUIRE(result.depth == 4);
   REQUIRE(result.principal_variation.size() < 4);
   require_legal_principal_variation(position, result);
+}
+
+TEST_CASE("single-PV analysis exactly preserves the native search result",
+          "[minimax][analysis][multipv][parity]") {
+  const poe2::Position position;
+  const poe2::minimax::SearchOptions options{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = true,
+      .use_two_ply_closure = false,
+  };
+  poe2::minimax::Search native_search{options};
+  poe2::minimax::Search analysis_search{options};
+  poe2::minimax::Search streamed_search{options};
+  const poe2::engine::EngineLimits limits = timed_limits(std::chrono::seconds{5}, 3);
+
+  const poe2::engine::EngineResult native = native_search.run(position, limits, {});
+  const poe2::minimax::AnalysisResult analysis = analysis_search.analyze(position, limits, 1);
+  std::vector<poe2::minimax::AnalysisResult> updates;
+  const poe2::minimax::AnalysisResult streamed = streamed_search.analyze(
+      position, limits, 1,
+      [&updates](const poe2::minimax::AnalysisResult& update) { updates.push_back(update); });
+
+  REQUIRE(analysis.completed_depth == native.depth);
+  REQUIRE(analysis.nodes == native.nodes);
+  REQUIRE(analysis.lines.size() == 1);
+  REQUIRE(analysis.lines.front().rank == 1);
+  REQUIRE(analysis.lines.front().move == native.best_move);
+  REQUIRE(analysis.lines.front().score == native.score);
+  REQUIRE(analysis.lines.front().principal_variation == native.principal_variation);
+  require_legal_analysis_line(position, analysis.lines.front(), analysis.completed_depth);
+  REQUIRE(streamed == analysis);
+  REQUIRE(updates.size() == 3);
+  for (std::size_t index = 0; index < updates.size(); ++index) {
+    REQUIRE(updates[index].completed_depth == static_cast<int>(index) + 1);
+    if (index > 0) {
+      REQUIRE(updates[index - 1].nodes < updates[index].nodes);
+    }
+  }
+}
+
+TEST_CASE("fixed-depth Multi-PV matches a root oracle and survives a warm root entry",
+          "[minimax][analysis][multipv][oracle][tt]") {
+  const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({1, 2}) |
+                                       poe2::square_bit({2, 5}) | poe2::square_bit({4, 1}) |
+                                       poe2::square_bit({5, 4}) | poe2::square_bit({6, 6});
+  const poe2::Position position = position_with_empty_squares(empty_squares);
+  const int depth = 3;
+  const std::vector<RootGroupOracleLine> oracle = root_group_oracle(position, depth);
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = true,
+      .use_two_ply_closure = false,
+  }};
+
+  const poe2::engine::EngineLimits limits = timed_limits(std::chrono::seconds{5}, depth);
+  const poe2::engine::EngineResult warmup = search.run(position, limits, {});
+  REQUIRE(warmup.depth == depth);
+  const poe2::minimax::AnalysisResult result = search.analyze(position, limits, 5);
+
+  REQUIRE(result.completed_depth == depth);
+  REQUIRE(result.lines.size() == std::min<std::size_t>(5, oracle.size()));
+  std::vector<poe2::PositionKey> returned_keys;
+  for (std::size_t index = 0; index < result.lines.size(); ++index) {
+    const poe2::minimax::AnalysisLine& line = result.lines[index];
+    REQUIRE(line.rank == static_cast<int>(index) + 1);
+    require_legal_analysis_line(position, line, depth);
+    if (index > 0) {
+      REQUIRE(result.lines[index - 1].score >= line.score);
+    }
+
+    const poe2::PositionKey key = canonical_successor_key(position, line.move);
+    REQUIRE(std::find(returned_keys.begin(), returned_keys.end(), key) == returned_keys.end());
+    returned_keys.push_back(key);
+    const auto expected = std::find_if(
+        oracle.begin(), oracle.end(),
+        [key](const RootGroupOracleLine& candidate) { return candidate.canonical_key == key; });
+    REQUIRE(expected != oracle.end());
+    REQUIRE(line.score == expected->value);
+
+    poe2::Bitboard returned_moves = 0;
+    for (const poe2::Move equivalent : line.equivalent_moves) {
+      returned_moves |= poe2::square_bit(equivalent.square);
+    }
+    REQUIRE(returned_moves == expected->moves);
+  }
+
+  const poe2::minimax::AnalysisResult repeated = search.analyze(position, limits, 5);
+  REQUIRE(repeated.completed_depth == result.completed_depth);
+  REQUIRE(repeated.lines == result.lines);
+  REQUIRE(repeated.nodes <= result.nodes);
+}
+
+TEST_CASE("symmetric placements share ranks while equal unrelated groups remain separate",
+          "[minimax][analysis][multipv][symmetry]") {
+  const poe2::Position position;
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
+  const poe2::minimax::AnalysisResult result =
+      search.analyze(position, timed_limits(std::chrono::seconds{5}, 1), 5);
+
+  REQUIRE(result.completed_depth == 1);
+  REQUIRE(result.lines.size() == 5);
+  std::size_t physical_move_count = 0;
+  std::vector<poe2::PositionKey> keys;
+  for (const poe2::minimax::AnalysisLine& line : result.lines) {
+    REQUIRE(line.score == result.lines.front().score);
+    require_legal_analysis_line(position, line, 1);
+    physical_move_count += line.equivalent_moves.size();
+    const poe2::PositionKey key = canonical_successor_key(position, line.move);
+    REQUIRE(std::find(keys.begin(), keys.end(), key) == keys.end());
+    keys.push_back(key);
+  }
+  REQUIRE(physical_move_count > result.lines.size());
+}
+
+TEST_CASE("Multi-PV returns fewer lines when fewer successor groups exist",
+          "[minimax][analysis][multipv][terminal]") {
+  const poe2::Position position = position_with_empty_squares(poe2::square_bit({3, 4}));
+  poe2::minimax::Search search;
+  const poe2::minimax::AnalysisResult result =
+      search.analyze(position, timed_limits(std::chrono::seconds{5}), 5);
+
+  REQUIRE(result.completed_depth == 1);
+  REQUIRE(result.lines.size() == 1);
+  REQUIRE(result.lines.front().equivalent_moves == std::vector<poe2::Move>{{.square = {3, 4}}});
+  require_legal_analysis_line(position, result.lines.front(), 1);
+}
+
+TEST_CASE(
+    "Multi-PV progress contains only complete common depths and keeps incomplete work private",
+    "[minimax][analysis][multipv][progress][timeout]") {
+  const poe2::Position position;
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = poe2::minimax::kMebibyte,
+      .use_symmetry = true,
+      .use_two_ply_closure = false,
+  }};
+  std::vector<poe2::minimax::AnalysisResult> updates;
+  const poe2::minimax::AnalysisResult result =
+      search.analyze(position, timed_limits(std::chrono::milliseconds{100}, 6), 5,
+                     [&updates](const poe2::minimax::AnalysisResult& update) {
+                       updates.push_back(update);
+                       if (update.completed_depth == 1) {
+                         std::this_thread::sleep_for(std::chrono::milliseconds{150});
+                       }
+                     });
+
+  REQUIRE(updates.size() == 1);
+  REQUIRE(updates.front().completed_depth == 1);
+  REQUIRE(updates.front().lines.size() == 5);
+  REQUIRE(result.completed_depth == updates.front().completed_depth);
+  REQUIRE(result.lines == updates.front().lines);
+  REQUIRE(result.nodes > updates.front().nodes);
 }

@@ -12,8 +12,9 @@ export default async function createEngine(options = {}) {
   const analyzer = new module.BrowserAnalyzer();
 
   return Object.freeze({
-    analyze(request) {
-      return analyzer.analyze(request);
+    analyze(request, options) {
+      const onProgress = options?.onProgress;
+      return analyzer.analyze(request, typeof onProgress === "function" ? onProgress : undefined);
     },
   });
 }

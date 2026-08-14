@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -24,6 +25,7 @@ enum class AnalysisErrorCode : std::uint8_t {
   kIllegalHistoryMove,
   kInvalidSearchTime,
   kInvalidMaxDepth,
+  kInvalidMultiPv,
   kTerminalPosition,
   kSearchIncomplete,
 };
@@ -33,12 +35,14 @@ enum class AnalysisErrorField : std::uint8_t {
   kMoves,
   kSearchTimeMs,
   kMaxDepth,
+  kMultiPv,
 };
 
 struct AnalysisRequest {
   std::vector<std::string> moves;
   int search_time_ms = 0;
   std::optional<int> max_depth;
+  int multi_pv = 1;
 };
 
 struct AnalysisError {
@@ -50,21 +54,36 @@ struct AnalysisError {
   std::optional<MoveError> reason;
 };
 
+struct AnalysisLine {
+  int rank = 0;
+  std::string move;
+  std::vector<std::string> equivalent_moves;
+  Score evaluation_half_points = 0;
+  std::vector<std::string> principal_variation;
+
+  friend bool operator==(const AnalysisLine&, const AnalysisLine&) = default;
+};
+
 struct AnalysisSuccess {
   std::string best_move;
   Score evaluation_half_points = 0;
+  std::vector<std::string> principal_variation;
+  std::vector<AnalysisLine> lines;
   int completed_depth = 0;
   std::uint64_t nodes = 0;
-  std::vector<std::string> principal_variation;
+
+  friend bool operator==(const AnalysisSuccess&, const AnalysisSuccess&) = default;
 };
 
 using AnalysisResponse = std::variant<AnalysisSuccess, AnalysisError>;
+using AnalysisProgressSink = std::function<void(const AnalysisSuccess&)>;
 
 class Analyzer final {
  public:
   explicit Analyzer(std::size_t hash_bytes = kDefaultHashBytes);
 
-  [[nodiscard]] AnalysisResponse analyze(const AnalysisRequest& request);
+  [[nodiscard]] AnalysisResponse analyze(const AnalysisRequest& request,
+                                         const AnalysisProgressSink& progress = {});
   [[nodiscard]] std::size_t hash_storage_bytes() const noexcept;
 
  private:

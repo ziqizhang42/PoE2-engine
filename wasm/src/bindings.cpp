@@ -18,7 +18,7 @@ using emscripten::val;
 
 class BrowserAnalyzer final {
  public:
-  [[nodiscard]] val analyze(val request_value);
+  [[nodiscard]] val analyze(val request_value, val progress_callback);
 
  private:
   Analyzer analyzer_;
@@ -62,19 +62,38 @@ void set_versions(val& object) {
   });
 }
 
+[[nodiscard]] val move_array_value(const std::vector<std::string>& moves) {
+  val value = val::array();
+  for (std::size_t index = 0; index < moves.size(); ++index) {
+    value.set(index, moves[index]);
+  }
+  return value;
+}
+
+[[nodiscard]] val analysis_line_value(const AnalysisLine& line) {
+  val value = val::object();
+  value.set("rank", line.rank);
+  value.set("move", line.move);
+  value.set("equivalentMoves", move_array_value(line.equivalent_moves));
+  value.set("evaluationHalfPoints", line.evaluation_half_points);
+  value.set("principalVariation", move_array_value(line.principal_variation));
+  return value;
+}
+
 [[nodiscard]] val success_value(const AnalysisSuccess& success) {
-  val principal_variation = val::array();
-  for (std::size_t index = 0; index < success.principal_variation.size(); ++index) {
-    principal_variation.set(index, success.principal_variation[index]);
+  val lines = val::array();
+  for (std::size_t index = 0; index < success.lines.size(); ++index) {
+    lines.set(index, analysis_line_value(success.lines[index]));
   }
 
   val response = val::object();
   response.set("ok", true);
   response.set("bestMove", success.best_move);
   response.set("evaluationHalfPoints", success.evaluation_half_points);
+  response.set("principalVariation", move_array_value(success.principal_variation));
+  response.set("lines", lines);
   response.set("completedDepth", success.completed_depth);
   response.set("nodes", static_cast<double>(success.nodes));
-  response.set("principalVariation", principal_variation);
   set_versions(response);
   return response;
 }
@@ -87,7 +106,7 @@ void set_versions(val& object) {
   return val::global("Number").call<bool>("isSafeInteger", value);
 }
 
-val BrowserAnalyzer::analyze(val request_value) {
+val BrowserAnalyzer::analyze(val request_value, val progress_callback) {
   if (request_value.isNull() || request_value.isUndefined() || !is_type(request_value, "object") ||
       val::global("Array").call<bool>("isArray", request_value)) {
     return error_value(AnalysisErrorCode::kInvalidRequest,
@@ -154,11 +173,40 @@ val BrowserAnalyzer::analyze(val request_value) {
     }
   }
 
-  const AnalysisResponse response = analyzer_.analyze(AnalysisRequest{
-      .moves = std::move(moves),
-      .search_time_ms = static_cast<int>(search_time),
-      .max_depth = max_depth,
-  });
+  int multi_pv = 1;
+  if (request_value.hasOwnProperty("multiPv")) {
+    const val multi_pv_value = request_value["multiPv"];
+    if (!multi_pv_value.isUndefined()) {
+      if (!is_safe_integer(multi_pv_value)) {
+        return error_value(AnalysisErrorCode::kInvalidMultiPv,
+                           "multiPv must be an integer from 1 through 5",
+                           AnalysisErrorField::kMultiPv);
+      }
+      const double count = multi_pv_value.as<double>();
+      if (count < 1 || count > 5) {
+        return error_value(AnalysisErrorCode::kInvalidMultiPv,
+                           "multiPv must be an integer from 1 through 5",
+                           AnalysisErrorField::kMultiPv);
+      }
+      multi_pv = static_cast<int>(count);
+    }
+  }
+
+  AnalysisProgressSink progress;
+  if (is_type(progress_callback, "function")) {
+    progress = [callback = std::move(progress_callback)](const AnalysisSuccess& update) {
+      callback(success_value(update));
+    };
+  }
+
+  const AnalysisResponse response = analyzer_.analyze(
+      AnalysisRequest{
+          .moves = std::move(moves),
+          .search_time_ms = static_cast<int>(search_time),
+          .max_depth = max_depth,
+          .multi_pv = multi_pv,
+      },
+      progress);
   if (const auto* success = std::get_if<AnalysisSuccess>(&response); success != nullptr) {
     return success_value(*success);
   }

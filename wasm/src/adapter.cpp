@@ -38,6 +38,41 @@ namespace {
   return error;
 }
 
+[[nodiscard]] std::vector<std::string> format_moves(const std::vector<Move>& moves) {
+  std::vector<std::string> formatted;
+  formatted.reserve(moves.size());
+  for (const Move move : moves) {
+    formatted.push_back(format_move(move));
+  }
+  return formatted;
+}
+
+[[nodiscard]] AnalysisSuccess make_success(const minimax::AnalysisResult& result,
+                                           Player root_player) {
+  AnalysisSuccess success{
+      .completed_depth = result.completed_depth,
+      .nodes = result.nodes,
+  };
+  success.lines.reserve(result.lines.size());
+  for (const minimax::AnalysisLine& source : result.lines) {
+    success.lines.push_back(AnalysisLine{
+        .rank = source.rank,
+        .move = format_move(source.move),
+        .equivalent_moves = format_moves(source.equivalent_moves),
+        .evaluation_half_points = root_player == Player::kOne ? source.score : -source.score,
+        .principal_variation = format_moves(source.principal_variation),
+    });
+  }
+
+  if (!success.lines.empty()) {
+    const AnalysisLine& best = success.lines.front();
+    success.best_move = best.move;
+    success.evaluation_half_points = best.evaluation_half_points;
+    success.principal_variation = best.principal_variation;
+  }
+  return success;
+}
+
 }  // namespace
 
 Analyzer::Analyzer(std::size_t hash_bytes)
@@ -47,7 +82,8 @@ Analyzer::Analyzer(std::size_t hash_bytes)
           .use_two_ply_closure = true,
       }) {}
 
-AnalysisResponse Analyzer::analyze(const AnalysisRequest& request) {
+AnalysisResponse Analyzer::analyze(const AnalysisRequest& request,
+                                   const AnalysisProgressSink& progress) {
   if (request.moves.size() > static_cast<std::size_t>(kCellCount)) {
     return make_error(AnalysisErrorCode::kInvalidHistory,
                       "moves cannot contain more than 49 entries", AnalysisErrorField::kMoves);
@@ -61,6 +97,10 @@ AnalysisResponse Analyzer::analyze(const AnalysisRequest& request) {
     return make_error(AnalysisErrorCode::kInvalidMaxDepth,
                       "maxDepth must be an integer from 1 through 49",
                       AnalysisErrorField::kMaxDepth);
+  }
+  if (request.multi_pv < 1 || request.multi_pv > 5) {
+    return make_error(AnalysisErrorCode::kInvalidMultiPv,
+                      "multiPv must be an integer from 1 through 5", AnalysisErrorField::kMultiPv);
   }
 
   Position position;
@@ -87,21 +127,18 @@ AnalysisResponse Analyzer::analyze(const AnalysisRequest& request) {
       .depth = request.max_depth,
       .move_time = std::chrono::milliseconds{request.search_time_ms},
   };
-  const engine::EngineResult result = search_.run(position, limits, {});
-  if (!result.best_move.has_value() || !result.score.has_value() || result.depth <= 0) {
+  minimax::AnalysisProgressSink search_progress;
+  if (progress) {
+    search_progress = [&progress, root_player](const minimax::AnalysisResult& update) {
+      progress(make_success(update, root_player));
+    };
+  }
+  const minimax::AnalysisResult result =
+      search_.analyze(position, limits, request.multi_pv, search_progress);
+  AnalysisSuccess success = make_success(result, root_player);
+  if (success.lines.empty() || success.completed_depth <= 0) {
     return make_error(AnalysisErrorCode::kSearchIncomplete,
                       "search time expired before depth 1 completed");
-  }
-
-  AnalysisSuccess success{
-      .best_move = format_move(*result.best_move),
-      .evaluation_half_points = root_player == Player::kOne ? *result.score : -*result.score,
-      .completed_depth = result.depth,
-      .nodes = result.nodes,
-  };
-  success.principal_variation.reserve(result.principal_variation.size());
-  for (const Move move : result.principal_variation) {
-    success.principal_variation.push_back(format_move(move));
   }
 
   if (success.best_move.empty() || success.principal_variation.empty()) {
@@ -129,6 +166,8 @@ std::string_view analysis_error_code_name(AnalysisErrorCode code) noexcept {
       return "invalid_search_time";
     case AnalysisErrorCode::kInvalidMaxDepth:
       return "invalid_max_depth";
+    case AnalysisErrorCode::kInvalidMultiPv:
+      return "invalid_multi_pv";
     case AnalysisErrorCode::kTerminalPosition:
       return "terminal_position";
     case AnalysisErrorCode::kSearchIncomplete:
@@ -147,6 +186,8 @@ std::string_view analysis_error_field_name(AnalysisErrorField field) noexcept {
       return "searchTimeMs";
     case AnalysisErrorField::kMaxDepth:
       return "maxDepth";
+    case AnalysisErrorField::kMultiPv:
+      return "multiPv";
   }
   return "request";
 }

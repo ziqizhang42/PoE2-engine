@@ -39,7 +39,18 @@ for (let index = 0; index < 45; index += 1) {
 
 const request = { moves, searchTimeMs: 5000, maxDepth: 2 };
 const first = engine.analyze(request);
-assert.deepEqual(first, {
+assert.deepEqual(
+  {
+    ok: first.ok,
+    bestMove: first.bestMove,
+    evaluationHalfPoints: first.evaluationHalfPoints,
+    completedDepth: first.completedDepth,
+    nodes: first.nodes,
+    principalVariation: first.principalVariation,
+    engineVersion: first.engineVersion,
+    apiVersion: first.apiVersion,
+  },
+  {
   ok: true,
   bestMove: "g7",
   evaluationHalfPoints: 41,
@@ -48,10 +59,43 @@ assert.deepEqual(first, {
   principalVariation: ["g7", "f7"],
   engineVersion,
   apiVersion: 1,
-});
+  },
+);
+assert.equal(first.lines.length, 1);
+assert.equal(first.lines[0].rank, 1);
+assert.equal(first.lines[0].move, first.bestMove);
+assert.equal(first.lines[0].evaluationHalfPoints, first.evaluationHalfPoints);
+assert.deepEqual(first.lines[0].principalVariation, first.principalVariation);
+assert(first.lines[0].equivalentMoves.includes(first.bestMove));
 
 const second = engine.analyze(request);
 assert.deepEqual(second, { ...first, nodes: 2 });
+
+const updates = [];
+const multiResult = engine.analyze(
+  { ...request, multiPv: 3 },
+  {
+    onProgress(update) {
+      updates.push(update);
+    },
+  },
+);
+assert.deepEqual(
+  updates.map((update) => update.completedDepth),
+  [1, 2],
+);
+assert.deepEqual(multiResult, updates.at(-1));
+assert.equal(multiResult.lines.length, 3);
+assert.equal(multiResult.bestMove, multiResult.lines[0].move);
+assert.equal(multiResult.evaluationHalfPoints, multiResult.lines[0].evaluationHalfPoints);
+assert.deepEqual(multiResult.principalVariation, multiResult.lines[0].principalVariation);
+for (let index = 1; index < multiResult.lines.length; index += 1) {
+  assert(
+    multiResult.lines[index - 1].evaluationHalfPoints <=
+      multiResult.lines[index].evaluationHalfPoints,
+    "Player 2 lines must remain in engine preference order",
+  );
+}
 
 const malformed = engine.analyze({ moves: ["h1"], searchTimeMs: 10 });
 assert.equal(malformed.ok, false);
@@ -76,3 +120,27 @@ assert.equal(invalidTime.error.code, "invalid_search_time");
 const invalidDepth = engine.analyze({ moves: [], searchTimeMs: 10, maxDepth: 50 });
 assert.equal(invalidDepth.ok, false);
 assert.equal(invalidDepth.error.code, "invalid_max_depth");
+
+for (const multiPv of [0, 6, 1.5, "2"]) {
+  const invalidMultiPv = engine.analyze({ moves: [], searchTimeMs: 10, multiPv });
+  assert.equal(invalidMultiPv.ok, false);
+  assert.equal(invalidMultiPv.error.code, "invalid_multi_pv");
+  assert.equal(invalidMultiPv.error.field, "multiPv");
+}
+
+const fiveLines = engine.analyze({ moves: [], searchTimeMs: 5000, maxDepth: 1, multiPv: 5 });
+assert.equal(fiveLines.ok, true);
+assert.equal(fiveLines.lines.length, 5);
+assert(
+  fiveLines.lines.reduce((count, line) => count + line.equivalentMoves.length, 0) >
+    fiveLines.lines.length,
+);
+
+const oneMoveLeft = engine.analyze({
+  moves: [...moves, "d7", "e7", "f7"],
+  searchTimeMs: 5000,
+  multiPv: 5,
+});
+assert.equal(oneMoveLeft.ok, true);
+assert.equal(oneMoveLeft.lines.length, 1);
+assert.deepEqual(oneMoveLeft.lines[0].equivalentMoves, ["g7"]);

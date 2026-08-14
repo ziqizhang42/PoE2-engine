@@ -272,6 +272,50 @@ struct FixedPrincipalVariation {
   std::size_t size = 0;
 };
 
+struct RootMoveGroup {
+  PositionKey canonical_key;
+  Move representative;
+  Bitboard moves = 0;
+};
+
+[[nodiscard]] std::vector<RootMoveGroup> root_move_groups(const Position& position) {
+  std::vector<RootMoveGroup> groups;
+  groups.reserve(static_cast<std::size_t>(position.board().empty_count()));
+
+  PositionSymmetryTracker tracker{position.key()};
+  Bitboard moves = position.legal_moves();
+  while (moves != 0) {
+    const int move_index = std::countr_zero(moves);
+    moves &= moves - Bitboard{1};
+    const CanonicalPositionView child = tracker.preview_move(move_index);
+    const auto existing = std::find_if(
+        groups.begin(), groups.end(),
+        [&child](const RootMoveGroup& group) noexcept { return group.canonical_key == child.key; });
+    if (existing != groups.end()) {
+      existing->moves |= Bitboard{1} << move_index;
+      continue;
+    }
+
+    groups.push_back(RootMoveGroup{
+        .canonical_key = child.key,
+        .representative = Move{.square = square_from_index(move_index)},
+        .moves = Bitboard{1} << move_index,
+    });
+  }
+
+  return groups;
+}
+
+[[nodiscard]] const RootMoveGroup* find_root_move_group(const std::vector<RootMoveGroup>& groups,
+                                                        Move move) noexcept {
+  const Bitboard move_bit = square_bit(move.square);
+  const auto group = std::find_if(groups.begin(), groups.end(),
+                                  [move_bit](const RootMoveGroup& candidate) noexcept {
+                                    return (candidate.moves & move_bit) != 0;
+                                  });
+  return group == groups.end() ? nullptr : &*group;
+}
+
 class ScoreGainMovePicker final {
  public:
   template <typename Policy>
@@ -522,6 +566,72 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
   return finish_node(best);
 }
 
+template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
+[[nodiscard]] std::optional<NodeResult> search_root_groups(
+    Position& position, int depth, Bitboard group_representatives, SearchState& state,
+    Policy& policy, SearchPositionView<Policy, UseTable> root_view) {
+  if constexpr (!UseTable) {
+    state.clear_principal_variation(0);
+  }
+  if (!state.enter_node()) {
+    return std::nullopt;
+  }
+
+  policy.start_node(0);
+  Bitboard remaining_moves = group_representatives;
+  Score alpha = -kSearchInfinity;
+  NodeResult best;
+  bool found_move = false;
+
+  const auto search_move = [&](int move_index) -> bool {
+    const Bitboard move_bit = Bitboard{1} << move_index;
+    const Bitboard equivalent_moves = remaining_moves & policy.move_orbit(0, move_index);
+    assert((equivalent_moves & move_bit) != 0);
+    remaining_moves &= ~equivalent_moves;
+
+    SearchPositionView<Policy, UseTable> child_view;
+    if constexpr (UseTable || Policy::kUsesSymmetry) {
+      child_view = policy.preview_move(root_view, move_index);
+    }
+
+    MoveUndo undo;
+    position.make_move_unchecked(move_index, undo);
+    std::optional<NodeResult> child = negamax<Policy, UseTable, UseTwoPlyClosure>(
+        position, depth - 1, 1, -kSearchInfinity, -alpha, state, policy, child_view, move_index);
+    position.unmake_move(undo);
+    if (!child.has_value()) {
+      return false;
+    }
+
+    const Score value = -child->value;
+    if (!found_move || value > best.value) {
+      const Move move{.square = square_from_index(move_index)};
+      found_move = true;
+      best.value = value;
+      best.best_move = move;
+      if constexpr (!UseTable) {
+        state.prepend_principal_variation(0, move);
+      }
+    }
+    if (value > alpha) {
+      alpha = value;
+    }
+    return true;
+  };
+
+  ScoreGainMovePicker move_picker{position, remaining_moves, 0, policy, state};
+  while (remaining_moves != 0) {
+    const std::optional<int> move_index = move_picker.next(remaining_moves);
+    assert(move_index.has_value());
+    if (!move_index.has_value() || !search_move(*move_index)) {
+      return std::nullopt;
+    }
+  }
+
+  assert(found_move);
+  return best;
+}
+
 [[nodiscard]] FixedPrincipalVariation reconstruct_identity_principal_variation(
     const Position& root, int depth, Move best_move, const TranspositionTable& table) {
   FixedPrincipalVariation principal_variation;
@@ -593,6 +703,73 @@ template <typename Policy>
   } else {
     return reconstruct_identity_principal_variation(root, depth, best_move, table);
   }
+}
+
+[[nodiscard]] std::vector<Move> moves_in_group(const RootMoveGroup& group) {
+  std::vector<Move> moves;
+  moves.reserve(static_cast<std::size_t>(std::popcount(group.moves)));
+  Bitboard remaining = group.moves;
+  while (remaining != 0) {
+    const int move_index = std::countr_zero(remaining);
+    remaining &= remaining - Bitboard{1};
+    moves.push_back(Move{.square = square_from_index(move_index)});
+  }
+  return moves;
+}
+
+[[nodiscard]] AnalysisResult single_analysis_result(const engine::EngineResult& engine_result,
+                                                    const std::vector<RootMoveGroup>& groups) {
+  AnalysisResult result{
+      .completed_depth = engine_result.depth,
+      .nodes = engine_result.nodes,
+  };
+  if (engine_result.depth <= 0 || !engine_result.best_move.has_value() ||
+      !engine_result.score.has_value()) {
+    return result;
+  }
+
+  const RootMoveGroup* group = find_root_move_group(groups, *engine_result.best_move);
+  if (group == nullptr) {
+    return result;
+  }
+  result.lines.push_back(AnalysisLine{
+      .rank = 1,
+      .move = *engine_result.best_move,
+      .equivalent_moves = moves_in_group(*group),
+      .score = *engine_result.score,
+      .principal_variation = engine_result.principal_variation,
+  });
+  return result;
+}
+
+template <typename Policy, bool UseTable>
+[[nodiscard]] AnalysisLine make_analysis_line(const Position& root, Move best_move, Score score,
+                                              const RootMoveGroup& group, const SearchState& state,
+                                              int depth, int rank,
+                                              const TranspositionTable& table) {
+  FixedPrincipalVariation principal_variation;
+  if constexpr (!UseTable) {
+    principal_variation.moves = state.principal_variation(0);
+    principal_variation.size = state.principal_variation_length(0);
+  } else {
+    principal_variation = reconstruct_principal_variation<Policy>(root, depth, best_move, table);
+  }
+
+  if (principal_variation.size == 0) {
+    principal_variation.moves[0] = best_move;
+    principal_variation.size = 1;
+  }
+
+  AnalysisLine line{
+      .rank = rank,
+      .move = best_move,
+      .equivalent_moves = moves_in_group(group),
+      .score = score,
+  };
+  line.principal_variation.assign(
+      principal_variation.moves.begin(),
+      principal_variation.moves.begin() + static_cast<std::ptrdiff_t>(principal_variation.size));
+  return line;
 }
 
 template <typename Policy, bool UseTable>
@@ -695,6 +872,141 @@ template <bool UseTwoPlyClosure>
       position, move_time, maximum_depth, info, table, std::move(result));
 }
 
+template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
+[[nodiscard]] AnalysisResult run_timed_single_analysis(
+    const Position& position, std::chrono::milliseconds move_time, int maximum_depth,
+    const AnalysisProgressSink& progress, TranspositionTable& table,
+    const std::vector<RootMoveGroup>& groups, engine::EngineResult result) {
+  SearchState state{move_time, table};
+  Position search_position = position;
+  Policy policy{search_position};
+  SearchPositionView<Policy, UseTable> root_view;
+  if constexpr (UseTable || Policy::kUsesSymmetry) {
+    root_view = policy.current_view(search_position);
+  }
+
+  for (int depth = 1; depth <= maximum_depth; ++depth) {
+    std::optional<NodeResult> iteration = negamax<Policy, UseTable, UseTwoPlyClosure>(
+        search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view, -1);
+    if (!iteration.has_value()) {
+      break;
+    }
+
+    commit_iteration<Policy, UseTable>(result, *iteration, state, position, depth, table);
+    result.nodes = state.nodes();
+    progress(single_analysis_result(result, groups));
+  }
+
+  result.nodes = state.nodes();
+  return single_analysis_result(result, groups);
+}
+
+template <bool UseTwoPlyClosure>
+[[nodiscard]] AnalysisResult run_configured_single_analysis(
+    const Position& position, std::chrono::milliseconds move_time, int maximum_depth,
+    const AnalysisProgressSink& progress, bool use_symmetry, TranspositionTable& table,
+    const std::vector<RootMoveGroup>& groups, engine::EngineResult result) {
+  if (use_symmetry) {
+    if (table.capacity() == 0) {
+      return run_timed_single_analysis<D4Policy, false, UseTwoPlyClosure>(
+          position, move_time, maximum_depth, progress, table, groups, std::move(result));
+    }
+    return run_timed_single_analysis<D4Policy, true, UseTwoPlyClosure>(
+        position, move_time, maximum_depth, progress, table, groups, std::move(result));
+  }
+  if (table.capacity() == 0) {
+    return run_timed_single_analysis<IdentityPolicy, false, UseTwoPlyClosure>(
+        position, move_time, maximum_depth, progress, table, groups, std::move(result));
+  }
+  return run_timed_single_analysis<IdentityPolicy, true, UseTwoPlyClosure>(
+      position, move_time, maximum_depth, progress, table, groups, std::move(result));
+}
+
+template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
+[[nodiscard]] AnalysisResult run_timed_multi_analysis(const Position& position,
+                                                      std::chrono::milliseconds move_time,
+                                                      int maximum_depth, std::size_t line_count,
+                                                      const AnalysisProgressSink& progress,
+                                                      TranspositionTable& table,
+                                                      const std::vector<RootMoveGroup>& groups) {
+  SearchState state{move_time, table};
+  Position search_position = position;
+  Policy policy{search_position};
+  SearchPositionView<Policy, UseTable> root_view;
+  if constexpr (UseTable || Policy::kUsesSymmetry) {
+    root_view = policy.current_view(search_position);
+  }
+
+  Bitboard all_representatives = 0;
+  for (const RootMoveGroup& group : groups) {
+    all_representatives |= square_bit(group.representative.square);
+  }
+
+  AnalysisResult result;
+  for (int depth = 1; depth <= maximum_depth; ++depth) {
+    std::vector<AnalysisLine> iteration_lines;
+    iteration_lines.reserve(line_count);
+    Bitboard remaining_representatives = all_representatives;
+    bool iteration_complete = true;
+
+    for (std::size_t rank = 0; rank < line_count; ++rank) {
+      const std::optional<NodeResult> line_result =
+          search_root_groups<Policy, UseTable, UseTwoPlyClosure>(
+              search_position, depth, remaining_representatives, state, policy, root_view);
+      if (!line_result.has_value() || !line_result->best_move.has_value()) {
+        iteration_complete = false;
+        break;
+      }
+
+      const Move best_move = *line_result->best_move;
+      const RootMoveGroup* group = find_root_move_group(groups, best_move);
+      if (group == nullptr) {
+        iteration_complete = false;
+        break;
+      }
+      iteration_lines.push_back(
+          make_analysis_line<Policy, UseTable>(position, best_move, line_result->value, *group,
+                                               state, depth, static_cast<int>(rank) + 1, table));
+      remaining_representatives &= ~square_bit(group->representative.square);
+    }
+
+    if (!iteration_complete) {
+      break;
+    }
+
+    result.lines = std::move(iteration_lines);
+    result.completed_depth = depth;
+    result.nodes = state.nodes();
+    if (progress) {
+      progress(result);
+    }
+  }
+
+  result.nodes = state.nodes();
+  return result;
+}
+
+template <bool UseTwoPlyClosure>
+[[nodiscard]] AnalysisResult run_configured_multi_analysis(
+    const Position& position, std::chrono::milliseconds move_time, int maximum_depth,
+    std::size_t line_count, const AnalysisProgressSink& progress, bool use_symmetry,
+    TranspositionTable& table, const std::vector<RootMoveGroup>& groups) {
+  if (use_symmetry) {
+    if (table.capacity() == 0) {
+      return run_timed_multi_analysis<D4Policy, false, UseTwoPlyClosure>(
+          position, move_time, maximum_depth, line_count, progress, table, groups);
+    }
+    return run_timed_multi_analysis<D4Policy, true, UseTwoPlyClosure>(
+        position, move_time, maximum_depth, line_count, progress, table, groups);
+  }
+  if (table.capacity() == 0) {
+    return run_timed_multi_analysis<IdentityPolicy, false, UseTwoPlyClosure>(
+        position, move_time, maximum_depth, line_count, progress, table, groups);
+  }
+  return run_timed_multi_analysis<IdentityPolicy, true, UseTwoPlyClosure>(
+      position, move_time, maximum_depth, line_count, progress, table, groups);
+}
+
 }  // namespace
 
 Search::Search(SearchOptions options)
@@ -743,6 +1055,52 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
   }
   return run_configured_search<false>(position, *limits.move_time, maximum_depth, info,
                                       use_symmetry_, table_, std::move(result));
+}
+
+AnalysisResult Search::analyze(const Position& position, const engine::EngineLimits& limits,
+                               int multi_pv, const AnalysisProgressSink& progress) {
+  if (multi_pv <= 0) {
+    return {};
+  }
+
+  const std::vector<RootMoveGroup> groups = root_move_groups(position);
+  if (multi_pv == 1 && !progress) {
+    return single_analysis_result(run(position, limits, {}), groups);
+  }
+
+  const Bitboard legal_moves = position.legal_moves();
+  if (legal_moves == 0 || !limits.move_time.has_value() || limits.move_time->count() <= 0) {
+    return {};
+  }
+
+  const int empty_count = position.board().empty_count();
+  const int terminal_depth = use_two_ply_closure_ ? std::max(1, empty_count - 2) : empty_count;
+  int maximum_depth = terminal_depth;
+  if (limits.depth.has_value()) {
+    maximum_depth = std::clamp(*limits.depth, 0, terminal_depth);
+  }
+
+  if (multi_pv == 1) {
+    engine::EngineResult result{
+        .best_move = Move{.square = square_from_index(std::countr_zero(legal_moves))},
+    };
+    if (use_two_ply_closure_) {
+      return run_configured_single_analysis<true>(position, *limits.move_time, maximum_depth,
+                                                  progress, use_symmetry_, table_, groups,
+                                                  std::move(result));
+    }
+    return run_configured_single_analysis<false>(position, *limits.move_time, maximum_depth,
+                                                 progress, use_symmetry_, table_, groups,
+                                                 std::move(result));
+  }
+
+  const std::size_t line_count = std::min(static_cast<std::size_t>(multi_pv), groups.size());
+  if (use_two_ply_closure_) {
+    return run_configured_multi_analysis<true>(position, *limits.move_time, maximum_depth,
+                                               line_count, progress, use_symmetry_, table_, groups);
+  }
+  return run_configured_multi_analysis<false>(position, *limits.move_time, maximum_depth,
+                                              line_count, progress, use_symmetry_, table_, groups);
 }
 
 }  // namespace poe2::minimax

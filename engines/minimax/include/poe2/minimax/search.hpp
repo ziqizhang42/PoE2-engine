@@ -2,6 +2,9 @@
 #define POE2_MINIMAX_SEARCH_HPP
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <vector>
 
 #include "poe2/engine.hpp"
 #include "poe2/transposition_table.hpp"
@@ -19,6 +22,26 @@ struct SearchOptions {
   friend constexpr bool operator==(const SearchOptions&, const SearchOptions&) = default;
 };
 
+struct AnalysisLine {
+  int rank = 0;
+  Move move;
+  std::vector<Move> equivalent_moves;
+  Score score = 0;
+  std::vector<Move> principal_variation;
+
+  friend bool operator==(const AnalysisLine&, const AnalysisLine&) = default;
+};
+
+struct AnalysisResult {
+  std::vector<AnalysisLine> lines;
+  int completed_depth = 0;
+  std::uint64_t nodes = 0;
+
+  friend bool operator==(const AnalysisResult&, const AnalysisResult&) = default;
+};
+
+using AnalysisProgressSink = std::function<void(const AnalysisResult&)>;
+
 class Search final {
  public:
   explicit Search(SearchOptions options = {});
@@ -27,6 +50,8 @@ class Search final {
   [[nodiscard]] engine::EngineResult run(const Position& position,
                                          const engine::EngineLimits& limits,
                                          const engine::InfoSink& info);
+  [[nodiscard]] AnalysisResult analyze(const Position& position, const engine::EngineLimits& limits,
+                                       int multi_pv = 1, const AnalysisProgressSink& progress = {});
   [[nodiscard]] const TranspositionTable& transposition_table() const noexcept;
 
  private:

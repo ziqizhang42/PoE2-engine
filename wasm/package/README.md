@@ -1,15 +1,32 @@
 # @poe2/engine-wasm
 
-Browser WebAssembly package for the PoE2 minimax engine. Instantiate it once inside a module Web Worker and reuse the returned engine so its transposition table survives across analyses:
+Browser WebAssembly package for the PoE2 minimax engine.
+
+## Use
+
+Call the synchronous analyzer from a module Worker, reuse one engine between completed searches, and terminate the Worker to cancel an active search.
 
 ```ts
 import createEngine from "@poe2/engine-wasm";
 import wasmUrl from "@poe2/engine-wasm/poe2-engine.wasm?url";
 
 const engine = await createEngine({ wasmUrl });
-const result = engine.analyze({ moves: ["d4", "a1"], searchTimeMs: 250, maxDepth: 8 });
+const result = engine.analyze(
+  {
+    moves: ["d4", "a1"],
+    searchTimeMs: 1_000,
+    multiPv: 3,
+  },
+  {
+    onProgress(update) {
+      self.postMessage({ type: "progress", update });
+    },
+  },
+);
 ```
 
-Results are discriminated unions. Successes contain a best move, Player 1-normalized evaluation in half-points, completed depth, nodes, principal variation, engine version, and API version. Expected input and search failures contain a structured error. `analyze` is synchronous and CPU-bound.
+`moves` is a legal history in `a1`–`g7` notation, `searchTimeMs` is a positive integer, `multiPv` accepts 1–5 and defaults to 1, and `maxDepth` accepts 1–49 for bounded tests.
 
-See the source repository's `docs/wasm.md` for the complete API, build instructions, and a Vite Worker example.
+Successful responses contain ranked `lines`, `completedDepth`, and cumulative `nodes`; failures contain a structured `error`. `evaluationHalfPoints` is signed for Player 1, and `lines` remains in engine preference order, so do not re-sort it numerically.
+
+Build and installation instructions are in `docs/wasm.md` in the source repository.
