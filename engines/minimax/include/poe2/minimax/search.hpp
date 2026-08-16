@@ -1,9 +1,11 @@
 #ifndef POE2_MINIMAX_SEARCH_HPP
 #define POE2_MINIMAX_SEARCH_HPP
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "poe2/engine.hpp"
@@ -55,9 +57,13 @@ class Search final {
   [[nodiscard]] const TranspositionTable& transposition_table() const noexcept;
 
  private:
+  void prepare_history(const Position& position) noexcept;
+
   bool use_symmetry_ = true;
   bool use_two_ply_closure_ = true;
   TranspositionTable table_;
+  std::array<std::array<std::uint64_t, kCellCount>, 2> history_scores_{};
+  std::optional<PositionKey> history_root_;
 };
 
 }  // namespace poe2::minimax

@@ -53,6 +53,8 @@ struct SearchDiagnostics {
   std::uint64_t closure_evaluations = 0;
   std::uint64_t closure_gain_queries = 0;
   std::uint64_t gain_queries = 0;
+  std::uint64_t history_updates = 0;
+  std::uint64_t history_max = 0;
   std::uint64_t hash_entries = 0;
   std::uint64_t hash_capacity = 0;
   std::uint64_t hash_bytes = 0;
@@ -86,6 +88,10 @@ struct SearchDiagnostics {
       diagnostics.closure_gain_queries = value;
     } else if (name == "gainqueries") {
       diagnostics.gain_queries = value;
+    } else if (name == "historyupdates") {
+      diagnostics.history_updates = value;
+    } else if (name == "historymax") {
+      diagnostics.history_max = value;
     } else if (name == "hashentries") {
       diagnostics.hash_entries = value;
     } else if (name == "hashcapacity") {
@@ -583,6 +589,85 @@ TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
   REQUIRE(diagnostics.symmetry_prunes == 0);
 }
 
+TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root changes",
+          "[minimax][alphabeta][history][move-ordering]") {
+  const poe2::Position position = position_from_history({
+      {1, 2},
+      {6, 0},
+      {3, 1},
+      {4, 3},
+      {2, 6},
+      {4, 1},
+      {3, 4},
+      {1, 5},
+  });
+  const poe2::Square row_major_move{2, 1};
+  const poe2::Square learned_move{2, 2};
+  REQUIRE(position.score_gain_unchecked(position.side_to_move(), row_major_move) ==
+          position.score_gain_unchecked(position.side_to_move(), learned_move));
+
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
+  SearchDiagnostics first_diagnostics;
+  const poe2::engine::EngineResult first =
+      run_fixed_depth_with_diagnostics(search, position, 4, first_diagnostics);
+  SearchDiagnostics second_diagnostics;
+  const poe2::engine::EngineResult second =
+      run_fixed_depth_with_diagnostics(search, position, 4, second_diagnostics);
+
+  REQUIRE(first.depth == 4);
+  REQUIRE(first.score == -11);
+  REQUIRE(first.best_move == poe2::Move{.square = row_major_move});
+  REQUIRE(first.nodes == 6918);
+  REQUIRE(first_diagnostics.history_updates == first_diagnostics.alpha_beta_cutoffs);
+  REQUIRE(first_diagnostics.history_updates > 0);
+  REQUIRE(first_diagnostics.history_max == 1031);
+  require_legal_principal_variation(position, first);
+
+  REQUIRE(second.depth == first.depth);
+  REQUIRE(second.score == first.score);
+  REQUIRE(second.best_move == poe2::Move{.square = learned_move});
+  REQUIRE(second.nodes == 6802);
+  REQUIRE(second.nodes < first.nodes);
+  REQUIRE(second_diagnostics.history_updates == second_diagnostics.alpha_beta_cutoffs);
+  REQUIRE(second_diagnostics.history_max == 2041);
+  require_legal_principal_variation(position, second);
+
+  SearchDiagnostics same_root_diagnostics;
+  static_cast<void>(run_fixed_depth_with_diagnostics(search, position, 1, same_root_diagnostics));
+  REQUIRE(same_root_diagnostics.history_updates == 0);
+  REQUIRE(same_root_diagnostics.history_max == second_diagnostics.history_max);
+
+  SearchDiagnostics terminal_diagnostics;
+  static_cast<void>(run_with_diagnostics(search, position_with_empty_squares(0),
+                                         std::chrono::milliseconds{100}, terminal_diagnostics));
+  REQUIRE(terminal_diagnostics.history_updates == 0);
+  REQUIRE(terminal_diagnostics.history_max == second_diagnostics.history_max);
+
+  poe2::Position advanced = position;
+  REQUIRE(advanced.play({0, 0}));
+  SearchDiagnostics changed_root_diagnostics;
+  static_cast<void>(
+      run_fixed_depth_with_diagnostics(search, advanced, 1, changed_root_diagnostics));
+  REQUIRE(changed_root_diagnostics.history_updates == 0);
+  REQUIRE(changed_root_diagnostics.history_max == second_diagnostics.history_max / 2);
+
+  SearchDiagnostics repeated_changed_root_diagnostics;
+  static_cast<void>(
+      run_fixed_depth_with_diagnostics(search, advanced, 1, repeated_changed_root_diagnostics));
+  REQUIRE(repeated_changed_root_diagnostics.history_updates == 0);
+  REQUIRE(repeated_changed_root_diagnostics.history_max == changed_root_diagnostics.history_max);
+
+  search.new_game();
+  SearchDiagnostics reset_diagnostics;
+  static_cast<void>(run_fixed_depth_with_diagnostics(search, advanced, 1, reset_diagnostics));
+  REQUIRE(reset_diagnostics.history_updates == 0);
+  REQUIRE(reset_diagnostics.history_max == 0);
+}
+
 TEST_CASE("fail-soft bounds are cached and reused", "[minimax][alphabeta][tt]") {
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
@@ -794,6 +879,7 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
   REQUIRE(idle_diagnostics.tt_stores == 0);
   REQUIRE(idle_diagnostics.symmetry_prunes == 0);
   REQUIRE(idle_diagnostics.move_order_evaluations == 0);
+  REQUIRE(idle_diagnostics.history_updates == 0);
   REQUIRE(idle_diagnostics.hash_entries == populated_entries);
 
   search.new_game();
