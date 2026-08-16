@@ -10,13 +10,15 @@ BASE_ENGINE ?=
 NEW_ENGINE_ARGS ?=
 BASE_ENGINE_ARGS ?=
 BASE ?=
-BOOK ?= eval/openings/systematic-2ply-v1.txt
-GAMES ?= 1000
+BOOK ?= eval/openings/holdout.txt
+SMOKE_BOOK ?= eval/openings/development.txt
+OPENING_SEED ?=
+GAMES ?= 2000
 SMOKE_GAMES ?= 100
 TIMEOUT_MS ?= 1000
-GO_MOVETIME_MS ?= 900
-SEQUENTIAL_NULL ?= 0.50
-SEQUENTIAL_ALT ?= 0.55
+GO_MOVETIME_MS ?= 100
+SEQUENTIAL_NULL ?= 0
+SEQUENTIAL_ALT ?= 20
 SEQUENTIAL_ALPHA ?= 0.05
 SEQUENTIAL_BETA ?= 0.05
 
@@ -118,6 +120,7 @@ eval-gate: require-base require-eval-engines git-test
 	  --kind gate \
 	  --opening-book $(BOOK) \
 	  --shuffle-openings \
+	  $(if $(OPENING_SEED),--opening-seed $(OPENING_SEED),) \
 	  --games $(GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS) \
@@ -138,8 +141,9 @@ eval-smoke: require-base require-eval-engines git-test
 	  $(if $(BASE_ENGINE_ARGS),--base-engine-args '$(BASE_ENGINE_ARGS)',) \
 	  --preset $(PRESET) \
 	  --kind smoke \
-	  --opening-book $(BOOK) \
+	  --opening-book $(SMOKE_BOOK) \
 	  --shuffle-openings \
+	  $(if $(OPENING_SEED),--opening-seed $(OPENING_SEED),) \
 	  --games $(SMOKE_GAMES) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS)

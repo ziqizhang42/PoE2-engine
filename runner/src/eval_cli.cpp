@@ -1,5 +1,7 @@
 #include "eval_cli.hpp"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -14,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "poe2/match_runner.hpp"
 
@@ -35,6 +38,9 @@ struct EvalOptions {
   std::string run_root = "build/eval/runs";
   std::string ledger = "eval/results.csv";
   std::string kind = "gate";
+  std::string opening_seed_source;
+  std::string opening_book_digest;
+  std::uint64_t resolved_opening_seed = 0;
   bool write_ledger = true;
   bool require_accept_alt = false;
 };
@@ -76,6 +82,21 @@ struct ReservedRunDirectory {
   return value;
 }
 
+[[nodiscard]] std::optional<double> parse_finite_double(std::string_view text) {
+  std::istringstream input{std::string{text}};
+  double value = 0.0;
+  input >> value;
+  if (!input || !std::isfinite(value)) {
+    return std::nullopt;
+  }
+
+  std::string trailing;
+  if (input >> trailing) {
+    return std::nullopt;
+  }
+  return value;
+}
+
 [[nodiscard]] std::optional<std::uint64_t> parse_positive_u64(std::string_view text) noexcept {
   std::uint64_t value = 0;
   const char* begin = text.data();
@@ -85,6 +106,17 @@ struct ReservedRunDirectory {
     return std::nullopt;
   }
 
+  return value;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> parse_u64(std::string_view text) noexcept {
+  std::uint64_t value = 0;
+  const char* begin = text.data();
+  const char* end = begin + text.size();
+  const auto result = std::from_chars(begin, end, value);
+  if (result.ec != std::errc{} || result.ptr != end) {
+    return std::nullopt;
+  }
   return value;
 }
 
@@ -300,6 +332,32 @@ void create_parent_directories(const fs::path& path) {
   return output.str();
 }
 
+[[nodiscard]] std::uint64_t fnv1a64(std::string_view text) noexcept {
+  std::uint64_t hash = 14695981039346656037ULL;
+  for (const char ch : text) {
+    hash ^= static_cast<unsigned char>(ch);
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+[[nodiscard]] std::uint64_t derive_opening_seed(std::string_view new_id, std::string_view base_id,
+                                                std::string_view book_digest,
+                                                std::string_view kind) {
+  std::string material;
+  const auto append_part = [&](std::string_view part) {
+    material += std::to_string(part.size());
+    material += ':';
+    material += part;
+    material += '|';
+  };
+  append_part(new_id);
+  append_part(base_id);
+  append_part(book_digest);
+  append_part(kind);
+  return fnv1a64(material);
+}
+
 [[nodiscard]] std::string file_digest(const fs::path& path) {
   if (path.empty()) {
     return {};
@@ -348,6 +406,17 @@ void create_parent_directories(const fs::path& path) {
   return suffix;
 }
 
+[[nodiscard]] std::string run_id_component(std::string_view text) {
+  std::string component;
+  component.reserve(text.size());
+  for (const char ch : text) {
+    const bool safe = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                      (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.';
+    component += safe ? ch : '_';
+  }
+  return component.empty() ? "unknown" : component;
+}
+
 [[nodiscard]] ReservedRunDirectory reserve_run_directory(const fs::path& run_root,
                                                          const std::string& base_run_id) {
   for (int attempt = 0; attempt < 1000; ++attempt) {
@@ -388,6 +457,13 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   if (!options.base_engine_args.empty()) {
     output << " --base-engine-args " << shell_quote(options.base_engine_args);
   }
+  output << " --preset " << shell_quote(options.preset) << " --kind " << shell_quote(options.kind)
+         << " --run-root " << shell_quote(options.run_root);
+  if (options.write_ledger) {
+    output << " --ledger " << shell_quote(options.ledger);
+  } else {
+    output << " --no-ledger";
+  }
   output << " --games " << options.series.games << " --timeout-ms "
          << options.series.move_timeout.count();
   if (!options.series.opening_book.path.empty()) {
@@ -395,6 +471,9 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   }
   if (options.series.shuffle_openings) {
     output << " --shuffle-openings";
+  }
+  if (options.series.opening_seed.has_value()) {
+    output << " --opening-seed " << *options.series.opening_seed;
   }
   if (options.series.go_limits.depth.has_value()) {
     output << " --go-depth " << *options.series.go_limits.depth;
@@ -408,8 +487,8 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   if (options.series.sequential_stop) {
     output << " --sequential-stop";
   }
-  output << " --sequential-null " << options.series.sequential_null_rate << " --sequential-alt "
-         << options.series.sequential_alt_rate << " --sequential-alpha "
+  output << " --sequential-null " << options.series.sequential_null_nelo << " --sequential-alt "
+         << options.series.sequential_alt_nelo << " --sequential-alpha "
          << options.series.sequential_alpha << " --sequential-beta "
          << options.series.sequential_beta;
   if (options.require_accept_alt) {
@@ -434,11 +513,28 @@ void write_summary_json(const fs::path& path, const match_runner::SeriesResult& 
 
   output << "{\n"
          << "  \"analysis_version\": " << match_runner::kAnalysisVersion << ",\n"
+         << "  \"valid\": " << (result.valid ? "true" : "false") << ",\n"
+         << "  \"invalid_reason\": ";
+  if (result.invalid_reason.empty()) {
+    output << "null";
+  } else {
+    output << "\"" << json_escape(result.invalid_reason) << "\"";
+  }
+  output << ",\n"
          << "  \"games_requested\": " << result.games_requested << ",\n"
          << "  \"games_played\": " << result.games_played << ",\n"
+         << "  \"unique_openings\": " << result.unique_openings_used << ",\n"
          << "  \"engine_one_wins\": " << result.engine_one_wins << ",\n"
          << "  \"engine_two_wins\": " << result.engine_two_wins << ",\n"
          << "  \"no_winner\": " << result.no_winner << ",\n"
+         << "  \"reasons\": {\n"
+         << "    \"normal\": " << result.normal_games << ",\n"
+         << "    \"timeout\": " << result.timeout_games << ",\n"
+         << "    \"disconnected\": " << result.disconnected_games << ",\n"
+         << "    \"malformed_move\": " << result.malformed_move_games << ",\n"
+         << "    \"illegal_move\": " << result.illegal_move_games << ",\n"
+         << "    \"protocol_error\": " << result.protocol_error_games << "\n"
+         << "  },\n"
          << "  \"statistical_unit\": \""
          << match_runner::statistical_unit_name(result.statistical_unit) << "\",\n"
          << "  \"statistical_samples\": " << result.statistical_samples << ",\n"
@@ -452,20 +548,33 @@ void write_summary_json(const fs::path& path, const match_runner::SeriesResult& 
          << "    \"1\": " << result.statistical_score_counts[4] << "\n"
          << "  },\n"
          << "  \"engine_one_score_rate\": " << score_text(result.engine_one_result_rate) << ",\n"
+         << "  \"normalized_elo\": ";
+  if (result.normalized_elo.has_value()) {
+    output << score_text(*result.normalized_elo);
+  } else {
+    output << "null";
+  }
+  output << ",\n"
          << "  \"confidence_method\": \""
          << match_runner::confidence_method_name(result.statistical_unit) << "\",\n"
          << "  \"confidence_low\": " << score_text(result.confidence_low) << ",\n"
          << "  \"confidence_high\": " << score_text(result.confidence_high) << ",\n"
+         << "  \"betting_log_evidence_above_even\": "
+         << score_text(result.betting_log_evidence_above_even) << ",\n"
+         << "  \"betting_log_evidence_below_even\": "
+         << score_text(result.betting_log_evidence_below_even) << ",\n"
          << "  \"sequential_test_method\": \""
          << match_runner::sequential_test_method_name(result.statistical_unit) << "\",\n"
+         << "  \"sequential_bound_unit\": \"normalized_elo\",\n"
+         << "  \"sequential_null\": " << result.sequential_null_nelo << ",\n"
+         << "  \"sequential_alt\": " << result.sequential_alt_nelo << ",\n"
+         << "  \"sequential_alpha\": " << result.sequential_alpha << ",\n"
+         << "  \"sequential_beta\": " << result.sequential_beta << ",\n"
+         << "  \"sequential_llr\": " << score_text(result.sequential_llr) << ",\n"
+         << "  \"sequential_lower_bound\": " << score_text(result.sequential_lower_bound) << ",\n"
+         << "  \"sequential_upper_bound\": " << score_text(result.sequential_upper_bound) << ",\n"
          << "  \"sequential_decision\": \""
-         << match_runner::sequential_decision_name(result.sequential_decision) << "\",\n"
-         << "  \"sequential_alt_log_evidence\": " << score_text(result.sequential_alt_log_evidence)
-         << ",\n"
-         << "  \"sequential_null_log_evidence\": "
-         << score_text(result.sequential_null_log_evidence) << ",\n"
-         << "  \"sequential_signed_log_evidence\": "
-         << score_text(result.sequential_signed_log_evidence) << "\n"
+         << match_runner::sequential_decision_name(result.sequential_decision) << "\"\n"
          << "}\n";
 }
 
@@ -475,12 +584,12 @@ void write_games_csv(const fs::path& path, const match_runner::SeriesResult& res
     throw std::runtime_error{"failed to write " + path.string()};
   }
 
-  output
-      << "game,engine_one_player,opening_line,opening_moves,winner,reason,plies,player_one_score,"
-         "player_two_score\n";
+  output << "game,engine_one_player,opening_slot,opening_line,opening_moves,winner,reason,plies,"
+            "player_one_score,"
+            "player_two_score\n";
   for (const match_runner::SeriesGameResult& game : result.games) {
     output << game.game_number << ',' << match_runner::player_name(game.engine_one_player) << ','
-           << game.opening_line_number << ',';
+           << game.opening_slot << ',' << game.opening_line_number << ',';
     write_csv_field(output, game.opening_moves);
     output << ',' << match_runner::engine_name_from_winner(game) << ','
            << match_runner::reason_name(game.match.reason) << ',' << game.match.moves.size() << ','
@@ -517,7 +626,7 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
   }
   output << ",\n";
 
-  const std::string book_digest = opening_book_digest(options.series.opening_book);
+  const std::string& book_digest = options.opening_book_digest;
   output << "  \"opening_book_digest\": ";
   if (book_digest.empty()) {
     output << "null";
@@ -533,10 +642,22 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
          << "  \"sequential_test_method\": \""
          << match_runner::sequential_test_method_name(result.statistical_unit) << "\",\n"
          << "  \"opening_count\": " << options.series.opening_book.lines.size() << ",\n"
+         << "  \"unique_openings\": " << result.unique_openings_used << ",\n"
          << "  \"shuffle_openings\": " << (options.series.shuffle_openings ? "true" : "false")
          << ",\n"
+         << "  \"opening_sampling\": \"deterministic_shuffle_without_replacement\",\n"
+         << "  \"opening_seed\": " << options.resolved_opening_seed << ",\n"
+         << "  \"opening_seed_source\": \"" << json_escape(options.opening_seed_source) << "\",\n"
          << "  \"games\": " << options.series.games << ",\n"
          << "  \"games_played\": " << result.games_played << ",\n"
+         << "  \"valid\": " << (result.valid ? "true" : "false") << ",\n"
+         << "  \"invalid_reason\": ";
+  if (result.invalid_reason.empty()) {
+    output << "null";
+  } else {
+    output << "\"" << json_escape(result.invalid_reason) << "\"";
+  }
+  output << ",\n"
          << "  \"timeout_ms\": " << options.series.move_timeout.count() << ",\n"
          << "  \"go_depth\": ";
   if (options.series.go_limits.depth.has_value()) {
@@ -561,37 +682,154 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
   output << ",\n"
          << "  \"sequential_stop\": " << (options.series.sequential_stop ? "true" : "false")
          << ",\n"
-         << "  \"sequential_null\": " << options.series.sequential_null_rate << ",\n"
-         << "  \"sequential_alt\": " << options.series.sequential_alt_rate << ",\n"
+         << "  \"sequential_bound_unit\": \"normalized_elo\",\n"
+         << "  \"sequential_null\": " << options.series.sequential_null_nelo << ",\n"
+         << "  \"sequential_alt\": " << options.series.sequential_alt_nelo << ",\n"
          << "  \"sequential_alpha\": " << options.series.sequential_alpha << ",\n"
          << "  \"sequential_beta\": " << options.series.sequential_beta << ",\n"
+         << "  \"sequential_llr\": " << score_text(result.sequential_llr) << ",\n"
+         << "  \"sequential_lower_bound\": " << score_text(result.sequential_lower_bound) << ",\n"
+         << "  \"sequential_upper_bound\": " << score_text(result.sequential_upper_bound) << ",\n"
+         << "  \"normalized_elo\": ";
+  if (result.normalized_elo.has_value()) {
+    output << score_text(*result.normalized_elo);
+  } else {
+    output << "null";
+  }
+  output << ",\n"
+         << "  \"betting_log_evidence_above_even\": "
+         << score_text(result.betting_log_evidence_above_even) << ",\n"
+         << "  \"betting_log_evidence_below_even\": "
+         << score_text(result.betting_log_evidence_below_even) << ",\n"
          << "  \"sequential_decision\": \""
          << match_runner::sequential_decision_name(result.sequential_decision) << "\"\n"
          << "}\n";
+}
+
+constexpr std::string_view kLegacyLedgerHeader =
+    "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
+    "base_engine_args,games_requested,games_played,"
+    "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
+    "confidence_high_pct,sequential_decision,sequential_null,sequential_alt,opening_book,opening_"
+    "book_digest,"
+    "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir,analysis_version,"
+    "statistical_unit,statistical_samples,statistical_games,pair_score_0,pair_score_0_5,"
+    "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
+    "analysis_note";
+
+constexpr std::string_view kLedgerHeader =
+    "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
+    "base_engine_args,games_requested,games_played,"
+    "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
+    "confidence_high_pct,sequential_decision,sequential_null,sequential_alt,opening_book,opening_"
+    "book_digest,"
+    "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir,analysis_version,"
+    "statistical_unit,statistical_samples,statistical_games,pair_score_0,pair_score_0_5,"
+    "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
+    "analysis_note,valid,invalid_reason,opening_seed,opening_seed_source,opening_sampling,"
+    "unique_openings,sequential_model,sequential_bound_unit,sequential_llr,sequential_lower_bound,"
+    "sequential_upper_bound,normalized_elo,betting_log_evidence_above_even,"
+    "betting_log_evidence_below_even";
+
+[[nodiscard]] std::vector<std::string> parse_csv_fields(std::string_view row) {
+  std::vector<std::string> fields;
+  std::string field;
+  bool quoted = false;
+  for (std::size_t index = 0; index < row.size(); ++index) {
+    const char ch = row[index];
+    if (ch == '"') {
+      if (quoted && index + 1 < row.size() && row[index + 1] == '"') {
+        field += '"';
+        ++index;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (ch == ',' && !quoted) {
+      fields.push_back(std::move(field));
+      field.clear();
+    } else {
+      field += ch;
+    }
+  }
+  if (quoted) {
+    throw std::runtime_error{"unterminated quoted field in evaluation ledger"};
+  }
+  fields.push_back(std::move(field));
+  return fields;
+}
+
+void migrate_ledger_if_needed(const fs::path& path) {
+  if (!is_file(path) || fs::file_size(path) == 0) {
+    return;
+  }
+
+  std::ifstream input{path};
+  std::string header;
+  std::getline(input, header);
+  if (header == kLedgerHeader) {
+    return;
+  }
+  if (header != kLegacyLedgerHeader) {
+    throw std::runtime_error{"unsupported ledger schema: " + path.string()};
+  }
+
+  const std::vector<std::string> header_fields = parse_csv_fields(header);
+  const auto method_position =
+      std::find(header_fields.begin(), header_fields.end(), "sequential_test_method");
+  if (method_position == header_fields.end()) {
+    throw std::runtime_error{"legacy ledger is missing sequential_test_method: " + path.string()};
+  }
+  const std::size_t method_index =
+      static_cast<std::size_t>(std::distance(header_fields.begin(), method_position));
+
+  fs::path temporary = path;
+  temporary += ".migration.tmp";
+  std::ofstream output{temporary, std::ios::trunc};
+  if (!output) {
+    throw std::runtime_error{"failed to write " + temporary.string()};
+  }
+  output << kLedgerHeader << '\n';
+
+  std::string row;
+  while (std::getline(input, row)) {
+    if (row.empty()) {
+      continue;
+    }
+    const std::vector<std::string> fields = parse_csv_fields(row);
+    if (fields.size() != header_fields.size()) {
+      throw std::runtime_error{"legacy ledger row has the wrong number of fields: " +
+                               path.string()};
+    }
+    output << row << ',';
+    const std::array<std::string, 14> additions{
+        "true", "", "", "", "", "", fields[method_index], "score_rate", "", "", "", "", "", ""};
+    for (std::size_t index = 0; index < additions.size(); ++index) {
+      if (index != 0) {
+        output << ',';
+      }
+      write_csv_field(output, additions[index]);
+    }
+    output << '\n';
+  }
+  output.close();
+  if (!output) {
+    throw std::runtime_error{"failed to finish " + temporary.string()};
+  }
+  fs::rename(temporary, path);
 }
 
 void append_ledger_row(const fs::path& path, const EvalOptions& options,
                        const match_runner::SeriesResult& result, std::string_view timestamp,
                        std::string_view run_id, std::string_view new_id, std::string_view base_id,
                        const fs::path& run_dir) {
-  constexpr std::string_view kHeader =
-      "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
-      "base_engine_args,games_requested,games_played,"
-      "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
-      "confidence_high_pct,sequential_decision,sequential_null,sequential_alt,opening_book,opening_"
-      "book_digest,"
-      "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir,analysis_version,"
-      "statistical_unit,statistical_samples,statistical_games,pair_score_0,pair_score_0_5,"
-      "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
-      "analysis_note";
-
   create_parent_directories(path);
+  migrate_ledger_if_needed(path);
   const bool needs_header = !is_file(path) || fs::file_size(path) == 0;
   if (!needs_header) {
     std::ifstream existing{path};
     std::string existing_header;
     std::getline(existing, existing_header);
-    if (existing_header != kHeader) {
+    if (existing_header != kLedgerHeader) {
       throw std::runtime_error{"unsupported ledger schema: " + path.string()};
     }
   }
@@ -600,7 +838,7 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
     throw std::runtime_error{"failed to append " + path.string()};
   }
   if (needs_header) {
-    output << kHeader << '\n';
+    output << kLedgerHeader << '\n';
   }
 
   write_csv_field(output, run_id);
@@ -626,11 +864,11 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
          << score_text(result.confidence_low * 100.0) << ','
          << score_text(result.confidence_high * 100.0) << ',';
   write_csv_field(output, match_runner::sequential_decision_name(result.sequential_decision));
-  output << ',' << options.series.sequential_null_rate << ',' << options.series.sequential_alt_rate
+  output << ',' << options.series.sequential_null_nelo << ',' << options.series.sequential_alt_nelo
          << ',';
   write_csv_field(output, options.series.opening_book.path);
   output << ',';
-  write_csv_field(output, opening_book_digest(options.series.opening_book));
+  write_csv_field(output, options.opening_book_digest);
   output << ',' << options.series.opening_book.lines.size() << ',';
   if (options.series.go_limits.depth.has_value()) {
     output << *options.series.go_limits.depth;
@@ -660,16 +898,35 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
   output << ',';
   write_csv_field(output, match_runner::sequential_test_method_name(result.statistical_unit));
   output << ',';
-  write_csv_field(output, "pair-aware v1");
+  write_csv_field(output, "paired normalized-Elo GSPRT");
+  output << ',' << (result.valid ? "true" : "false") << ',';
+  write_csv_field(output, result.invalid_reason);
+  output << ',' << options.resolved_opening_seed << ',';
+  write_csv_field(output, options.opening_seed_source);
+  output << ',';
+  write_csv_field(output, "deterministic_shuffle_without_replacement");
+  output << ',' << result.unique_openings_used << ',';
+  write_csv_field(output, match_runner::sequential_test_method_name(result.statistical_unit));
+  output << ',';
+  write_csv_field(output, "normalized_elo");
+  output << ',' << score_text(result.sequential_llr) << ','
+         << score_text(result.sequential_lower_bound) << ','
+         << score_text(result.sequential_upper_bound) << ',';
+  if (result.normalized_elo.has_value()) {
+    output << score_text(*result.normalized_elo);
+  }
+  output << ',' << score_text(result.betting_log_evidence_above_even) << ','
+         << score_text(result.betting_log_evidence_below_even);
   output << '\n';
 }
 
 [[nodiscard]] EvalOptions parse_eval_options(int argc, char** argv) {
   EvalOptions options;
-  options.series.games = 1000;
+  options.series.games = 2000;
   options.series.move_timeout = std::chrono::milliseconds{1000};
-  options.series.go_limits.move_time = std::chrono::milliseconds{900};
+  options.series.go_limits.move_time = std::chrono::milliseconds{100};
   options.series.print_game_results = false;
+  options.series.require_normal_games = true;
 
   for (int index = 0; index < argc; ++index) {
     const std::string_view argument = argv[index];
@@ -790,30 +1047,42 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
       options.series.shuffle_openings = true;
       continue;
     }
+    if (argument == "--opening-seed") {
+      if (index + 1 >= argc) {
+        throw std::invalid_argument{"--opening-seed requires an unsigned integer"};
+      }
+      const std::optional<std::uint64_t> seed = parse_u64(argv[++index]);
+      if (!seed.has_value()) {
+        throw std::invalid_argument{"--opening-seed requires an unsigned integer"};
+      }
+      options.series.opening_seed = seed;
+      options.opening_seed_source = "explicit";
+      continue;
+    }
     if (argument == "--sequential-stop") {
       options.series.sequential_stop = true;
       continue;
     }
     if (argument == "--sequential-null") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-null requires a finite normalized-Elo value"};
       }
-      const std::optional<double> rate = parse_probability(argv[++index]);
-      if (!rate.has_value()) {
-        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
+      const std::optional<double> nelo = parse_finite_double(argv[++index]);
+      if (!nelo.has_value()) {
+        throw std::invalid_argument{"--sequential-null requires a finite normalized-Elo value"};
       }
-      options.series.sequential_null_rate = *rate;
+      options.series.sequential_null_nelo = *nelo;
       continue;
     }
     if (argument == "--sequential-alt") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alt requires a finite normalized-Elo value"};
       }
-      const std::optional<double> rate = parse_probability(argv[++index]);
-      if (!rate.has_value()) {
-        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
+      const std::optional<double> nelo = parse_finite_double(argv[++index]);
+      if (!nelo.has_value()) {
+        throw std::invalid_argument{"--sequential-alt requires a finite normalized-Elo value"};
       }
-      options.series.sequential_alt_rate = *rate;
+      options.series.sequential_alt_nelo = *nelo;
       continue;
     }
     if (argument == "--sequential-alpha") {
@@ -861,8 +1130,23 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
   if (options.base_engine.empty()) {
     throw std::invalid_argument{"missing --base-engine"};
   }
-  if (options.series.sequential_alt_rate <= options.series.sequential_null_rate) {
+  if (options.series.sequential_alt_nelo <= options.series.sequential_null_nelo) {
     throw std::invalid_argument{"--sequential-alt must be greater than --sequential-null"};
+  }
+  if (!options.series.alternate_sides) {
+    throw std::invalid_argument{"eval requires alternating sides"};
+  }
+  if ((options.series.games % 2) != 0) {
+    throw std::invalid_argument{"eval requires an even --games value for complete opening pairs"};
+  }
+  if (options.series.opening_book.lines.empty()) {
+    throw std::invalid_argument{"eval requires --opening-book"};
+  }
+  if (!options.series.shuffle_openings) {
+    throw std::invalid_argument{"eval requires --shuffle-openings"};
+  }
+  if (options.series.games / 2 > static_cast<int>(options.series.opening_book.lines.size())) {
+    throw std::invalid_argument{"opening book does not contain enough unique openings for --games"};
   }
 
   return options;
@@ -886,10 +1170,18 @@ int run_eval(int argc, char** argv) {
       resolve_engine_binary(options.base, options.base_engine, options.preset);
   const std::string new_id = build_id_from_build_dir(new_build, options.preset);
   const std::string base_id = id_from_eval_input(options.base, options.preset);
+  options.opening_book_digest = opening_book_digest(options.series.opening_book);
+  if (!options.series.opening_seed.has_value()) {
+    options.series.opening_seed =
+        derive_opening_seed(new_id, base_id, options.opening_book_digest, options.kind);
+    options.opening_seed_source = "derived";
+  }
+  options.resolved_opening_seed = options.series.opening_seed.value_or(0);
   const std::string timestamp = utc_timestamp();
-  const std::string base_run_id = timestamp + "__" + new_id + "__" + options.new_engine + "__vs__" +
-                                  base_id + "__" + options.base_engine +
-                                  engine_args_run_id_suffix(options);
+  const std::string base_run_id =
+      timestamp + "__" + run_id_component(new_id) + "__" + run_id_component(options.new_engine) +
+      "__vs__" + run_id_component(base_id) + "__" + run_id_component(options.base_engine) +
+      engine_args_run_id_suffix(options);
   const ReservedRunDirectory run = reserve_run_directory(options.run_root, base_run_id);
 
   options.series.engine_one_command = engine_command(new_engine_path, options.new_engine_args);
@@ -919,9 +1211,11 @@ int run_eval(int argc, char** argv) {
       << (options.series.opening_book.path.empty() ? "none" : options.series.opening_book.path)
       << " opening_count=" << options.series.opening_book.lines.size()
       << " shuffle_openings=" << (options.series.shuffle_openings ? 1 : 0)
+      << " opening_seed=" << options.resolved_opening_seed
+      << " opening_seed_source=" << options.opening_seed_source
       << " sequential_stop=" << (options.series.sequential_stop ? 1 : 0)
-      << " sequential_null=" << options.series.sequential_null_rate
-      << " sequential_alt=" << options.series.sequential_alt_rate
+      << " sequential_null_nelo=" << options.series.sequential_null_nelo
+      << " sequential_alt_nelo=" << options.series.sequential_alt_nelo
       << " sequential_alpha=" << options.series.sequential_alpha
       << " sequential_beta=" << options.series.sequential_beta;
   print_go_limits(options.series.go_limits, log);
@@ -929,7 +1223,30 @@ int run_eval(int argc, char** argv) {
   log << "engine engine_one " << options.series.engine_one_command << '\n';
   log << "engine engine_two " << options.series.engine_two_command << '\n';
 
-  const match_runner::SeriesResult result = match_runner::run_process_series(options.series, log);
+  match_runner::SeriesResult result;
+  try {
+    result = match_runner::run_process_series(options.series, log);
+  } catch (const std::exception& error) {
+    result.games_requested = options.series.games;
+    result.valid = false;
+    result.invalid_reason = "runner exception: " + std::string{error.what()};
+    result.detail = "evaluation invalid: " + result.invalid_reason;
+    ++result.protocol_error_games;
+    match_runner::analyze_series_result(result, options.series);
+  } catch (...) {
+    result.games_requested = options.series.games;
+    result.valid = false;
+    result.invalid_reason = "runner exception: unknown";
+    result.detail = "evaluation invalid: " + result.invalid_reason;
+    ++result.protocol_error_games;
+    match_runner::analyze_series_result(result, options.series);
+  }
+  if (result.valid && result.sequential_decision == match_runner::SequentialDecision::kInvalid) {
+    result.valid = false;
+    result.invalid_reason = "statistical analysis failed";
+    result.detail = "evaluation invalid: " + result.invalid_reason;
+    match_runner::analyze_series_result(result, options.series);
+  }
   match_runner::print_series_result(result, log);
   log.close();
 
@@ -946,6 +1263,11 @@ int run_eval(int argc, char** argv) {
             << " run_dir=" << run.path.string()
             << " ledger=" << (options.write_ledger ? options.ledger : "disabled") << '\n';
   match_runner::print_series_result(result, std::cout);
+
+  if (!result.valid) {
+    std::cerr << "eval_invalid reason=" << result.invalid_reason << '\n';
+    return 3;
+  }
 
   if (options.require_accept_alt &&
       result.sequential_decision != match_runner::SequentialDecision::kAcceptAlternative) {

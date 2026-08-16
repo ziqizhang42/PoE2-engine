@@ -52,10 +52,23 @@ add_executable(poe2_match_runner_tests
   match_runner_test.cpp
 )
 
+add_executable(poe2_malformed_test_engine
+  malformed_engine.cpp
+)
+
+set_target_properties(poe2_malformed_test_engine PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/engines"
+)
+
 target_link_libraries(poe2_match_runner_tests
   PRIVATE
     poe2::match_runner
     Catch2::Catch2WithMain
+)
+
+target_compile_definitions(poe2_match_runner_tests
+  PRIVATE
+    POE2_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
 include(Catch)
@@ -71,4 +84,5 @@ add_custom_target(poe2_tests
     poe2_engine_stdio_tests
     poe2_minimax_tests
     poe2_match_runner_tests
+    poe2_malformed_test_engine
 )

@@ -70,19 +70,22 @@ build/debug/runner/poe2_runner series \
   --engine-two "./build/debug/engines/poe2_random_legal --seed 1" \
   --games 100 \
   --timeout-ms 1000 \
-  --go-movetime-ms 900 \
+  --go-movetime-ms 100 \
+  --opening-book eval/openings/development.txt \
+  --shuffle-openings \
+  --opening-seed 0 \
   --summary-only \
   --sequential-stop \
-  --sequential-null 0.50 \
-  --sequential-alt 0.55
+  --sequential-null 0 \
+  --sequential-alt 20
 ```
 
 Useful options:
 
 - `--games <n>`: number of games to run.
-- `--opening-book <path>`: cycle through a text opening suite and start each game after the
-  selected move prefix.
-- `--shuffle-openings`: randomly shuffle the opening suite once before the series starts.
+- `--opening-book <path>`: start games after move prefixes from a text opening suite.
+- `--shuffle-openings`: shuffle the opening suite once before the series starts.
+- `--opening-seed <n>`: make the shuffled selection and ordering reproducible.
 - `--go-depth <n>`: include `depth <n>` in every `go` command sent to engines.
 - `--go-movetime-ms <ms>`: include `movetime <ms>` in every `go` command sent to engines.
 - `--go-nodes <n>`: include `nodes <n>` in every `go` command sent to engines.
@@ -90,18 +93,18 @@ Useful options:
 - `--summary-only`: suppress per-game result lines for larger local runs.
 - `--verbose-games`: print the full one-game move/state log for every game.
 - `--sequential-stop`: treat `--games` as the maximum game budget and stop early on `accept_alt` or `accept_null`.
-- `--sequential-null <p>`: null score rate for engine one. Defaults to `0.50`.
-- `--sequential-alt <p>`: alternative score rate for engine one. Defaults to `0.55`.
+- `--sequential-null <nelo>`: null normalized-Elo value for engine one. Defaults to `0`.
+- `--sequential-alt <nelo>`: alternative normalized-Elo value for engine one. Defaults to `20`.
 - `--sequential-alpha <p>`: false-positive risk for accepting the alternative. Defaults to `0.05`.
 - `--sequential-beta <p>`: false-negative risk for accepting the null. Defaults to `0.05`.
 
-The summary includes engine-one wins, engine-two wins, average plies, average scores, reason counts, an anytime-valid 95% betting confidence sequence, and a sequential betting-test report. The decision is `accept_alt`, `accept_null`, or `continue`; `continue` means the current sample is not decisive under the selected null/alternative rates and risk settings. Without `--sequential-stop`, the runner always runs exactly `--games` games and only reports the decision at the end. With `--sequential-stop`, `--games` becomes a maximum budget and a decisive result stops the series early.
+The summary includes engine-one wins, engine-two wins, average plies, average scores, reason counts, normalized Elo, a paired normalized-Elo GSPRT report, and the anytime-valid betting confidence analysis. The betting analysis is diagnostic and does not control the GSPRT decision. The decision is `accept_alt`, `accept_null`, or `continue`; `continue` means the current sample is not decisive under the selected hypotheses and risk settings. Without `--sequential-stop`, the runner runs the requested budget and reports the decision at the end. With it, a boundary crossing stops the series early.
 
-Decisions are directional for engine one. `accept_alt` rejects a score rate at or below `--sequential-null` with risk bounded by `--sequential-alpha`; `accept_null` rejects a score rate at or above `--sequential-alt` with risk bounded by `--sequential-beta`. Either decision is permitted in the indifference region between the two rates. Swap engine order to test the other engine.
+Decisions are directional for engine one. `accept_alt` crosses the upper GSPRT boundary in favor of `--sequential-alt`; `accept_null` crosses the lower boundary in favor of `--sequential-null`. Swap engine order to test the other engine.
 
-When an opening book is provided, series mode cycles through opening lines. `--shuffle-openings` randomizes that order once at the start of the series. With alternating sides, each opening is still reused for the adjacent swapped-side game before advancing to the next line, and sequential stopping is checked only after the pair is complete.
+When an opening book is provided, series mode never wraps around. It fails before starting if the requested games need more unique openings than the book contains. With alternating sides, each opening is used for the adjacent swapped-side game before advancing, and sequential stopping is checked only after the pair is complete.
 
-With alternating sides, the statistical unit is the completed opening pair, not an individual game. A pair contributes an engine-one score of `0`, `0.5`, `1`, `1.5`, or `2`; the middle two values allow for games without a winner. Confidence and sequential evidence are calculated from the normalized pair scores. This accounts for correlation between the two games without assuming a particular split rate. A trailing game from an odd game budget remains in match totals and `games.csv`, but is excluded from statistical inference because it has no side-swapped partner. With `--fixed-sides`, individual games remain the statistical units.
+With alternating sides, the statistical unit is the completed opening pair, not an individual game. Normal pairs contribute an engine-one score rate of `0`, `0.5`, or `1`. Diagnostic no-winner outcomes occupy the remaining pentanomial bins. Abnormal games and incomplete pairs are excluded from inference. With `--fixed-sides`, individual normal games remain the statistical units.
 
 ## Eval Mode
 
@@ -114,27 +117,41 @@ build/release/runner/poe2_runner eval \
   --new-engine poe2_greedy \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \
+  --opening-book eval/openings/holdout.txt \
+  --shuffle-openings \
   --games 2000 \
   --sequential-stop \
   --require-accept-alt
 ```
 
 It writes `manifest.json`, `summary.json`, `games.csv`, `command.txt`, and `runner.log` under `build/eval/runs/`, and appends one summary row to `eval/results.csv` unless `--no-ledger` is passed.
-Every eval run supplies both `--new-engine <name>` and `--base-engine <name>`. Use
-`--new-engine-args` or `--base-engine-args` for side-specific engine arguments.
+Every eval run supplies both `--new-engine <name>` and `--base-engine <name>`. Use `--new-engine-args` or `--base-engine-args` for side-specific engine arguments.
+
+Eval mode requires an even game budget, alternating sides, a shuffled opening book, and enough unique openings. If `--opening-seed` is omitted, eval derives it from both build IDs, the opening-book digest, and the eval kind. Any abnormal game invalidates the run immediately, writes partial artifacts, excludes that game from inference, and returns status `3`.
 
 ## Opening Generation
 
-Generate the default systematic 2-ply gate suite:
+Generate the development and holdout corpus:
+
+```bash
+build/debug/runner/poe2_runner openings generate-corpus \
+  --development-out eval/openings/development.txt \
+  --holdout-out eval/openings/holdout.txt \
+  --count 20000 \
+  --plies 2,4,6,8,10,12,14 \
+  --seed 20260816 \
+  --max-score-gap 4
+```
+
+This includes the complete canonical two-ply stratum, generates deeper legal histories under the score-gap rule, deduplicates final colored positions under board symmetry, and deterministically balances every depth across the two outputs.
+
+The systematic generator remains available for reproducing the historical two-ply suite:
 
 ```bash
 build/debug/runner/poe2_runner openings generate-systematic \
   --out eval/openings/systematic-2ply-v1.txt \
   --plies 2
 ```
-
-This enumerates all ordered two-ply prefixes and keeps one representative per final colored
-position under board symmetry.
 
 Generate a random symmetry-deduplicated suite:
 

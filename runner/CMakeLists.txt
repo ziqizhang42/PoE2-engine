@@ -95,3 +95,92 @@ add_test(
           --kind smoke
           --no-ledger
 )
+
+set(POE2_GENERATED_CORPUS_DIR "${CMAKE_BINARY_DIR}/opening-corpus-test")
+add_test(
+  NAME runner_opening_corpus_generation
+  COMMAND poe2_runner openings generate-corpus
+          --development-out ${POE2_GENERATED_CORPUS_DIR}/development.txt
+          --holdout-out ${POE2_GENERATED_CORPUS_DIR}/holdout.txt
+          --count 20000
+          --plies 2,4,6,8,10,12,14
+          --seed 20260816
+          --max-score-gap 4
+)
+set_tests_properties(runner_opening_corpus_generation PROPERTIES
+  FIXTURES_SETUP opening_corpus_generation
+)
+
+add_test(
+  NAME runner_opening_corpus_development_golden
+  COMMAND ${CMAKE_COMMAND} -E compare_files
+          ${POE2_GENERATED_CORPUS_DIR}/development.txt
+          ${PROJECT_SOURCE_DIR}/eval/openings/development.txt
+)
+set_tests_properties(runner_opening_corpus_development_golden PROPERTIES
+  FIXTURES_REQUIRED opening_corpus_generation
+)
+
+add_test(
+  NAME runner_opening_corpus_holdout_golden
+  COMMAND ${CMAKE_COMMAND} -E compare_files
+          ${POE2_GENERATED_CORPUS_DIR}/holdout.txt
+          ${PROJECT_SOURCE_DIR}/eval/openings/holdout.txt
+)
+set_tests_properties(runner_opening_corpus_holdout_golden PROPERTIES
+  FIXTURES_REQUIRED opening_corpus_generation
+)
+
+add_test(
+  NAME runner_rejects_opening_reuse
+  COMMAND poe2_runner series
+          --engine-one $<TARGET_FILE:poe2_greedy>
+          --engine-two $<TARGET_FILE:poe2_greedy>
+          --games 632
+          --opening-book ${PROJECT_SOURCE_DIR}/eval/openings/systematic-2ply-v1.txt
+)
+set_tests_properties(runner_rejects_opening_reuse PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+  NAME runner_eval_rejects_odd_game_budget
+  COMMAND poe2_runner eval
+          --new-build ${CMAKE_BINARY_DIR}
+          --base ${CMAKE_BINARY_DIR}
+          --new-engine poe2_greedy
+          --base-engine poe2_greedy
+          --games 3
+          --opening-book ${PROJECT_SOURCE_DIR}/eval/openings/development.txt
+          --shuffle-openings
+          --no-ledger
+)
+set_tests_properties(runner_eval_rejects_odd_game_budget PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+  NAME runner_eval_invalidates_abnormal_game
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DBUILD_DIR=${CMAKE_BINARY_DIR}
+          -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -DTEST_ROOT=${CMAKE_BINARY_DIR}/eval-invalid-test
+          -P ${PROJECT_SOURCE_DIR}/tests/eval_invalid_test.cmake
+)
+
+add_test(
+  NAME runner_eval_migrates_legacy_ledger
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DBUILD_DIR=${CMAKE_BINARY_DIR}
+          -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -DTEST_ROOT=${CMAKE_BINARY_DIR}/eval-ledger-migration-test
+          -P ${PROJECT_SOURCE_DIR}/tests/eval_ledger_migration_test.cmake
+)
+
+add_test(
+  NAME runner_eval_sampling_is_reproducible
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DBUILD_DIR=${CMAKE_BINARY_DIR}
+          -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -DTEST_ROOT=${CMAKE_BINARY_DIR}/eval-sampling-test
+          -P ${PROJECT_SOURCE_DIR}/tests/eval_sampling_test.cmake
+)

@@ -49,6 +49,13 @@ namespace {
     return std::nullopt;
   }
 
+  if (opening_text == "startpos") {
+    return OpeningLine{
+        .line_number = line_number,
+        .text = "startpos",
+    };
+  }
+
   Position position;
   std::vector<std::string> moves;
   std::istringstream input{opening_text};

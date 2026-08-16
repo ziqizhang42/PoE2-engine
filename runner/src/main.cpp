@@ -103,6 +103,21 @@ int run_manual() {
   return value;
 }
 
+[[nodiscard]] std::optional<double> parse_finite_double(std::string_view text) {
+  std::istringstream input{std::string{text}};
+  double value = 0.0;
+  input >> value;
+  if (!input || !std::isfinite(value)) {
+    return std::nullopt;
+  }
+
+  std::string trailing;
+  if (input >> trailing) {
+    return std::nullopt;
+  }
+  return value;
+}
+
 [[nodiscard]] std::optional<std::uint64_t> parse_positive_u64(std::string_view text) noexcept {
   std::uint64_t value = 0;
   const char* begin = text.data();
@@ -112,6 +127,17 @@ int run_manual() {
     return std::nullopt;
   }
 
+  return value;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> parse_u64(std::string_view text) noexcept {
+  std::uint64_t value = 0;
+  const char* begin = text.data();
+  const char* end = begin + text.size();
+  const auto result = std::from_chars(begin, end, value);
+  if (result.ec != std::errc{} || result.ptr != end) {
+    return std::nullopt;
+  }
   return value;
 }
 
@@ -176,22 +202,26 @@ void print_usage(std::ostream& output) {
       << "                    [--opening-book <path>] [--quiet]\n"
       << "  poe2_runner series --engine-one <command> --engine-two <command> --games <n>\n"
       << "                     [--timeout-ms <ms>] [--fixed-sides] [--summary-only]\n"
-      << "                     [--opening-book <path>] [--shuffle-openings]\n"
-      << "                     [--verbose-games] [--sequential-stop] [--sequential-null <p>] "
-         "[--sequential-alt <p>]\n"
+      << "                     [--opening-book <path>] [--shuffle-openings] "
+         "[--opening-seed <n>]\n"
+      << "                     [--verbose-games] [--sequential-stop] "
+         "[--sequential-null <nelo>] [--sequential-alt <nelo>]\n"
       << "                     [--sequential-alpha <p>] [--sequential-beta <p>]\n"
       << "                     [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
       << "  poe2_runner eval --new-build <dir> --base <id|dir|binary>\n"
       << "                   --new-engine <name> --base-engine <name>\n"
       << "                   [--new-engine-args <args>] [--base-engine-args <args>]\n"
       << "                   [--games <n>] [--timeout-ms <ms>] [--sequential-stop]\n"
-      << "                   [--sequential-null <p>] [--sequential-alt <p>]\n"
+      << "                   [--sequential-null <nelo>] [--sequential-alt <nelo>]\n"
       << "                   [--sequential-alpha <p>] [--sequential-beta <p>]\n"
-      << "                   [--opening-book <path>] [--shuffle-openings]\n"
+      << "                   --opening-book <path> --shuffle-openings [--opening-seed <n>]\n"
       << "                   [--require-accept-alt] [--ledger <path>] [--no-ledger]\n"
       << "                   [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
       << "  poe2_runner openings generate-random --out <path> --count <n> --plies <n> --seed <n>\n"
       << "                                     [--max-score-gap <n>]\n"
+      << "  poe2_runner openings generate-corpus --development-out <path> --holdout-out <path>\n"
+      << "                                       --count <n> --plies <list> --seed <n>\n"
+      << "                                       [--max-score-gap <n>]\n"
       << "  poe2_runner openings generate-systematic --out <path> --plies 2\n";
 }
 
@@ -315,6 +345,17 @@ void print_usage(std::ostream& output) {
       options.shuffle_openings = true;
       continue;
     }
+    if (argument == "--opening-seed") {
+      if (index + 1 >= argc) {
+        throw std::invalid_argument{"--opening-seed requires an unsigned integer"};
+      }
+      const std::optional<std::uint64_t> seed = parse_u64(argv[++index]);
+      if (!seed.has_value()) {
+        throw std::invalid_argument{"--opening-seed requires an unsigned integer"};
+      }
+      options.opening_seed = seed;
+      continue;
+    }
     if (argument == "--verbose-games") {
       options.verbose_games = true;
       continue;
@@ -325,24 +366,24 @@ void print_usage(std::ostream& output) {
     }
     if (argument == "--sequential-null") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-null requires a finite normalized-Elo value"};
       }
-      const std::optional<double> rate = parse_probability(argv[++index]);
-      if (!rate.has_value()) {
-        throw std::invalid_argument{"--sequential-null requires a probability between 0 and 1"};
+      const std::optional<double> nelo = parse_finite_double(argv[++index]);
+      if (!nelo.has_value()) {
+        throw std::invalid_argument{"--sequential-null requires a finite normalized-Elo value"};
       }
-      options.sequential_null_rate = *rate;
+      options.sequential_null_nelo = *nelo;
       continue;
     }
     if (argument == "--sequential-alt") {
       if (index + 1 >= argc) {
-        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
+        throw std::invalid_argument{"--sequential-alt requires a finite normalized-Elo value"};
       }
-      const std::optional<double> rate = parse_probability(argv[++index]);
-      if (!rate.has_value()) {
-        throw std::invalid_argument{"--sequential-alt requires a probability between 0 and 1"};
+      const std::optional<double> nelo = parse_finite_double(argv[++index]);
+      if (!nelo.has_value()) {
+        throw std::invalid_argument{"--sequential-alt requires a finite normalized-Elo value"};
       }
-      options.sequential_alt_rate = *rate;
+      options.sequential_alt_nelo = *nelo;
       continue;
     }
     if (argument == "--sequential-alpha") {
@@ -380,8 +421,11 @@ void print_usage(std::ostream& output) {
   if (options.engine_two_command.empty()) {
     throw std::invalid_argument{"missing --engine-two command"};
   }
-  if (options.sequential_alt_rate <= options.sequential_null_rate) {
+  if (options.sequential_alt_nelo <= options.sequential_null_nelo) {
     throw std::invalid_argument{"--sequential-alt must be greater than --sequential-null"};
+  }
+  if (options.opening_seed.has_value() && !options.shuffle_openings) {
+    throw std::invalid_argument{"--opening-seed requires --shuffle-openings"};
   }
 
   return options;
@@ -411,10 +455,15 @@ int run_series(int argc, char** argv) {
             << " alternate_sides=" << (options.alternate_sides ? 1 : 0) << " opening_book="
             << (options.opening_book.path.empty() ? "none" : options.opening_book.path)
             << " opening_count=" << options.opening_book.lines.size()
-            << " shuffle_openings=" << (options.shuffle_openings ? 1 : 0)
-            << " sequential_stop=" << (options.sequential_stop ? 1 : 0)
-            << " sequential_null=" << options.sequential_null_rate
-            << " sequential_alt=" << options.sequential_alt_rate
+            << " shuffle_openings=" << (options.shuffle_openings ? 1 : 0) << " opening_seed=";
+  if (options.opening_seed.has_value()) {
+    std::cout << *options.opening_seed;
+  } else {
+    std::cout << "random";
+  }
+  std::cout << " sequential_stop=" << (options.sequential_stop ? 1 : 0)
+            << " sequential_null_nelo=" << options.sequential_null_nelo
+            << " sequential_alt_nelo=" << options.sequential_alt_nelo
             << " sequential_alpha=" << options.sequential_alpha
             << " sequential_beta=" << options.sequential_beta;
   print_go_limits(options.go_limits, std::cout);
@@ -425,7 +474,7 @@ int run_series(int argc, char** argv) {
   const poe2::match_runner::SeriesResult result =
       poe2::match_runner::run_process_series(options, std::cout);
   poe2::match_runner::print_series_result(result, std::cout);
-  return 0;
+  return result.valid ? 0 : 3;
 }
 
 int run(int argc, char** argv) {

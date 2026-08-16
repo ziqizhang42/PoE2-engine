@@ -6,9 +6,11 @@
 #include <cmath>
 #include <csignal>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <ostream>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -344,6 +346,8 @@ enum class EvidenceDirection : std::uint8_t {
 
 void collect_statistical_samples(SeriesResult& result, const SeriesOptions& options) noexcept {
   result.statistical_score_counts.fill(0);
+  result.statistical_samples = 0;
+  result.statistical_games = 0;
   result.statistical_unit =
       options.alternate_sides ? StatisticalUnit::kOpeningPair : StatisticalUnit::kGame;
 
@@ -351,18 +355,25 @@ void collect_statistical_samples(SeriesResult& result, const SeriesOptions& opti
     const std::size_t complete_pairs = result.games.size() / 2;
     for (std::size_t pair = 0; pair < complete_pairs; ++pair) {
       const std::size_t first = pair * 2;
+      if (result.games[first].match.reason != MatchEndReason::kNormal ||
+          result.games[first + 1].match.reason != MatchEndReason::kNormal) {
+        continue;
+      }
       const int pair_half_points = engine_one_game_half_points(result.games[first]) +
                                    engine_one_game_half_points(result.games[first + 1]);
       ++result.statistical_score_counts[static_cast<std::size_t>(pair_half_points)];
+      ++result.statistical_samples;
     }
-    result.statistical_samples = static_cast<int>(complete_pairs);
     result.statistical_games = result.statistical_samples * 2;
   } else {
     for (const SeriesGameResult& game : result.games) {
+      if (game.match.reason != MatchEndReason::kNormal) {
+        continue;
+      }
       const int score_bin = engine_one_game_half_points(game) * 2;
       ++result.statistical_score_counts[static_cast<std::size_t>(score_bin)];
+      ++result.statistical_samples;
     }
-    result.statistical_samples = static_cast<int>(result.games.size());
     result.statistical_games = result.statistical_samples;
   }
 
@@ -469,41 +480,223 @@ void update_confidence_sequence(SeriesResult& result) noexcept {
   result.confidence_high = retained_high;
 }
 
+struct Distribution {
+  std::vector<double> values;
+  std::vector<double> probabilities;
+  double count = 0.0;
+};
+
+struct DistributionStats {
+  double mean = 0.0;
+  double variance = 0.0;
+};
+
+inline constexpr double kResultRegularization = 1.0e-3;
+// 800 / ln(10), matching the normalized-Elo scale used by Fishtest.
+inline constexpr double kNormalizedEloPerT = 347.43558552260146;
+
+[[nodiscard]] DistributionStats distribution_stats(const Distribution& distribution) noexcept {
+  DistributionStats stats;
+  for (std::size_t index = 0; index < distribution.values.size(); ++index) {
+    stats.mean += distribution.values[index] * distribution.probabilities[index];
+  }
+  for (std::size_t index = 0; index < distribution.values.size(); ++index) {
+    const double centered = distribution.values[index] - stats.mean;
+    stats.variance += distribution.probabilities[index] * centered * centered;
+  }
+  return stats;
+}
+
+[[nodiscard]] Distribution result_distribution(const SeriesResult& result) {
+  Distribution distribution;
+  if (result.statistical_unit == StatisticalUnit::kOpeningPair) {
+    distribution.values = {0.0, 0.25, 0.5, 0.75, 1.0};
+    distribution.probabilities.reserve(kStatisticalScoreBinCount);
+    for (const int count : result.statistical_score_counts) {
+      const double regularized = count == 0 ? kResultRegularization : static_cast<double>(count);
+      distribution.probabilities.push_back(regularized);
+      distribution.count += regularized;
+    }
+  } else {
+    distribution.values = {0.0, 0.5, 1.0};
+    for (const int bin : {0, 2, 4}) {
+      const int count = result.statistical_score_counts[static_cast<std::size_t>(bin)];
+      const double regularized = count == 0 ? kResultRegularization : static_cast<double>(count);
+      distribution.probabilities.push_back(regularized);
+      distribution.count += regularized;
+    }
+  }
+
+  for (double& probability : distribution.probabilities) {
+    probability /= distribution.count;
+  }
+  return distribution;
+}
+
+[[nodiscard]] std::optional<double> secular_root(
+    const std::vector<double>& centered_values, const std::vector<double>& probabilities) noexcept {
+  const auto [minimum, maximum] =
+      std::minmax_element(centered_values.begin(), centered_values.end());
+  if (minimum == centered_values.end() || *minimum >= 0.0 || *maximum <= 0.0) {
+    return std::nullopt;
+  }
+
+  double lower = std::nextafter(-1.0 / *maximum, std::numeric_limits<double>::infinity());
+  double upper = std::nextafter(-1.0 / *minimum, -std::numeric_limits<double>::infinity());
+  const auto value_at = [&](double value) noexcept {
+    double sum = 0.0;
+    for (std::size_t index = 0; index < centered_values.size(); ++index) {
+      sum += probabilities[index] * centered_values[index] / (1.0 + value * centered_values[index]);
+    }
+    return sum;
+  };
+
+  if (!(value_at(lower) > 0.0) || !(value_at(upper) < 0.0)) {
+    return std::nullopt;
+  }
+  for (int step = 0; step < 100; ++step) {
+    const double middle = std::midpoint(lower, upper);
+    if (value_at(middle) > 0.0) {
+      lower = middle;
+    } else {
+      upper = middle;
+    }
+  }
+  return std::midpoint(lower, upper);
+}
+
+[[nodiscard]] std::optional<Distribution> maximum_likelihood_for_t(const Distribution& empirical,
+                                                                   double reference,
+                                                                   double target_t) noexcept {
+  // Iterative constrained multinomial MLE for a fixed t-value, as used by Fishtest's
+  // normalized-Elo GSPRT. The secular equation enforces the constraint at each iteration.
+  Distribution estimate{
+      .values = empirical.values,
+      .probabilities = std::vector<double>(empirical.values.size(),
+                                           1.0 / static_cast<double>(empirical.values.size())),
+      .count = empirical.count,
+  };
+
+  for (int iteration = 0; iteration < 100; ++iteration) {
+    const DistributionStats stats = distribution_stats(estimate);
+    if (!(stats.variance > 0.0) || !std::isfinite(stats.variance)) {
+      return std::nullopt;
+    }
+    const double sigma = std::sqrt(stats.variance);
+    std::vector<double> centered_values;
+    centered_values.reserve(empirical.values.size());
+    for (const double value : empirical.values) {
+      const double standardized = (stats.mean - value) / sigma;
+      centered_values.push_back(value - reference -
+                                target_t * sigma * (1.0 + standardized * standardized) / 2.0);
+    }
+
+    const std::optional<double> root = secular_root(centered_values, empirical.probabilities);
+    if (!root.has_value()) {
+      return std::nullopt;
+    }
+
+    std::vector<double> next_probabilities;
+    next_probabilities.reserve(empirical.probabilities.size());
+    double probability_sum = 0.0;
+    double maximum_change = 0.0;
+    for (std::size_t index = 0; index < empirical.probabilities.size(); ++index) {
+      const double probability =
+          empirical.probabilities[index] / (1.0 + *root * centered_values[index]);
+      if (!(probability > 0.0) || !std::isfinite(probability)) {
+        return std::nullopt;
+      }
+      next_probabilities.push_back(probability);
+      probability_sum += probability;
+    }
+    for (std::size_t index = 0; index < next_probabilities.size(); ++index) {
+      next_probabilities[index] /= probability_sum;
+      maximum_change = std::max(
+          maximum_change, std::abs(next_probabilities[index] - estimate.probabilities[index]));
+    }
+    estimate.probabilities = std::move(next_probabilities);
+    if (maximum_change < 1.0e-12) {
+      return estimate;
+    }
+  }
+
+  return estimate;
+}
+
+[[nodiscard]] std::optional<double> normalized_elo_llr(const SeriesResult& result) noexcept {
+  const Distribution empirical = result_distribution(result);
+  const double pair_scale =
+      result.statistical_unit == StatisticalUnit::kOpeningPair ? std::sqrt(2.0) : 1.0;
+  const double null_t = result.sequential_null_nelo * pair_scale / kNormalizedEloPerT;
+  const double alternative_t = result.sequential_alt_nelo * pair_scale / kNormalizedEloPerT;
+  const std::optional<Distribution> null_estimate =
+      maximum_likelihood_for_t(empirical, 0.5, null_t);
+  const std::optional<Distribution> alternative_estimate =
+      maximum_likelihood_for_t(empirical, 0.5, alternative_t);
+  if (!null_estimate.has_value() || !alternative_estimate.has_value()) {
+    return std::nullopt;
+  }
+
+  double llr_per_sample = 0.0;
+  for (std::size_t index = 0; index < empirical.probabilities.size(); ++index) {
+    llr_per_sample +=
+        empirical.probabilities[index] * (std::log(alternative_estimate->probabilities[index]) -
+                                          std::log(null_estimate->probabilities[index]));
+  }
+  const double llr = empirical.count * llr_per_sample;
+  return std::isfinite(llr) ? std::optional<double>{llr} : std::nullopt;
+}
+
+void update_normalized_elo(SeriesResult& result) noexcept {
+  result.normalized_elo.reset();
+  if (result.statistical_samples <= 0) {
+    return;
+  }
+
+  const Distribution empirical = result_distribution(result);
+  const DistributionStats stats = distribution_stats(empirical);
+  const double sigma_per_game = result.statistical_unit == StatisticalUnit::kOpeningPair
+                                    ? std::sqrt(2.0 * stats.variance)
+                                    : std::sqrt(stats.variance);
+  if (!(sigma_per_game > 0.0) || !std::isfinite(sigma_per_game)) {
+    return;
+  }
+  const double normalized_elo = ((stats.mean - 0.5) / sigma_per_game) * kNormalizedEloPerT;
+  if (std::isfinite(normalized_elo)) {
+    result.normalized_elo = normalized_elo;
+  }
+}
+
 void update_sequential_test(SeriesResult& result) noexcept {
-  if (result.statistical_samples <= 0 || result.sequential_null_rate <= 0.0 ||
-      result.sequential_null_rate >= 1.0 || result.sequential_alt_rate <= 0.0 ||
-      result.sequential_alt_rate >= 1.0 ||
-      result.sequential_alt_rate <= result.sequential_null_rate || result.sequential_alpha <= 0.0 ||
+  if (!std::isfinite(result.sequential_null_nelo) || !std::isfinite(result.sequential_alt_nelo) ||
+      result.sequential_alt_nelo <= result.sequential_null_nelo || result.sequential_alpha <= 0.0 ||
       result.sequential_alpha >= 1.0 || result.sequential_beta <= 0.0 ||
       result.sequential_beta >= 1.0) {
     result.sequential_decision = SequentialDecision::kInvalid;
     return;
   }
+  result.sequential_lower_bound =
+      std::log(result.sequential_beta / (1.0 - result.sequential_alpha));
+  result.sequential_upper_bound =
+      std::log((1.0 - result.sequential_beta) / result.sequential_alpha);
+  if (!result.valid) {
+    result.sequential_decision = SequentialDecision::kInvalid;
+    return;
+  }
+  if (result.statistical_samples <= 0) {
+    result.sequential_decision = SequentialDecision::kContinue;
+    return;
+  }
 
-  result.sequential_alt_log_evidence = log_betting_evidence(
-      result.statistical_score_counts, result.sequential_null_rate, EvidenceDirection::kAbove);
-  result.sequential_null_log_evidence = log_betting_evidence(
-      result.statistical_score_counts, result.sequential_alt_rate, EvidenceDirection::kBelow);
-  result.sequential_lower_bound = -std::log(1.0 / result.sequential_beta);
-  result.sequential_upper_bound = std::log(1.0 / result.sequential_alpha);
-  result.sequential_signed_log_evidence =
-      result.sequential_alt_log_evidence >= result.sequential_null_log_evidence
-          ? result.sequential_alt_log_evidence
-          : -result.sequential_null_log_evidence;
-
-  const bool accept_alternative =
-      result.sequential_alt_log_evidence >= result.sequential_upper_bound;
-  const bool accept_null = result.sequential_null_log_evidence >= -result.sequential_lower_bound;
-  if (accept_alternative && accept_null) {
-    const double alternative_ratio =
-        result.sequential_alt_log_evidence / result.sequential_upper_bound;
-    const double null_ratio = result.sequential_null_log_evidence / -result.sequential_lower_bound;
-    result.sequential_decision = alternative_ratio >= null_ratio
-                                     ? SequentialDecision::kAcceptAlternative
-                                     : SequentialDecision::kAcceptNull;
-  } else if (accept_alternative) {
+  const std::optional<double> llr = normalized_elo_llr(result);
+  if (!llr.has_value()) {
+    result.sequential_decision = SequentialDecision::kInvalid;
+    return;
+  }
+  result.sequential_llr = *llr;
+  if (result.sequential_llr >= result.sequential_upper_bound) {
     result.sequential_decision = SequentialDecision::kAcceptAlternative;
-  } else if (accept_null) {
+  } else if (result.sequential_llr <= result.sequential_lower_bound) {
     result.sequential_decision = SequentialDecision::kAcceptNull;
   } else {
     result.sequential_decision = SequentialDecision::kContinue;
@@ -519,11 +712,30 @@ void update_sequential_test(SeriesResult& result) noexcept {
   return !alternate_sides || (zero_based_game_index % 2) != 0;
 }
 
+[[nodiscard]] std::uint64_t bounded_random(std::mt19937_64& generator,
+                                           std::uint64_t bound) noexcept {
+  const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+  const std::uint64_t limit = maximum - (maximum % bound);
+  std::uint64_t value = 0;
+  do {
+    value = generator();
+  } while (value >= limit);
+  return value % bound;
+}
+
+void deterministic_shuffle(std::vector<OpeningLine>& lines, std::uint64_t seed) noexcept {
+  std::mt19937_64 generator{seed};
+  for (std::size_t remaining = lines.size(); remaining > 1; --remaining) {
+    const std::size_t selected = static_cast<std::size_t>(bounded_random(generator, remaining));
+    std::swap(lines[remaining - 1], lines[selected]);
+  }
+}
+
 void print_series_game(const SeriesGameResult& game, std::ostream& output) {
   output << "game"
          << " index=" << game.game_number
          << " engine_one_as=" << player_name(game.engine_one_player)
-         << " opening_line=" << game.opening_line_number
+         << " opening_slot=" << game.opening_slot << " opening_line=" << game.opening_line_number
          << " reason=" << reason_name(game.match.reason)
          << " winner=" << engine_name_from_winner(game) << " p1=" << game.match.scores.player_one
          << " p2=" << game.match.scores.player_two << " plies=" << game.match.moves.size() << '\n';
@@ -534,21 +746,59 @@ void print_series_game(const SeriesGameResult& game, std::ostream& output) {
 
 }  // namespace
 
+GsprtAnalysis analyze_normalized_elo_gsprt(const std::array<int, 5>& score_counts,
+                                           StatisticalUnit unit, double null_nelo,
+                                           double alternative_nelo, double alpha,
+                                           double beta) noexcept {
+  SeriesResult result;
+  result.statistical_unit = unit;
+  result.statistical_score_counts = score_counts;
+  if (unit == StatisticalUnit::kOpeningPair) {
+    for (const int count : score_counts) {
+      result.statistical_samples += count;
+    }
+    result.statistical_games = result.statistical_samples * 2;
+  } else {
+    for (const int bin : {0, 2, 4}) {
+      result.statistical_samples += score_counts[static_cast<std::size_t>(bin)];
+    }
+    result.statistical_games = result.statistical_samples;
+  }
+  result.sequential_null_nelo = null_nelo;
+  result.sequential_alt_nelo = alternative_nelo;
+  result.sequential_alpha = alpha;
+  result.sequential_beta = beta;
+  update_normalized_elo(result);
+  update_sequential_test(result);
+  return GsprtAnalysis{
+      .normalized_elo = result.normalized_elo,
+      .llr = result.sequential_llr,
+      .lower_bound = result.sequential_lower_bound,
+      .upper_bound = result.sequential_upper_bound,
+      .decision = result.sequential_decision,
+  };
+}
+
 void analyze_series_result(SeriesResult& result, const SeriesOptions& options) noexcept {
   result.confidence_level = kDefaultConfidenceLevel;
-  result.sequential_null_rate = options.sequential_null_rate;
-  result.sequential_alt_rate = options.sequential_alt_rate;
+  result.sequential_null_nelo = options.sequential_null_nelo;
+  result.sequential_alt_nelo = options.sequential_alt_nelo;
   result.sequential_alpha = options.sequential_alpha;
   result.sequential_beta = options.sequential_beta;
-  result.sequential_alt_log_evidence = 0.0;
-  result.sequential_null_log_evidence = 0.0;
-  result.sequential_signed_log_evidence = 0.0;
+  result.betting_log_evidence_above_even = 0.0;
+  result.betting_log_evidence_below_even = 0.0;
+  result.sequential_llr = 0.0;
   result.sequential_lower_bound = 0.0;
   result.sequential_upper_bound = 0.0;
   result.sequential_decision = SequentialDecision::kContinue;
 
   collect_statistical_samples(result, options);
   update_confidence_sequence(result);
+  result.betting_log_evidence_above_even =
+      log_betting_evidence(result.statistical_score_counts, 0.5, EvidenceDirection::kAbove);
+  result.betting_log_evidence_below_even =
+      log_betting_evidence(result.statistical_score_counts, 0.5, EvidenceDirection::kBelow);
+  update_normalized_elo(result);
   update_sequential_test(result);
 }
 
@@ -570,9 +820,23 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
       .games_requested = options.games,
   };
   OpeningBook opening_book = options.opening_book;
+  if (!opening_book.lines.empty()) {
+    const int required_openings = options.alternate_sides ? (options.games + 1) / 2 : options.games;
+    if (required_openings > static_cast<int>(opening_book.lines.size())) {
+      throw std::invalid_argument{"opening book has " + std::to_string(opening_book.lines.size()) +
+                                  " lines but the series needs " +
+                                  std::to_string(required_openings) + " unique openings"};
+    }
+  }
   if (options.shuffle_openings) {
-    std::mt19937_64 generator{std::random_device{}()};
-    std::shuffle(opening_book.lines.begin(), opening_book.lines.end(), generator);
+    std::uint64_t seed = 0;
+    if (options.opening_seed.has_value()) {
+      seed = *options.opening_seed;
+    } else {
+      std::random_device random;
+      seed = (static_cast<std::uint64_t>(random()) << 32U) ^ static_cast<std::uint64_t>(random());
+    }
+    deterministic_shuffle(opening_book.lines, seed);
   }
 
   EngineProcess engine_one{options.engine_one_command};
@@ -583,12 +847,16 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
   std::string detail;
   if (!wait_for_ready(engine_one, options.move_timeout, detail)) {
     result.detail = "engine_one startup failed: " + detail;
+    result.valid = false;
+    result.invalid_reason = result.detail;
     ++result.protocol_error_games;
     analyze_series_result(result, options);
     return result;
   }
   if (!wait_for_ready(engine_two, options.move_timeout, detail)) {
     result.detail = "engine_two startup failed: " + detail;
+    result.valid = false;
+    result.invalid_reason = result.detail;
     ++result.protocol_error_games;
     analyze_series_result(result, options);
     return result;
@@ -606,10 +874,8 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
         .verbose = options.verbose_games,
     };
     const bool has_openings = !opening_book.lines.empty();
-    const int opening_index = has_openings
-                                  ? (options.alternate_sides ? (game_index / 2) : game_index) %
-                                        static_cast<int>(opening_book.lines.size())
-                                  : -1;
+    const int opening_index =
+        has_openings ? (options.alternate_sides ? (game_index / 2) : game_index) : -1;
     const OpeningLine* opening = has_openings ? &opening_book.lines[opening_index] : nullptr;
     if (opening != nullptr) {
       match_options.opening_moves = opening->moves;
@@ -621,6 +887,7 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
     SeriesGameResult game{
         .game_number = game_index + 1,
         .engine_one_player = engine_one_player,
+        .opening_slot = opening != nullptr ? opening_index + 1 : 0,
         .opening_line_number = opening != nullptr ? opening->line_number : 0,
         .opening_moves = opening != nullptr ? opening->text : std::string{},
         .match = std::move(match),
@@ -629,6 +896,21 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
       print_series_game(game, output);
     }
     update_series_result(result, std::move(game));
+    if (opening != nullptr) {
+      result.unique_openings_used = std::max(result.unique_openings_used, opening_index + 1);
+    }
+
+    if (options.require_normal_games && reason != MatchEndReason::kNormal) {
+      result.valid = false;
+      result.invalid_reason = "game " + std::to_string(game_index + 1) + " ended with " +
+                              std::string{reason_name(reason)};
+      if (!result.games.back().match.detail.empty()) {
+        result.invalid_reason += ": ";
+        result.invalid_reason += result.games.back().match.detail;
+      }
+      result.detail = "evaluation invalid: " + result.invalid_reason;
+      break;
+    }
 
     if (!can_continue_series_after(reason)) {
       result.detail = "series stopped after unrecoverable game result: ";

@@ -17,11 +17,11 @@ namespace poe2::match_runner {
 
 inline constexpr std::chrono::milliseconds kDefaultMoveTimeout{5000};
 inline constexpr double kDefaultConfidenceLevel = 0.95;
-inline constexpr double kDefaultSequentialNullRate = 0.50;
-inline constexpr double kDefaultSequentialAltRate = 0.55;
+inline constexpr double kDefaultSequentialNullNelo = 0.0;
+inline constexpr double kDefaultSequentialAltNelo = 20.0;
 inline constexpr double kDefaultSequentialAlpha = 0.05;
 inline constexpr double kDefaultSequentialBeta = 0.05;
-inline constexpr int kAnalysisVersion = 1;
+inline constexpr int kAnalysisVersion = 2;
 
 struct MatchOptions {
   std::string player_one_command;
@@ -80,12 +80,14 @@ struct SeriesOptions {
   engine::EngineLimits go_limits;
   OpeningBook opening_book;
   bool shuffle_openings = false;
+  std::optional<std::uint64_t> opening_seed;
   bool alternate_sides = true;
   bool print_game_results = true;
   bool verbose_games = false;
+  bool require_normal_games = false;
   bool sequential_stop = false;
-  double sequential_null_rate = kDefaultSequentialNullRate;
-  double sequential_alt_rate = kDefaultSequentialAltRate;
+  double sequential_null_nelo = kDefaultSequentialNullNelo;
+  double sequential_alt_nelo = kDefaultSequentialAltNelo;
   double sequential_alpha = kDefaultSequentialAlpha;
   double sequential_beta = kDefaultSequentialBeta;
 };
@@ -93,6 +95,7 @@ struct SeriesOptions {
 struct SeriesGameResult {
   int game_number = 0;
   Player engine_one_player = Player::kOne;
+  int opening_slot = 0;
   int opening_line_number = 0;
   std::string opening_moves;
   MatchResult match;
@@ -101,6 +104,8 @@ struct SeriesGameResult {
 struct SeriesResult {
   int games_requested = 0;
   int games_played = 0;
+  bool valid = true;
+  std::string invalid_reason;
   int engine_one_wins = 0;
   int engine_two_wins = 0;
   int no_winner = 0;
@@ -113,6 +118,7 @@ struct SeriesResult {
   long long engine_one_score_total = 0;
   long long engine_two_score_total = 0;
   long long plies_total = 0;
+  int unique_openings_used = 0;
   StatisticalUnit statistical_unit = StatisticalUnit::kGame;
   int statistical_samples = 0;
   int statistical_games = 0;
@@ -122,18 +128,27 @@ struct SeriesResult {
   double confidence_level = kDefaultConfidenceLevel;
   double confidence_low = 0.0;
   double confidence_high = 0.0;
-  double sequential_null_rate = kDefaultSequentialNullRate;
-  double sequential_alt_rate = kDefaultSequentialAltRate;
+  std::optional<double> normalized_elo;
+  double sequential_null_nelo = kDefaultSequentialNullNelo;
+  double sequential_alt_nelo = kDefaultSequentialAltNelo;
   double sequential_alpha = kDefaultSequentialAlpha;
   double sequential_beta = kDefaultSequentialBeta;
-  double sequential_alt_log_evidence = 0.0;
-  double sequential_null_log_evidence = 0.0;
-  double sequential_signed_log_evidence = 0.0;
+  double betting_log_evidence_above_even = 0.0;
+  double betting_log_evidence_below_even = 0.0;
+  double sequential_llr = 0.0;
   double sequential_lower_bound = 0.0;
   double sequential_upper_bound = 0.0;
   SequentialDecision sequential_decision = SequentialDecision::kContinue;
   std::vector<SeriesGameResult> games;
   std::string detail;
+};
+
+struct GsprtAnalysis {
+  std::optional<double> normalized_elo;
+  double llr = 0.0;
+  double lower_bound = 0.0;
+  double upper_bound = 0.0;
+  SequentialDecision decision = SequentialDecision::kContinue;
 };
 
 [[nodiscard]] std::string_view player_name(Player player) noexcept;
@@ -151,6 +166,10 @@ void print_state(const Position& position, std::ostream& output);
 void print_final(const GameResult& result, std::ostream& output);
 void print_match_result(const MatchResult& result, std::ostream& output);
 void print_series_result(const SeriesResult& result, std::ostream& output);
+[[nodiscard]] GsprtAnalysis analyze_normalized_elo_gsprt(const std::array<int, 5>& score_counts,
+                                                         StatisticalUnit unit, double null_nelo,
+                                                         double alternative_nelo, double alpha,
+                                                         double beta) noexcept;
 void analyze_series_result(SeriesResult& result, const SeriesOptions& options) noexcept;
 
 [[nodiscard]] MatchResult run_process_match(const MatchOptions& options, std::ostream& output);
