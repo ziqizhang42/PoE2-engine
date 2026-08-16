@@ -19,6 +19,17 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+[[nodiscard]] bool mark_close_on_exec(const int pipe_fds[2]) noexcept {
+  for (int index = 0; index < 2; ++index) {
+    const int fd = pipe_fds[index];
+    const int flags = ::fcntl(fd, F_GETFD, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 EngineProcess::EngineProcess(std::string command) : command_(std::move(command)) {}
@@ -35,6 +46,12 @@ void EngineProcess::start() {
   if (::pipe(stdout_pipe) != 0) {
     close_pipe(stdin_pipe);
     throw std::runtime_error(std::string{"pipe failed: "} + std::strerror(errno));
+  }
+  if (!mark_close_on_exec(stdin_pipe) || !mark_close_on_exec(stdout_pipe)) {
+    const int error = errno;
+    close_pipe(stdin_pipe);
+    close_pipe(stdout_pipe);
+    throw std::runtime_error(std::string{"fcntl FD_CLOEXEC failed: "} + std::strerror(error));
   }
 
   const pid_t child = ::fork();

@@ -201,7 +201,8 @@ void print_usage(std::ostream& output) {
       << "                    [--go-depth <n>] [--go-movetime-ms <ms>] [--go-nodes <n>]\n"
       << "                    [--opening-book <path>] [--quiet]\n"
       << "  poe2_runner series --engine-one <command> --engine-two <command> --games <n>\n"
-      << "                     [--timeout-ms <ms>] [--fixed-sides] [--summary-only]\n"
+      << "                     [--workers <n>] [--timeout-ms <ms>] [--fixed-sides] "
+         "[--summary-only]\n"
       << "                     [--opening-book <path>] [--shuffle-openings] "
          "[--opening-seed <n>]\n"
       << "                     [--verbose-games] [--sequential-stop] "
@@ -211,7 +212,8 @@ void print_usage(std::ostream& output) {
       << "  poe2_runner eval --new-build <dir> --base <id|dir|binary>\n"
       << "                   --new-engine <name> --base-engine <name>\n"
       << "                   [--new-engine-args <args>] [--base-engine-args <args>]\n"
-      << "                   [--games <n>] [--timeout-ms <ms>] [--sequential-stop]\n"
+      << "                   [--games <n>] [--workers <n>] [--timeout-ms <ms>] "
+         "[--sequential-stop]\n"
       << "                   [--sequential-null <nelo>] [--sequential-alt <nelo>]\n"
       << "                   [--sequential-alpha <p>] [--sequential-beta <p>]\n"
       << "                   --opening-book <path> --shuffle-openings [--opening-seed <n>]\n"
@@ -313,6 +315,17 @@ void print_usage(std::ostream& output) {
         throw std::invalid_argument{"--games requires a positive integer"};
       }
       options.games = *games;
+      continue;
+    }
+    if (argument == "--workers") {
+      if (index + 1 >= argc) {
+        throw std::invalid_argument{"--workers requires a positive integer"};
+      }
+      const std::optional<int> workers = parse_positive_int(argv[++index]);
+      if (!workers.has_value()) {
+        throw std::invalid_argument{"--workers requires a positive integer"};
+      }
+      options.workers = *workers;
       continue;
     }
     if (argument == "--timeout-ms") {
@@ -451,7 +464,8 @@ int run_series(int argc, char** argv) {
   const poe2::match_runner::SeriesOptions options = parse_series_options(argc, argv);
 
   std::cout << "series"
-            << " games=" << options.games << " timeout_ms=" << options.move_timeout.count()
+            << " games=" << options.games << " workers=" << options.workers
+            << " timeout_ms=" << options.move_timeout.count()
             << " alternate_sides=" << (options.alternate_sides ? 1 : 0) << " opening_book="
             << (options.opening_book.path.empty() ? "none" : options.opening_book.path)
             << " opening_count=" << options.opening_book.lines.size()

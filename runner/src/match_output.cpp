@@ -123,6 +123,8 @@ void print_match_result(const MatchResult& result, std::ostream& output) {
 void print_series_result(const SeriesResult& result, std::ostream& output) {
   output << "series_result"
          << " games_requested=" << result.games_requested << " games_played=" << result.games_played
+         << " workers_requested=" << result.workers_requested
+         << " workers_used=" << result.workers_used << " games_discarded=" << result.games_discarded
          << " valid=" << (result.valid ? 1 : 0) << " engine_one_wins=" << result.engine_one_wins
          << " engine_two_wins=" << result.engine_two_wins << " no_winner=" << result.no_winner
          << " engine_one_win_pct=" << std::fixed << std::setprecision(1)

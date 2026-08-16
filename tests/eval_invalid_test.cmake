@@ -10,7 +10,8 @@ execute_process(
           --base "${BUILD_DIR}"
           --new-engine poe2_malformed_test_engine
           --base-engine poe2_greedy
-          --games 2
+          --games 4
+          --workers 2
           --timeout-ms 1000
           --go-depth 1
           --opening-book "${SOURCE_DIR}/eval/openings/development.txt"
@@ -39,6 +40,8 @@ file(READ "${summary}" summary_text)
 set(expected_values
   [["valid": false]]
   [["malformed_move": 1]]
+  [["workers_used": 2]]
+  [["games_discarded": 1]]
   [["statistical_samples": 0]]
   [["sequential_decision": "invalid"]]
 )

@@ -17,6 +17,7 @@ execute_process(
           --new-engine poe2_greedy
           --base-engine poe2_greedy
           --games 2
+          --workers 2
           --timeout-ms 1000
           --go-depth 1
           --opening-book "${SOURCE_DIR}/eval/openings/development.txt"
@@ -43,7 +44,8 @@ endif()
 list(GET rows 0 header)
 list(GET rows 1 historical)
 list(GET rows 2 current)
-foreach(column valid opening_seed sequential_model sequential_bound_unit sequential_llr normalized_elo)
+foreach(column valid opening_seed sequential_model sequential_bound_unit sequential_llr normalized_elo
+               workers_requested workers_used games_discarded)
   string(FIND "${header}" "${column}" position)
   if(position EQUAL -1)
     message(FATAL_ERROR "migrated ledger header is missing ${column}")
@@ -54,4 +56,48 @@ string(FIND "${historical}" "paired_betting_eprocess,score_rate" historical_mode
 string(FIND "${current}" "paired_normalized_elo_gsprt,normalized_elo" current_model)
 if(historical_id EQUAL -1 OR historical_model EQUAL -1 OR current_model EQUAL -1)
   message(FATAL_ERROR "ledger migration did not preserve and classify its rows")
+endif()
+if(NOT historical MATCHES ",1,1,0$" OR NOT current MATCHES ",2,1,0$")
+  message(FATAL_ERROR "ledger migration did not record worker metadata")
+endif()
+
+string(REGEX REPLACE ",workers_requested,workers_used,games_discarded$" ""
+       previous_header "${header}")
+string(REGEX REPLACE ",1,1,0$" "" previous_historical "${historical}")
+set(previous_ledger "${TEST_ROOT}/previous-results.csv")
+file(WRITE "${previous_ledger}" "${previous_header}\n${previous_historical}\n")
+execute_process(
+  COMMAND "${RUNNER}" eval
+          --new-build "${BUILD_DIR}"
+          --base "${BUILD_DIR}"
+          --new-engine poe2_greedy
+          --base-engine poe2_greedy
+          --games 2
+          --workers 2
+          --timeout-ms 1000
+          --go-depth 1
+          --opening-book "${SOURCE_DIR}/eval/openings/development.txt"
+          --shuffle-openings
+          --opening-seed 1
+          --run-root "${TEST_ROOT}/previous-runs"
+          --kind smoke
+          --ledger "${previous_ledger}"
+  RESULT_VARIABLE previous_result
+  OUTPUT_VARIABLE previous_output
+  ERROR_VARIABLE previous_error
+)
+if(NOT previous_result EQUAL 0)
+  message(FATAL_ERROR
+    "previous ledger eval returned ${previous_result}\n${previous_output}\n${previous_error}"
+  )
+endif()
+file(STRINGS "${previous_ledger}" previous_rows)
+list(LENGTH previous_rows previous_row_count)
+list(GET previous_rows 0 migrated_previous_header)
+list(GET previous_rows 1 migrated_previous_historical)
+list(GET previous_rows 2 previous_current)
+if(NOT previous_row_count EQUAL 3 OR NOT migrated_previous_header STREQUAL header OR
+   NOT migrated_previous_historical MATCHES ",1,1,0$" OR
+   NOT previous_current MATCHES ",2,1,0$")
+  message(FATAL_ERROR "previous ledger schema was not migrated with worker metadata")
 endif()

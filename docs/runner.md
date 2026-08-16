@@ -62,13 +62,14 @@ Engine failures are treated as game outcomes:
 
 ## Series Mode
 
-Series mode reuses the same two engine processes across games, sends `newgame` before each game, alternates sides by default, and prints aggregate comparison stats.
+Series mode uses one reusable process pair per worker, sends `newgame` before each game, alternates sides by default, and prints aggregate comparison stats.
 
 ```bash
 build/debug/runner/poe2_runner series \
   --engine-one ./build/debug/engines/poe2_first_legal \
   --engine-two "./build/debug/engines/poe2_random_legal --seed 1" \
   --games 100 \
+  --workers 4 \
   --timeout-ms 1000 \
   --go-movetime-ms 100 \
   --opening-book eval/openings/development.txt \
@@ -83,6 +84,7 @@ build/debug/runner/poe2_runner series \
 Useful options:
 
 - `--games <n>`: number of games to run.
+- `--workers <n>`: number of games to process concurrently. Defaults to `1`; each worker starts one process for each engine.
 - `--opening-book <path>`: start games after move prefixes from a text opening suite.
 - `--shuffle-openings`: shuffle the opening suite once before the series starts.
 - `--opening-seed <n>`: make the shuffled selection and ordering reproducible.
@@ -106,6 +108,10 @@ When an opening book is provided, series mode never wraps around. It fails befor
 
 With alternating sides, the statistical unit is the completed opening pair, not an individual game. Normal pairs contribute an engine-one score rate of `0`, `0.5`, or `1`. Diagnostic no-winner outcomes occupy the remaining pentanomial bins. Abnormal games and incomplete pairs are excluded from inference. With `--fixed-sides`, individual normal games remain the statistical units.
 
+Parallel workers always execute a whole side-swapped pair as one work unit. Results are committed in opening order, regardless of which worker finishes first, and sequential stopping is evaluated after each committed pair. Once a boundary or invalid game stops the series, already-running later pairs are allowed to finish and are discarded; `games_discarded` reports that speculative work. No post-boundary result enters the analysis, and wasted work is limited to at most two games per other worker. For deterministic, isolated engines this produces the same cutoff prefix as a one-worker run. The runner does not interrupt an engine in the middle of a search.
+
+Choose the worker count with resource headroom. A run starts `2 * workers` engine processes, wall-clock timeouts still include scheduling delays, and engines that use internal threads or a GPU can oversubscribe the machine.
+
 ## Eval Mode
 
 Eval mode wraps series mode for saved engine comparisons:
@@ -120,6 +126,7 @@ build/release/runner/poe2_runner eval \
   --opening-book eval/openings/holdout.txt \
   --shuffle-openings \
   --games 2000 \
+  --workers 4 \
   --sequential-stop \
   --require-accept-alt
 ```

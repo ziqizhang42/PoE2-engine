@@ -46,6 +46,7 @@ Default gate settings:
 ```text
 BOOK=eval/openings/holdout.txt
 GAMES=2000
+WORKERS=1
 SEQUENTIAL_NULL=0
 SEQUENTIAL_ALT=20
 SEQUENTIAL_ALPHA=0.05
@@ -60,7 +61,7 @@ Adjust them at the command line:
 
 ```bash
 make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy \
-  GAMES=5000 GO_MOVETIME_MS=250 TIMEOUT_MS=1000 SEQUENTIAL_ALT=10
+  GAMES=5000 WORKERS=8 GO_MOVETIME_MS=250 TIMEOUT_MS=1000 SEQUENTIAL_ALT=10
 ```
 
 Every eval run names both engine binaries explicitly:
@@ -82,6 +83,7 @@ make eval-gate \
   BASE_ENGINE=minimax/poe2_minimax \
   PRESET=release \
   GAMES=4000 \
+  WORKERS=8 \
   GO_MOVETIME_MS=250 \
   SEQUENTIAL_ALT=10
 ```
@@ -157,6 +159,8 @@ It stores one summary row per evaluation run. Keep the raw logs in `build/eval/r
 
 Every ledger row includes validity, sampling identity, the analysis version, statistical unit, pair-score counts, normalized-Elo estimate, GSPRT LLR and boundaries, betting diagnostics, and the final decision. Historical rows remain in their original order and are classified with their legacy model and score-rate units; unavailable fields remain blank. `summary.json` contains the complete analysis report, `manifest.json` records the resolved opening seed and book digest, and `games.csv` remains the raw source of truth.
 
+The run command, ledger, manifest, summary, and runner log also record the requested and actual worker counts. The summary and ledger report games completed speculatively and discarded after a cutoff or invalid result. Parallel results are committed in opening order, so speculative results never enter the sequential test; deterministic, isolated engines retain the same cutoff prefix as a one-worker run. Each worker owns two engine processes.
+
 Any timeout, disconnect, malformed or illegal move, protocol error, or startup failure immediately makes an eval run invalid. The partial artifacts and ledger row are still written, the abnormal game is excluded from statistical inference, and eval exits with status `3`. A valid gate that accepts the null or reaches its cap undecided exits with status `2`.
 
 ## Direct Runner Usage
@@ -173,6 +177,7 @@ build/by-commit/000015-d74d255e5cfd/release/runner/poe2_runner eval \
   --opening-book eval/openings/holdout.txt \
   --shuffle-openings \
   --games 2000 \
+  --workers 8 \
   --go-movetime-ms 100 \
   --timeout-ms 1000 \
   --sequential-stop \

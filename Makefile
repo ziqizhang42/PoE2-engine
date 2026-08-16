@@ -15,6 +15,7 @@ SMOKE_BOOK ?= eval/openings/development.txt
 OPENING_SEED ?=
 GAMES ?= 2000
 SMOKE_GAMES ?= 100
+WORKERS ?= 1
 TIMEOUT_MS ?= 1000
 GO_MOVETIME_MS ?= 100
 SEQUENTIAL_NULL ?= 0
@@ -122,6 +123,7 @@ eval-gate: require-base require-eval-engines git-test
 	  --shuffle-openings \
 	  $(if $(OPENING_SEED),--opening-seed $(OPENING_SEED),) \
 	  --games $(GAMES) \
+	  --workers $(WORKERS) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS) \
 	  --sequential-stop \
@@ -145,5 +147,6 @@ eval-smoke: require-base require-eval-engines git-test
 	  --shuffle-openings \
 	  $(if $(OPENING_SEED),--opening-seed $(OPENING_SEED),) \
 	  --games $(SMOKE_GAMES) \
+	  --workers $(WORKERS) \
 	  --timeout-ms $(TIMEOUT_MS) \
 	  --go-movetime-ms $(GO_MOVETIME_MS)

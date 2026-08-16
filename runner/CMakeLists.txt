@@ -1,3 +1,5 @@
+find_package(Threads REQUIRED)
+
 add_library(poe2_match_runner STATIC
   src/engine_process.cpp
   src/match_runner.cpp
@@ -18,6 +20,7 @@ target_link_libraries(poe2_match_runner
     poe2::game
   PRIVATE
     poe2::engine_stdio
+    Threads::Threads
 )
 
 target_compile_features(poe2_match_runner PUBLIC cxx_std_23)
@@ -57,6 +60,16 @@ add_test(
           --go-depth 1
           --go-movetime-ms 100
           --go-nodes 1000
+)
+
+add_test(
+  NAME runner_parallel_series_preserves_cutoff
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DGREEDY_ENGINE=$<TARGET_FILE:poe2_greedy>
+          -DFIRST_LEGAL_ENGINE=$<TARGET_FILE:poe2_first_legal>
+          -DOPENING_BOOK=${PROJECT_SOURCE_DIR}/eval/openings/systematic-2ply-v1.txt
+          -P ${PROJECT_SOURCE_DIR}/tests/parallel_series_test.cmake
 )
 
 add_test(

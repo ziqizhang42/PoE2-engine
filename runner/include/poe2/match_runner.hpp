@@ -76,6 +76,7 @@ struct SeriesOptions {
   std::string engine_one_command;
   std::string engine_two_command;
   int games = 1;
+  int workers = 1;
   std::chrono::milliseconds move_timeout = kDefaultMoveTimeout;
   engine::EngineLimits go_limits;
   OpeningBook opening_book;
@@ -104,6 +105,9 @@ struct SeriesGameResult {
 struct SeriesResult {
   int games_requested = 0;
   int games_played = 0;
+  int workers_requested = 1;
+  int workers_used = 0;
+  int games_discarded = 0;
   bool valid = true;
   std::string invalid_reason;
   int engine_one_wins = 0;

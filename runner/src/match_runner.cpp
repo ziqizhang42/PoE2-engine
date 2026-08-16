@@ -5,11 +5,14 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <future>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <ostream>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -744,6 +747,120 @@ void print_series_game(const SeriesGameResult& game, std::ostream& output) {
   }
 }
 
+struct SeriesWorker {
+  SeriesWorker(std::string engine_one_command, std::string engine_two_command)
+      : engine_one{std::move(engine_one_command)}, engine_two{std::move(engine_two_command)} {}
+
+  EngineProcess engine_one;
+  EngineProcess engine_two;
+};
+
+struct CompletedSeriesGame {
+  SeriesGameResult game;
+  std::string output;
+};
+
+struct SeriesWorkUnitResult {
+  std::vector<CompletedSeriesGame> games;
+};
+
+struct ScheduledSeriesWork {
+  int work_unit_index = -1;
+  std::future<SeriesWorkUnitResult> future;
+};
+
+[[nodiscard]] CompletedSeriesGame play_series_game(SeriesWorker& worker,
+                                                   const SeriesOptions& options,
+                                                   const OpeningBook& opening_book,
+                                                   int game_index) {
+  const Player engine_one_player = engine_one_player_for_game(game_index, options.alternate_sides);
+  EngineProcess& player_one =
+      engine_one_player == Player::kOne ? worker.engine_one : worker.engine_two;
+  EngineProcess& player_two =
+      engine_one_player == Player::kOne ? worker.engine_two : worker.engine_one;
+
+  MatchOptions match_options{
+      .move_timeout = options.move_timeout,
+      .go_limits = options.go_limits,
+      .verbose = options.verbose_games,
+  };
+  const bool has_openings = !opening_book.lines.empty();
+  const int opening_index =
+      has_openings ? (options.alternate_sides ? (game_index / 2) : game_index) : -1;
+  const OpeningLine* opening = has_openings ? &opening_book.lines[opening_index] : nullptr;
+  if (opening != nullptr) {
+    match_options.opening_moves = opening->moves;
+  }
+
+  std::ostringstream game_output;
+  MatchResult match = play_ready_match(player_one, player_two, match_options, game_output);
+  return CompletedSeriesGame{
+      .game =
+          SeriesGameResult{
+              .game_number = game_index + 1,
+              .engine_one_player = engine_one_player,
+              .opening_slot = opening != nullptr ? opening_index + 1 : 0,
+              .opening_line_number = opening != nullptr ? opening->line_number : 0,
+              .opening_moves = opening != nullptr ? opening->text : std::string{},
+              .match = std::move(match),
+          },
+      .output = std::move(game_output).str(),
+  };
+}
+
+[[nodiscard]] SeriesWorkUnitResult play_series_work_unit(SeriesWorker& worker,
+                                                         const SeriesOptions& options,
+                                                         const OpeningBook& opening_book,
+                                                         int first_game_index, int games_in_unit) {
+  SeriesWorkUnitResult work;
+  work.games.reserve(static_cast<std::size_t>(games_in_unit));
+  for (int offset = 0; offset < games_in_unit; ++offset) {
+    CompletedSeriesGame completed =
+        play_series_game(worker, options, opening_book, first_game_index + offset);
+    const MatchEndReason reason = completed.game.match.reason;
+    work.games.push_back(std::move(completed));
+    if ((options.require_normal_games && reason != MatchEndReason::kNormal) ||
+        !can_continue_series_after(reason)) {
+      break;
+    }
+  }
+  return work;
+}
+
+[[nodiscard]] bool commit_series_game(SeriesResult& result, CompletedSeriesGame completed,
+                                      const SeriesOptions& options, std::ostream& output) {
+  output << completed.output;
+  if (options.print_game_results) {
+    print_series_game(completed.game, output);
+  }
+
+  const MatchEndReason reason = completed.game.match.reason;
+  const int game_number = completed.game.game_number;
+  const int opening_slot = completed.game.opening_slot;
+  update_series_result(result, std::move(completed.game));
+  result.unique_openings_used = std::max(result.unique_openings_used, opening_slot);
+
+  if (options.require_normal_games && reason != MatchEndReason::kNormal) {
+    result.valid = false;
+    result.invalid_reason =
+        "game " + std::to_string(game_number) + " ended with " + std::string{reason_name(reason)};
+    if (!result.games.back().match.detail.empty()) {
+      result.invalid_reason += ": ";
+      result.invalid_reason += result.games.back().match.detail;
+    }
+    result.detail = "evaluation invalid: " + result.invalid_reason;
+    return true;
+  }
+
+  if (!can_continue_series_after(reason)) {
+    result.detail = "series stopped after unrecoverable game result: ";
+    result.detail += reason_name(reason);
+    return true;
+  }
+
+  return false;
+}
+
 }  // namespace
 
 GsprtAnalysis analyze_normalized_elo_gsprt(const std::array<int, 5>& score_counts,
@@ -818,10 +935,18 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
 
   SeriesResult result{
       .games_requested = options.games,
+      .workers_requested = options.workers,
   };
+  if (options.games <= 0) {
+    throw std::invalid_argument{"series games must be positive"};
+  }
+  if (options.workers <= 0) {
+    throw std::invalid_argument{"series workers must be positive"};
+  }
   OpeningBook opening_book = options.opening_book;
   if (!opening_book.lines.empty()) {
-    const int required_openings = options.alternate_sides ? (options.games + 1) / 2 : options.games;
+    const int required_openings =
+        options.alternate_sides ? options.games / 2 + options.games % 2 : options.games;
     if (required_openings > static_cast<int>(opening_book.lines.size())) {
       throw std::invalid_argument{"opening book has " + std::to_string(opening_book.lines.size()) +
                                   " lines but the series needs " +
@@ -839,92 +964,115 @@ SeriesResult run_process_series(const SeriesOptions& options, std::ostream& outp
     deterministic_shuffle(opening_book.lines, seed);
   }
 
-  EngineProcess engine_one{options.engine_one_command};
-  EngineProcess engine_two{options.engine_two_command};
-  engine_one.start();
-  engine_two.start();
+  const int games_per_work_unit = options.alternate_sides ? 2 : 1;
+  const int work_unit_count =
+      options.games / games_per_work_unit + (options.games % games_per_work_unit != 0 ? 1 : 0);
+  const int worker_count = std::min(options.workers, work_unit_count);
 
-  std::string detail;
-  if (!wait_for_ready(engine_one, options.move_timeout, detail)) {
-    result.detail = "engine_one startup failed: " + detail;
-    result.valid = false;
-    result.invalid_reason = result.detail;
-    ++result.protocol_error_games;
-    analyze_series_result(result, options);
-    return result;
-  }
-  if (!wait_for_ready(engine_two, options.move_timeout, detail)) {
-    result.detail = "engine_two startup failed: " + detail;
-    result.valid = false;
-    result.invalid_reason = result.detail;
-    ++result.protocol_error_games;
-    analyze_series_result(result, options);
-    return result;
-  }
+  // Start every child before launching worker threads so EngineProcess::start never forks a
+  // multithreaded parent.
+  std::vector<std::unique_ptr<SeriesWorker>> workers;
+  workers.reserve(static_cast<std::size_t>(worker_count));
+  for (int worker_index = 0; worker_index < worker_count; ++worker_index) {
+    auto worker =
+        std::make_unique<SeriesWorker>(options.engine_one_command, options.engine_two_command);
+    worker->engine_one.start();
+    worker->engine_two.start();
 
-  for (int game_index = 0; game_index < options.games; ++game_index) {
-    const Player engine_one_player =
-        engine_one_player_for_game(game_index, options.alternate_sides);
-    EngineProcess& player_one = engine_one_player == Player::kOne ? engine_one : engine_two;
-    EngineProcess& player_two = engine_one_player == Player::kOne ? engine_two : engine_one;
-
-    MatchOptions match_options{
-        .move_timeout = options.move_timeout,
-        .go_limits = options.go_limits,
-        .verbose = options.verbose_games,
-    };
-    const bool has_openings = !opening_book.lines.empty();
-    const int opening_index =
-        has_openings ? (options.alternate_sides ? (game_index / 2) : game_index) : -1;
-    const OpeningLine* opening = has_openings ? &opening_book.lines[opening_index] : nullptr;
-    if (opening != nullptr) {
-      match_options.opening_moves = opening->moves;
-    }
-
-    MatchResult match = play_ready_match(player_one, player_two, match_options, output);
-    const MatchEndReason reason = match.reason;
-
-    SeriesGameResult game{
-        .game_number = game_index + 1,
-        .engine_one_player = engine_one_player,
-        .opening_slot = opening != nullptr ? opening_index + 1 : 0,
-        .opening_line_number = opening != nullptr ? opening->line_number : 0,
-        .opening_moves = opening != nullptr ? opening->text : std::string{},
-        .match = std::move(match),
-    };
-    if (options.print_game_results) {
-      print_series_game(game, output);
-    }
-    update_series_result(result, std::move(game));
-    if (opening != nullptr) {
-      result.unique_openings_used = std::max(result.unique_openings_used, opening_index + 1);
-    }
-
-    if (options.require_normal_games && reason != MatchEndReason::kNormal) {
+    std::string detail;
+    if (!wait_for_ready(worker->engine_one, options.move_timeout, detail)) {
+      result.detail =
+          "worker " + std::to_string(worker_index + 1) + " engine_one startup failed: " + detail;
       result.valid = false;
-      result.invalid_reason = "game " + std::to_string(game_index + 1) + " ended with " +
-                              std::string{reason_name(reason)};
-      if (!result.games.back().match.detail.empty()) {
-        result.invalid_reason += ": ";
-        result.invalid_reason += result.games.back().match.detail;
+      result.invalid_reason = result.detail;
+      ++result.protocol_error_games;
+      analyze_series_result(result, options);
+      return result;
+    }
+    if (!wait_for_ready(worker->engine_two, options.move_timeout, detail)) {
+      result.detail =
+          "worker " + std::to_string(worker_index + 1) + " engine_two startup failed: " + detail;
+      result.valid = false;
+      result.invalid_reason = result.detail;
+      ++result.protocol_error_games;
+      analyze_series_result(result, options);
+      return result;
+    }
+    workers.push_back(std::move(worker));
+  }
+  result.workers_used = worker_count;
+
+  // Keep at most one ordered work unit in flight per worker. A unit is a whole side-swapped pair
+  // when sides alternate, so no worker can split a statistical sample across a cutoff.
+  std::vector<ScheduledSeriesWork> scheduled(static_cast<std::size_t>(worker_count));
+  const auto launch_work = [&](int worker_index, int work_unit_index) {
+    ScheduledSeriesWork& slot = scheduled[static_cast<std::size_t>(worker_index)];
+    const int first_game_index = work_unit_index * games_per_work_unit;
+    const int games_in_unit = std::min(games_per_work_unit, options.games - first_game_index);
+    SeriesWorker* const worker = workers[static_cast<std::size_t>(worker_index)].get();
+    slot.work_unit_index = work_unit_index;
+    slot.future = std::async(std::launch::async, [worker, &options, &opening_book, first_game_index,
+                                                  games_in_unit]() {
+      return play_series_work_unit(*worker, options, opening_book, first_game_index, games_in_unit);
+    });
+  };
+
+  int next_work_unit = 0;
+  for (int worker_index = 0; worker_index < worker_count; ++worker_index) {
+    launch_work(worker_index, next_work_unit++);
+  }
+
+  bool stopped = false;
+  for (int next_to_commit = 0; next_to_commit < work_unit_count && !stopped; ++next_to_commit) {
+    // Waiting for the canonical next unit makes completion timing irrelevant to result order.
+    const auto slot_position = std::find_if(
+        scheduled.begin(), scheduled.end(),
+        [next_to_commit](const auto& slot) { return slot.work_unit_index == next_to_commit; });
+    if (slot_position == scheduled.end()) {
+      throw std::logic_error{"scheduled series work unit was lost"};
+    }
+
+    SeriesWorkUnitResult work = slot_position->future.get();
+    slot_position->work_unit_index = -1;
+    for (CompletedSeriesGame& completed : work.games) {
+      if (commit_series_game(result, std::move(completed), options, output)) {
+        stopped = true;
+        break;
       }
-      result.detail = "evaluation invalid: " + result.invalid_reason;
-      break;
     }
 
-    if (!can_continue_series_after(reason)) {
-      result.detail = "series stopped after unrecoverable game result: ";
-      result.detail += reason_name(reason);
-      break;
-    }
-
-    if (options.sequential_stop && is_side_pair_complete(game_index, options.alternate_sides)) {
+    if (!stopped && options.sequential_stop && !result.games.empty() &&
+        is_side_pair_complete(result.games.back().game_number - 1, options.alternate_sides)) {
       analyze_series_result(result, options);
       if (is_decisive_sequential(result.sequential_decision)) {
         result.detail = "series stopped after sequential decision: ";
         result.detail += sequential_decision_name(result.sequential_decision);
-        break;
+        stopped = true;
       }
+    }
+
+    if (!stopped && next_work_unit < work_unit_count) {
+      const int worker_index = static_cast<int>(std::distance(scheduled.begin(), slot_position));
+      launch_work(worker_index, next_work_unit++);
+    }
+  }
+
+  if (stopped) {
+    for (ScheduledSeriesWork& slot : scheduled) {
+      if (slot.work_unit_index < 0) {
+        continue;
+      }
+      try {
+        const SeriesWorkUnitResult discarded = slot.future.get();
+        result.games_discarded += static_cast<int>(discarded.games.size());
+      } catch (const std::exception& error) {
+        output << "discarded_work_error work_unit=" << slot.work_unit_index + 1
+               << " detail=" << error.what() << '\n';
+      } catch (...) {
+        output << "discarded_work_error work_unit=" << slot.work_unit_index + 1
+               << " detail=unknown\n";
+      }
+      slot.work_unit_index = -1;
     }
   }
 

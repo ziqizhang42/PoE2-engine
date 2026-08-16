@@ -464,8 +464,8 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   } else {
     output << " --no-ledger";
   }
-  output << " --games " << options.series.games << " --timeout-ms "
-         << options.series.move_timeout.count();
+  output << " --games " << options.series.games << " --workers " << options.series.workers
+         << " --timeout-ms " << options.series.move_timeout.count();
   if (!options.series.opening_book.path.empty()) {
     output << " --opening-book " << shell_quote(options.series.opening_book.path);
   }
@@ -523,6 +523,9 @@ void write_summary_json(const fs::path& path, const match_runner::SeriesResult& 
   output << ",\n"
          << "  \"games_requested\": " << result.games_requested << ",\n"
          << "  \"games_played\": " << result.games_played << ",\n"
+         << "  \"workers_requested\": " << result.workers_requested << ",\n"
+         << "  \"workers_used\": " << result.workers_used << ",\n"
+         << "  \"games_discarded\": " << result.games_discarded << ",\n"
          << "  \"unique_openings\": " << result.unique_openings_used << ",\n"
          << "  \"engine_one_wins\": " << result.engine_one_wins << ",\n"
          << "  \"engine_two_wins\": " << result.engine_two_wins << ",\n"
@@ -650,6 +653,9 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
          << "  \"opening_seed_source\": \"" << json_escape(options.opening_seed_source) << "\",\n"
          << "  \"games\": " << options.series.games << ",\n"
          << "  \"games_played\": " << result.games_played << ",\n"
+         << "  \"workers_requested\": " << result.workers_requested << ",\n"
+         << "  \"workers_used\": " << result.workers_used << ",\n"
+         << "  \"games_discarded\": " << result.games_discarded << ",\n"
          << "  \"valid\": " << (result.valid ? "true" : "false") << ",\n"
          << "  \"invalid_reason\": ";
   if (result.invalid_reason.empty()) {
@@ -717,7 +723,7 @@ constexpr std::string_view kLegacyLedgerHeader =
     "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
     "analysis_note";
 
-constexpr std::string_view kLedgerHeader =
+constexpr std::string_view kPreviousLedgerHeader =
     "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
     "base_engine_args,games_requested,games_played,"
     "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
@@ -730,6 +736,20 @@ constexpr std::string_view kLedgerHeader =
     "unique_openings,sequential_model,sequential_bound_unit,sequential_llr,sequential_lower_bound,"
     "sequential_upper_bound,normalized_elo,betting_log_evidence_above_even,"
     "betting_log_evidence_below_even";
+
+constexpr std::string_view kLedgerHeader =
+    "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
+    "base_engine_args,games_requested,games_played,"
+    "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
+    "confidence_high_pct,sequential_decision,sequential_null,sequential_alt,opening_book,opening_"
+    "book_digest,"
+    "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir,analysis_version,"
+    "statistical_unit,statistical_samples,statistical_games,pair_score_0,pair_score_0_5,"
+    "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
+    "analysis_note,valid,invalid_reason,opening_seed,opening_seed_source,opening_sampling,"
+    "unique_openings,sequential_model,sequential_bound_unit,sequential_llr,sequential_lower_bound,"
+    "sequential_upper_bound,normalized_elo,betting_log_evidence_above_even,"
+    "betting_log_evidence_below_even,workers_requested,workers_used,games_discarded";
 
 [[nodiscard]] std::vector<std::string> parse_csv_fields(std::string_view row) {
   std::vector<std::string> fields;
@@ -769,18 +789,21 @@ void migrate_ledger_if_needed(const fs::path& path) {
   if (header == kLedgerHeader) {
     return;
   }
-  if (header != kLegacyLedgerHeader) {
+  const bool is_legacy = header == kLegacyLedgerHeader;
+  if (!is_legacy && header != kPreviousLedgerHeader) {
     throw std::runtime_error{"unsupported ledger schema: " + path.string()};
   }
 
   const std::vector<std::string> header_fields = parse_csv_fields(header);
-  const auto method_position =
-      std::find(header_fields.begin(), header_fields.end(), "sequential_test_method");
-  if (method_position == header_fields.end()) {
-    throw std::runtime_error{"legacy ledger is missing sequential_test_method: " + path.string()};
+  std::size_t method_index = 0;
+  if (is_legacy) {
+    const auto method_position =
+        std::find(header_fields.begin(), header_fields.end(), "sequential_test_method");
+    if (method_position == header_fields.end()) {
+      throw std::runtime_error{"legacy ledger is missing sequential_test_method: " + path.string()};
+    }
+    method_index = static_cast<std::size_t>(std::distance(header_fields.begin(), method_position));
   }
-  const std::size_t method_index =
-      static_cast<std::size_t>(std::distance(header_fields.begin(), method_position));
 
   fs::path temporary = path;
   temporary += ".migration.tmp";
@@ -800,16 +823,19 @@ void migrate_ledger_if_needed(const fs::path& path) {
       throw std::runtime_error{"legacy ledger row has the wrong number of fields: " +
                                path.string()};
     }
-    output << row << ',';
-    const std::array<std::string, 14> additions{
-        "true", "", "", "", "", "", fields[method_index], "score_rate", "", "", "", "", "", ""};
-    for (std::size_t index = 0; index < additions.size(); ++index) {
-      if (index != 0) {
-        output << ',';
+    output << row;
+    if (is_legacy) {
+      output << ',';
+      const std::array<std::string, 14> additions{
+          "true", "", "", "", "", "", fields[method_index], "score_rate", "", "", "", "", "", ""};
+      for (std::size_t index = 0; index < additions.size(); ++index) {
+        if (index != 0) {
+          output << ',';
+        }
+        write_csv_field(output, additions[index]);
       }
-      write_csv_field(output, additions[index]);
     }
-    output << '\n';
+    output << ",1,1,0\n";
   }
   output.close();
   if (!output) {
@@ -916,7 +942,8 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
     output << score_text(*result.normalized_elo);
   }
   output << ',' << score_text(result.betting_log_evidence_above_even) << ','
-         << score_text(result.betting_log_evidence_below_even);
+         << score_text(result.betting_log_evidence_below_even) << ',' << result.workers_requested
+         << ',' << result.workers_used << ',' << result.games_discarded;
   output << '\n';
 }
 
@@ -1014,6 +1041,17 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
         throw std::invalid_argument{"--games requires a positive integer"};
       }
       options.series.games = *games;
+      continue;
+    }
+    if (argument == "--workers") {
+      if (index + 1 >= argc) {
+        throw std::invalid_argument{"--workers requires a positive integer"};
+      }
+      const std::optional<int> workers = parse_positive_int(argv[++index]);
+      if (!workers.has_value()) {
+        throw std::invalid_argument{"--workers requires a positive integer"};
+      }
+      options.series.workers = *workers;
       continue;
     }
     if (argument == "--timeout-ms") {
@@ -1206,7 +1244,8 @@ int run_eval(int argc, char** argv) {
   }
   log << '\n';
   log << "series"
-      << " games=" << options.series.games << " timeout_ms=" << options.series.move_timeout.count()
+      << " games=" << options.series.games << " workers=" << options.series.workers
+      << " timeout_ms=" << options.series.move_timeout.count()
       << " alternate_sides=" << (options.series.alternate_sides ? 1 : 0) << " opening_book="
       << (options.series.opening_book.path.empty() ? "none" : options.series.opening_book.path)
       << " opening_count=" << options.series.opening_book.lines.size()
@@ -1228,6 +1267,7 @@ int run_eval(int argc, char** argv) {
     result = match_runner::run_process_series(options.series, log);
   } catch (const std::exception& error) {
     result.games_requested = options.series.games;
+    result.workers_requested = options.series.workers;
     result.valid = false;
     result.invalid_reason = "runner exception: " + std::string{error.what()};
     result.detail = "evaluation invalid: " + result.invalid_reason;
@@ -1235,6 +1275,7 @@ int run_eval(int argc, char** argv) {
     match_runner::analyze_series_result(result, options.series);
   } catch (...) {
     result.games_requested = options.series.games;
+    result.workers_requested = options.series.workers;
     result.valid = false;
     result.invalid_reason = "runner exception: unknown";
     result.detail = "evaluation invalid: " + result.invalid_reason;
