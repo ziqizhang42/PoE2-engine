@@ -1,8 +1,20 @@
 # Development Setup
 
-Native C++ builds use CMake, Ninja, Apple Clang, and Catch2 tests.
+Native C++ builds use CMake, Ninja, Clang, and Catch2 tests. The native presets use Apple Clang on macOS and prefer upstream Clang 22 on Linux.
 
-LLVM provides clang-format and clang-tidy.
+LLVM 22 provides clang-format and clang-tidy.
+
+## Linux
+
+On Ubuntu 26.04, install the reusable host toolchain with:
+
+```bash
+sudo apt-get install --no-install-recommends \
+  git build-essential cmake ninja-build \
+  clang-22 llvm-22 clang-format-22 clang-tidy-22 clangd-22
+```
+
+No container is required. CMake fetches the pinned Catch2 source during the first native configure.
 
 ## Commands
 

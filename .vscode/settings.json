@@ -2,11 +2,9 @@
   "cmake.useCMakePresets": "always",
   "cmake.configureOnOpen": true,
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
-  "C_Cpp.default.compilerPath": "/usr/bin/c++",
   "C_Cpp.default.cppStandard": "c++23",
-  "C_Cpp.default.intelliSenseMode": "macos-clang-arm64",
   "clangd.arguments": [
     "--compile-commands-dir=${workspaceFolder}/build/debug",
-    "--query-driver=/usr/bin/c++,/usr/bin/clang++,/opt/homebrew/opt/llvm/bin/clang++"
+    "--query-driver=/usr/bin/c++,/usr/bin/g++*,/usr/bin/clang++*,/opt/homebrew/opt/llvm/bin/clang++"
   ]
 }
