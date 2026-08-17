@@ -40,6 +40,7 @@ def write_golden(auditor, directory: Path) -> None:
         12,
         13,
         0,
+        0,
         10,
         5,
         1,
@@ -52,7 +53,7 @@ def write_golden(auditor, directory: Path) -> None:
         2,
         47,
         0,
-        0,
+        1,
         4,
         5,
     )

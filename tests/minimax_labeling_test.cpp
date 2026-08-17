@@ -92,10 +92,12 @@ TEST_CASE("exact label generation reaches terminal values and records canonical 
           .source_id = UINT64_C(0x1111222233334444),
           .family_id = 101,
           .trajectory_id = 201,
+          .trajectory_index = 301,
           .source_line = 7,
           .source_ordinal = 0,
           .policy_id = 3,
           .sample_index = 4,
+          .split = poe2::minimax::labeling::DatasetSplit::kValidation,
       },
       {
           .position =
@@ -104,10 +106,12 @@ TEST_CASE("exact label generation reaches terminal values and records canonical 
           .source_id = UINT64_C(0x5555666677778888),
           .family_id = 102,
           .trajectory_id = 202,
+          .trajectory_index = 302,
           .source_line = 11,
           .source_ordinal = 1,
           .policy_id = 5,
           .sample_index = 6,
+          .split = poe2::minimax::labeling::DatasetSplit::kTest,
       },
   };
 
@@ -137,10 +141,12 @@ TEST_CASE("exact label generation reaches terminal values and records canonical 
     REQUIRE(record.source_id == inputs[index].source_id);
     REQUIRE(record.family_id == inputs[index].family_id);
     REQUIRE(record.trajectory_id == inputs[index].trajectory_id);
+    REQUIRE(record.trajectory_index == inputs[index].trajectory_index);
     REQUIRE(record.source_line == inputs[index].source_line);
     REQUIRE(record.source_ordinal == inputs[index].source_ordinal);
     REQUIRE(record.policy_id == inputs[index].policy_id);
     REQUIRE(record.sample_index == inputs[index].sample_index);
+    REQUIRE(record.split == inputs[index].split);
     REQUIRE(record.player_one == inputs[index].position.board().bits(poe2::Player::kOne));
     REQUIRE(record.player_two == inputs[index].position.board().bits(poe2::Player::kTwo));
     REQUIRE(record.canonical_key ==

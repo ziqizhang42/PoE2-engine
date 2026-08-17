@@ -16,7 +16,7 @@ from typing import Any
 MAGIC = b"POE2LBL\0"
 SCHEMA_VERSION = 1
 HEADER = struct.Struct("<8sIIIIQQ32s32sII")
-RECORD = struct.Struct("<10QIIi8BHH")
+RECORD = struct.Struct("<11QIIi8BHH")
 ENDIAN_MARKER = 0x01020304
 BOARD_SIZE = 7
 CELL_COUNT = BOARD_SIZE * BOARD_SIZE
@@ -276,6 +276,7 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
             _family_id,
             _trajectory_id,
             _parent_id,
+            _trajectory_index,
             nodes,
             completed_nodes,
             source_line,
@@ -288,7 +289,7 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
             attempted_depth,
             terminal_depth,
             best_move,
-            reserved,
+            split,
             _policy_id,
             _sample_index,
         ) = fields
@@ -317,7 +318,7 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
                  f"{label} depth fields are inconsistent")
         _require(best_move < CELL_COUNT and not (occupied & (1 << best_move)),
                  f"{label} best move is illegal")
-        _require(reserved == 0, f"{label} reserved flags are nonzero")
+        _require(split in (1, 2, 3), f"{label} dataset split is invalid")
         if mode == 1:
             exact_records += 1
             _require(completed_depth == terminal_depth and attempted_depth == terminal_depth,

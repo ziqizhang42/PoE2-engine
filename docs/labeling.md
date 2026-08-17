@@ -1,6 +1,6 @@
 # Deterministic Minimax Labels
 
-`poe2_minimax_data` turns a validated opening book into reproducible minimax labels. It is the data boundary between the production B evaluator/search and future offline evaluation experiments. Corpus generation and model training are deliberately separate.
+`poe2_minimax_data` turns a completed deterministic position source, or a validated opening book, into reproducible minimax labels. It is the data boundary between the production B evaluator/search and future offline evaluation experiments. Position generation and model training are deliberately separate. See [Deterministic Position Sources](position-source.md) for the preferred metadata-aware input.
 
 ## Build and run
 
@@ -8,11 +8,9 @@
 cmake --build --preset release --target poe2_minimax_data
 
 build/release/runner/poe2_minimax_data labels \
-  --input path/to/source-shard.txt \
+  --input artifacts/sources/pattern-pilot \
+  --source-shard 0 \
   --output-dir artifacts/labels/pilot-shard-000 \
-  --corpus-id poe2-pattern-pilot \
-  --shard-index 0 \
-  --shard-count 20 \
   --mode teacher \
   --nodes 1000000 \
   --hash-mb 64 \
@@ -21,7 +19,9 @@ build/release/runner/poe2_minimax_data labels \
   --require-all
 ```
 
-The input uses the existing opening-book format: one legal move prefix per non-comment line. Malformed, illegal, or terminal openings are rejected by the same parser used by the match runner. `--shard-index` and `--shard-count` describe the supplied source shard; this command does not generate or divide a corpus.
+For a source-corpus directory, `--source-shard` selects one immutable shard. The reader verifies the completion marker, manifest digest, digest-named shard, fixed header, position metadata, ordering, and legality before search begins. Corpus and shard provenance come from that source artifact.
+
+The existing opening-book format remains supported: one legal move prefix per non-comment line. Malformed, illegal, or terminal openings are rejected by the same parser used by the match runner. For that input only, `--corpus-id` is required and `--shard-index`/`--shard-count` describe the supplied file. The label command never generates or divides a corpus.
 
 The required mode is one of:
 
@@ -51,14 +51,14 @@ Validate a finished shard before consuming it:
 
 ```bash
 python3 tools/inspect_minimax_labels.py artifacts/labels/pilot-shard-000 \
-  --source path/to/source-shard.txt
+  --source artifacts/sources/pattern-pilot/shards/shard-00000000-<sha256>.jsonl
 ```
 
 The auditor is independent of the C++ writer. It verifies SHA-256 digests, framing, fixed sizes, legal bitboards and piece counts, D4 canonical keys, move legality, node/depth invariants, shard coordinates, manifest counts, and completion state.
 
 ## Binary schema
 
-All integers are little-endian. The file contains one 112-byte header followed by fixed 104-byte records. Bitboards use board indices `a1=0` through `g7=48`. The score is a signed two's-complement 32-bit doubled margin from the side-to-move perspective.
+All integers are little-endian. The file contains one 112-byte header followed by fixed 112-byte records. Bitboards use board indices `a1=0` through `g7=48`. The score is a signed two's-complement 32-bit doubled margin from the side-to-move perspective.
 
 Header:
 
@@ -67,7 +67,7 @@ Header:
 | 0 | 8 | Magic bytes `POE2LBL\0` |
 | 8 | 4 | Schema version (`1`) |
 | 12 | 4 | Header size (`112`) |
-| 16 | 4 | Record size (`104`) |
+| 16 | 4 | Record size (`112`) |
 | 20 | 4 | Endian marker (`0x01020304`) |
 | 24 | 8 | Emitted record count |
 | 32 | 8 | Input position count |
@@ -88,23 +88,24 @@ Record:
 | 40 | 8 | Family grouping ID |
 | 48 | 8 | Trajectory grouping ID |
 | 56 | 8 | Parent/sibling grouping ID, or zero |
-| 64 | 8 | Total nodes, including an interrupted next iteration |
-| 72 | 8 | Nodes consumed when the stored iteration completed |
-| 80 | 4 | One-based source line number |
-| 84 | 4 | Zero-based source ordinal |
-| 88 | 4 | Signed minimax value |
-| 92 | 1 | Position ply |
-| 93 | 1 | Side to move (`0` Player 1, `1` Player 2) |
-| 94 | 1 | Label mode (`1` exact, `2` teacher) |
-| 95 | 1 | Deepest completed explicit depth |
-| 96 | 1 | Attempted explicit depth |
-| 97 | 1 | Explicit depth required for terminal value with B closure |
-| 98 | 1 | Best-move board index |
-| 99 | 1 | Reserved flags, zero |
-| 100 | 2 | Source policy ID |
-| 102 | 2 | Sample ordinal within a trajectory |
+| 64 | 8 | Stable global trajectory ordinal |
+| 72 | 8 | Total nodes, including an interrupted next iteration |
+| 80 | 8 | Nodes consumed when the stored iteration completed |
+| 88 | 4 | One-based source line number |
+| 92 | 4 | Zero-based source ordinal within this shard |
+| 96 | 4 | Signed minimax value |
+| 100 | 1 | Position ply |
+| 101 | 1 | Side to move (`0` Player 1, `1` Player 2) |
+| 102 | 1 | Label mode (`1` exact, `2` teacher) |
+| 103 | 1 | Deepest completed explicit depth |
+| 104 | 1 | Attempted explicit depth |
+| 105 | 1 | Explicit depth required for terminal value with B closure |
+| 106 | 1 | Best-move board index |
+| 107 | 1 | Dataset split (`1` train, `2` validation, `3` test) |
+| 108 | 2 | Source policy ID |
+| 110 | 2 | Sample ordinal within a trajectory |
 
-The canonical key supports exact-state deduplication. Family, trajectory, and parent IDs support leakage-safe grouping. The current opening-book adapter maps each independent opening line to its own family and trajectory; a later corpus source should assign shared IDs to related samples rather than trying to reconstruct those relationships after labeling.
+The canonical key supports exact-state deduplication. Family, trajectory, parent, stable trajectory ordinal, and frozen split support leakage-safe grouping. The position-source generator supplies these relationships directly. The opening-book adapter maps each independent line to its own family and trajectory and assigns it to the training split.
 
 ## Manifest and provenance
 

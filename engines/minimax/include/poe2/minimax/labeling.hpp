@@ -17,7 +17,7 @@ namespace poe2::minimax::labeling {
 
 inline constexpr std::uint32_t kLabelDatasetSchemaVersion = 1;
 inline constexpr std::uint32_t kLabelDatasetHeaderSize = 112;
-inline constexpr std::uint32_t kLabelDatasetRecordSize = 104;
+inline constexpr std::uint32_t kLabelDatasetRecordSize = 112;
 inline constexpr std::string_view kBinaryFileName = "labels.bin";
 inline constexpr std::string_view kManifestFileName = "manifest.json";
 inline constexpr std::string_view kIncompleteMarkerName = "INCOMPLETE";
@@ -26,6 +26,13 @@ inline constexpr std::string_view kCompleteMarkerName = "COMPLETE";
 enum class LabelMode : std::uint8_t {
   kExact = 1,
   kTeacher = 2,
+};
+
+enum class DatasetSplit : std::uint8_t {
+  kUnspecified = 0,
+  kTrain = 1,
+  kValidation = 2,
+  kTest = 3,
 };
 
 struct LabelSource {
@@ -42,10 +49,12 @@ struct LabelInput {
   std::uint64_t family_id = 0;
   std::uint64_t trajectory_id = 0;
   std::uint64_t parent_id = 0;
+  std::uint64_t trajectory_index = 0;
   std::uint32_t source_line = 0;
   std::uint32_t source_ordinal = 0;
   std::uint16_t policy_id = 0;
   std::uint16_t sample_index = 0;
+  DatasetSplit split = DatasetSplit::kTrain;
 };
 
 struct LabelingOptions {
@@ -64,6 +73,7 @@ struct LabelRecord {
   std::uint64_t family_id = 0;
   std::uint64_t trajectory_id = 0;
   std::uint64_t parent_id = 0;
+  std::uint64_t trajectory_index = 0;
   std::uint64_t nodes = 0;
   std::uint64_t completed_nodes = 0;
   std::uint32_t source_line = 0;
@@ -78,6 +88,7 @@ struct LabelRecord {
   std::uint8_t best_move_index = 0xff;
   std::uint16_t policy_id = 0;
   std::uint16_t sample_index = 0;
+  DatasetSplit split = DatasetSplit::kTrain;
 
   friend constexpr bool operator==(const LabelRecord&, const LabelRecord&) = default;
 };
@@ -124,6 +135,7 @@ class DatasetOutput final {
 };
 
 [[nodiscard]] std::string_view label_mode_name(LabelMode mode) noexcept;
+[[nodiscard]] std::string_view dataset_split_name(DatasetSplit split) noexcept;
 [[nodiscard]] std::uint64_t stable_digest(std::string_view bytes) noexcept;
 [[nodiscard]] LabelDataset generate_labels(std::span<const LabelInput> inputs,
                                            const LabelingOptions& options, LabelSource source,

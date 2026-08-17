@@ -160,6 +160,7 @@ void write_text_file(const fs::path& path, std::string_view text) {
       .family_id = input.family_id,
       .trajectory_id = input.trajectory_id,
       .parent_id = input.parent_id,
+      .trajectory_index = input.trajectory_index,
       .nodes = result.nodes,
       .completed_nodes = result.completed_nodes,
       .source_line = input.source_line,
@@ -174,6 +175,7 @@ void write_text_file(const fs::path& path, std::string_view text) {
       .best_move_index = static_cast<std::uint8_t>(move_index),
       .policy_id = input.policy_id,
       .sample_index = input.sample_index,
+      .split = input.split,
   };
 }
 
@@ -191,6 +193,20 @@ std::string_view label_mode_name(LabelMode mode) noexcept {
       return "exact";
     case LabelMode::kTeacher:
       return "teacher";
+  }
+  return "unknown";
+}
+
+std::string_view dataset_split_name(DatasetSplit split) noexcept {
+  switch (split) {
+    case DatasetSplit::kUnspecified:
+      return "unspecified";
+    case DatasetSplit::kTrain:
+      return "train";
+    case DatasetSplit::kValidation:
+      return "validation";
+    case DatasetSplit::kTest:
+      return "test";
   }
   return "unknown";
 }
@@ -230,6 +246,12 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
   }
   if (progress && progress_interval == 0) {
     throw std::invalid_argument{"label progress requires a positive interval"};
+  }
+  for (const LabelInput& input : inputs) {
+    if (input.split != DatasetSplit::kTrain && input.split != DatasetSplit::kValidation &&
+        input.split != DatasetSplit::kTest) {
+      throw std::invalid_argument{"label input has no valid dataset split"};
+    }
   }
 
   const std::size_t workers_used = std::min(options.workers, inputs.size());
@@ -383,6 +405,7 @@ std::vector<std::uint8_t> serialize_binary(const LabelDataset& dataset) {
     append_little_endian(output, record.family_id);
     append_little_endian(output, record.trajectory_id);
     append_little_endian(output, record.parent_id);
+    append_little_endian(output, record.trajectory_index);
     append_little_endian(output, record.nodes);
     append_little_endian(output, record.completed_nodes);
     append_little_endian(output, record.source_line);
@@ -396,7 +419,7 @@ std::vector<std::uint8_t> serialize_binary(const LabelDataset& dataset) {
     output.push_back(record.attempted_depth);
     output.push_back(record.terminal_depth);
     output.push_back(record.best_move_index);
-    output.push_back(0);
+    output.push_back(static_cast<std::uint8_t>(record.split));
     append_little_endian(output, record.policy_id);
     append_little_endian(output, record.sample_index);
     assert(output.size() - record_start == kLabelDatasetRecordSize);
