@@ -37,6 +37,7 @@ target_link_libraries(poe2_engine_stdio_tests
 
 add_executable(poe2_minimax_tests
   minimax_evaluation_test.cpp
+  minimax_labeling_test.cpp
   minimax_options_test.cpp
   minimax_search_test.cpp
   wasm_adapter_test.cpp
@@ -44,6 +45,7 @@ add_executable(poe2_minimax_tests
 
 target_link_libraries(poe2_minimax_tests
   PRIVATE
+    poe2::minimax_labeling
     poe2::wasm_adapter
     Catch2::Catch2WithMain
 )
@@ -78,10 +80,21 @@ catch_discover_tests(poe2_engine_stdio_tests)
 catch_discover_tests(poe2_minimax_tests)
 catch_discover_tests(poe2_match_runner_tests)
 
+add_test(
+  NAME minimax_label_data_reproducible
+  COMMAND ${CMAKE_COMMAND}
+          -DMINIMAX_DATA=$<TARGET_FILE:poe2_minimax_data>
+          -DLABEL_INPUT=${PROJECT_SOURCE_DIR}/tests/fixtures/minimax-label-positions.txt
+          -DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/minimax-label-data-test
+          -P ${PROJECT_SOURCE_DIR}/tests/minimax_label_data_test.cmake
+)
+set_tests_properties(minimax_label_data_reproducible PROPERTIES TIMEOUT 30)
+
 add_custom_target(poe2_tests
   DEPENDS
     poe2_core_tests
     poe2_engine_stdio_tests
+    poe2_minimax_data
     poe2_minimax_tests
     poe2_match_runner_tests
     poe2_malformed_test_engine

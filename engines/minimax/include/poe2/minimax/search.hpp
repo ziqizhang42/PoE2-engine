@@ -54,6 +54,7 @@ class Search final {
                                          const engine::InfoSink& info);
   [[nodiscard]] AnalysisResult analyze(const Position& position, const engine::EngineLimits& limits,
                                        int multi_pv = 1, const AnalysisProgressSink& progress = {});
+  [[nodiscard]] int terminal_depth(const Position& position) const noexcept;
   [[nodiscard]] const TranspositionTable& transposition_table() const noexcept;
 
  private:

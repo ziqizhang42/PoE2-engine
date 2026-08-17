@@ -24,6 +24,11 @@ namespace {
   return poe2::engine::EngineLimits{.depth = depth, .move_time = move_time};
 }
 
+[[nodiscard]] poe2::engine::EngineLimits node_limits(std::uint64_t nodes,
+                                                     std::optional<int> depth = std::nullopt) {
+  return poe2::engine::EngineLimits{.depth = depth, .nodes = nodes};
+}
+
 [[nodiscard]] poe2::Score value_for(const poe2::Position& position, poe2::Player perspective) {
   const poe2::Score value = poe2::minimax::evaluate(position);
   return perspective == position.side_to_move() ? value : -value;
@@ -286,7 +291,7 @@ void require_result_move_is_optimal(const poe2::engine::EngineResult& result,
 
 }  // namespace
 
-TEST_CASE("minimax requires a move timer and returns a safe fallback", "[minimax]") {
+TEST_CASE("minimax requires a search limit and returns a safe fallback", "[minimax]") {
   poe2::Position position;
   std::string message;
 
@@ -299,7 +304,72 @@ TEST_CASE("minimax requires a move timer and returns a safe fallback", "[minimax
   REQUIRE(result.depth == 0);
   REQUIRE(result.nodes == 0);
   REQUIRE(result.principal_variation.empty());
-  REQUIRE(message == "error minimax_requires_movetime");
+  REQUIRE(message == "error minimax_requires_search_limit");
+}
+
+TEST_CASE("node-only search stops exactly at its deterministic hard limit",
+          "[minimax][nodes][determinism]") {
+  const poe2::Position position;
+  constexpr std::uint64_t kNodeLimit = 1'000;
+
+  poe2::minimax::Search first_search;
+  const poe2::engine::EngineResult first = first_search.run(position, node_limits(kNodeLimit), {});
+  poe2::minimax::Search second_search;
+  const poe2::engine::EngineResult second =
+      second_search.run(position, node_limits(kNodeLimit), {});
+
+  REQUIRE(first.nodes == kNodeLimit);
+  REQUIRE(second.best_move == first.best_move);
+  REQUIRE(second.score == first.score);
+  REQUIRE(second.depth == first.depth);
+  REQUIRE(second.nodes == first.nodes);
+  REQUIRE(second.principal_variation == first.principal_variation);
+  REQUIRE(first.depth > 0);
+  REQUIRE(first.score.has_value());
+  require_legal_principal_variation(position, first);
+}
+
+TEST_CASE("node and time limits stop at whichever budget is reached first",
+          "[minimax][nodes][time]") {
+  const poe2::Position position;
+  constexpr std::uint64_t kNodeLimit = 100;
+  poe2::minimax::Search search;
+  const poe2::engine::EngineResult result = search.run(position,
+                                                       poe2::engine::EngineLimits{
+                                                           .move_time = std::chrono::seconds{5},
+                                                           .nodes = kNodeLimit,
+                                                       },
+                                                       {});
+
+  REQUIRE(result.nodes == kNodeLimit);
+  REQUIRE(result.depth > 0);
+  require_legal_principal_variation(position, result);
+}
+
+TEST_CASE("depth-only search completes without consulting a clock or node budget",
+          "[minimax][depth][determinism]") {
+  const poe2::Position position;
+  poe2::minimax::Search first_search;
+  const poe2::engine::EngineResult first = first_search.run(position,
+                                                            poe2::engine::EngineLimits{
+                                                                .depth = 2,
+                                                            },
+                                                            {});
+  poe2::minimax::Search second_search;
+  const poe2::engine::EngineResult second = second_search.run(position,
+                                                              poe2::engine::EngineLimits{
+                                                                  .depth = 2,
+                                                              },
+                                                              {});
+
+  REQUIRE(second.best_move == first.best_move);
+  REQUIRE(second.score == first.score);
+  REQUIRE(second.depth == first.depth);
+  REQUIRE(second.nodes == first.nodes);
+  REQUIRE(second.principal_variation == first.principal_variation);
+  REQUIRE(first.depth == 2);
+  REQUIRE(first.nodes > 0);
+  require_legal_principal_variation(position, first);
 }
 
 TEST_CASE("iterative deepening keeps the last completed negamax result", "[minimax]") {

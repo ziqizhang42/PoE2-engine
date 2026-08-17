@@ -20,6 +20,28 @@ target_link_libraries(poe2_minimax_engine
 target_compile_features(poe2_minimax_engine PUBLIC cxx_std_23)
 
 if(POE2_BUILD_NATIVE_APPS)
+  find_package(Threads REQUIRED)
+
+  add_library(poe2_minimax_labeling STATIC
+    src/labeling.cpp
+  )
+
+  add_library(poe2::minimax_labeling ALIAS poe2_minimax_labeling)
+
+  target_include_directories(poe2_minimax_labeling
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  target_link_libraries(poe2_minimax_labeling
+    PUBLIC
+      poe2::minimax_engine
+    PRIVATE
+      Threads::Threads
+  )
+
+  target_compile_features(poe2_minimax_labeling PUBLIC cxx_std_23)
+
   add_executable(poe2_minimax
     src/main.cpp
   )

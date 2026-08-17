@@ -38,6 +38,18 @@ target_link_libraries(poe2_runner
 
 target_compile_features(poe2_runner PRIVATE cxx_std_23)
 
+add_executable(poe2_minimax_data
+  src/minimax_data_main.cpp
+)
+
+target_link_libraries(poe2_minimax_data
+  PRIVATE
+    poe2::match_runner
+    poe2::minimax_labeling
+)
+
+target_compile_features(poe2_minimax_data PRIVATE cxx_std_23)
+
 add_test(
   NAME runner_first_legal_match
   COMMAND poe2_runner match
