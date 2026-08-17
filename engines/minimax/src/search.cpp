@@ -23,8 +23,10 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t kChildKeySetCapacity = 64;
 constexpr std::size_t kPlyCount = static_cast<std::size_t>(kCellCount) + 1;
+constexpr std::size_t kKillerMoveCount = 2;
 constexpr std::uint64_t kDeadlineCheckInterval = 256;
 constexpr Score kSearchInfinity = std::numeric_limits<Score>::max();
+constexpr int kNoMoveIndex = -1;
 using HistoryScores = std::array<std::array<std::uint64_t, kCellCount>, 2>;
 // On a 7x7 board, one placement can join two length-three runs in each of four directions:
 // 4 * (64 - 4 - 4) = 224 points.
@@ -40,7 +42,11 @@ class SearchState final {
  public:
   SearchState(std::chrono::milliseconds move_time, TranspositionTable& table,
               HistoryScores& history_scores)
-      : deadline_(Clock::now() + move_time), table_(table), history_scores_(history_scores) {}
+      : deadline_(Clock::now() + move_time), table_(table), history_scores_(history_scores) {
+    for (auto& killers : killer_moves_) {
+      killers.fill(kNoMoveIndex);
+    }
+  }
 
   [[nodiscard]] bool enter_node() noexcept {
     // A steady-clock query at every node is measurable work in this very small-node search.
@@ -65,9 +71,11 @@ class SearchState final {
   }
 
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
-  void record_alpha_beta_cutoff(Player player, int move_index, int depth) noexcept {
+  void record_alpha_beta_cutoff(Player player, int move_index, int depth, int ply,
+                                bool learn_killer) noexcept {
     assert(move_index >= 0 && move_index < kCellCount);
     assert(depth > 0);
+    assert(ply >= 0 && static_cast<std::size_t>(ply) < kPlyCount);
     ++alpha_beta_cutoffs_;
     ++history_updates_;
 
@@ -76,6 +84,21 @@ class SearchState final {
     std::uint64_t& score = history_scores_[static_cast<std::size_t>(player_index(player))]
                                           [static_cast<std::size_t>(move_index)];
     score += std::min(bonus, std::numeric_limits<std::uint64_t>::max() - score);
+
+    if (!learn_killer) {
+      return;
+    }
+
+    if (killer_rank(ply, move_index) != 0) {
+      ++killer_cutoffs_;
+    }
+    auto& killers = killer_moves_[static_cast<std::size_t>(ply)];
+    if (killers[0] == move_index) {
+      return;
+    }
+    killers[1] = killers[0];
+    killers[0] = move_index;
+    ++killer_updates_;
   }
   void record_score_gain_evaluations(std::uint64_t count) noexcept {
     score_gain_evaluations_ += count;
@@ -140,7 +163,20 @@ class SearchState final {
     return history_scores_[static_cast<std::size_t>(player_index(player))]
                           [static_cast<std::size_t>(move_index)];
   }
+  [[nodiscard]] std::uint8_t killer_rank(int ply, int move_index) const noexcept {
+    assert(ply >= 0 && static_cast<std::size_t>(ply) < kPlyCount);
+    assert(move_index >= 0 && move_index < kCellCount);
+    const auto& killers = killer_moves_[static_cast<std::size_t>(ply)];
+    for (std::size_t index = 0; index < killers.size(); ++index) {
+      if (killers[index] == move_index) {
+        return static_cast<std::uint8_t>(killers.size() - index);
+      }
+    }
+    return 0;
+  }
   [[nodiscard]] std::uint64_t history_updates() const noexcept { return history_updates_; }
+  [[nodiscard]] std::uint64_t killer_updates() const noexcept { return killer_updates_; }
+  [[nodiscard]] std::uint64_t killer_cutoffs() const noexcept { return killer_cutoffs_; }
   [[nodiscard]] std::uint64_t maximum_history_score() const noexcept {
     std::uint64_t maximum = 0;
     for (const auto& player_scores : history_scores_) {
@@ -157,6 +193,7 @@ class SearchState final {
   HistoryScores& history_scores_;
   std::array<std::array<Move, kCellCount>, kPlyCount> principal_variations_{};
   std::array<std::uint8_t, kPlyCount> principal_variation_lengths_{};
+  std::array<std::array<int, kKillerMoveCount>, kPlyCount> killer_moves_{};
   std::uint64_t nodes_ = 0;
   std::uint64_t tt_probes_ = 0;
   std::uint64_t tt_hits_ = 0;
@@ -169,6 +206,8 @@ class SearchState final {
   std::uint64_t closure_evaluations_ = 0;
   std::uint64_t closure_gain_queries_ = 0;
   std::uint64_t history_updates_ = 0;
+  std::uint64_t killer_updates_ = 0;
+  std::uint64_t killer_cutoffs_ = 0;
 };
 
 class ChildKeySet final {
@@ -367,18 +406,23 @@ class ScoreGainMovePicker final {
       const Score score_gain = position.score_gain_unchecked(player, moves_[index].move_index);
       assert(score_gain > 0 && score_gain <= kMaximumMoveScoreGain);
       moves_[index].score_gain = static_cast<std::uint8_t>(score_gain);
+      moves_[index].killer_rank = state.killer_rank(ply, moves_[index].move_index);
       moves_[index].history_score = state.history_score(player, moves_[index].move_index);
     }
     state.record_score_gain_evaluations(size_);
 
     // Moves arrive in increasing index order, which is already the final tie-break order. A
-    // stable insertion sort therefore preserves row-major order when gain and history both tie.
+    // stable insertion sort therefore preserves row-major order when gain, killer rank, and
+    // history all tie.
     for (std::size_t index = 1; index < size_; ++index) {
       const ScoredMove candidate = moves_[index];
       std::size_t insertion = index;
-      while (insertion > 0 && (moves_[insertion - 1].score_gain < candidate.score_gain ||
-                               (moves_[insertion - 1].score_gain == candidate.score_gain &&
-                                moves_[insertion - 1].history_score < candidate.history_score))) {
+      while (insertion > 0 &&
+             (moves_[insertion - 1].score_gain < candidate.score_gain ||
+              (moves_[insertion - 1].score_gain == candidate.score_gain &&
+               (moves_[insertion - 1].killer_rank < candidate.killer_rank ||
+                (moves_[insertion - 1].killer_rank == candidate.killer_rank &&
+                 moves_[insertion - 1].history_score < candidate.history_score))))) {
         moves_[insertion] = moves_[insertion - 1];
         --insertion;
       }
@@ -400,6 +444,7 @@ class ScoreGainMovePicker final {
   struct ScoredMove {
     std::uint8_t move_index = 0;
     std::uint8_t score_gain = 0;
+    std::uint8_t killer_rank = 0;
     std::uint64_t history_score = 0;
   };
 
@@ -527,7 +572,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
   NodeResult best;
   bool found_move = false;
 
-  const auto search_move = [&](int move_index) -> bool {
+  const auto search_move = [&](int move_index, bool learn_killer) -> bool {
     const Bitboard move_bit = Bitboard{1} << move_index;
     const Bitboard equivalent_moves = remaining_moves & policy.move_orbit(ply, move_index);
     assert((equivalent_moves & move_bit) != 0);
@@ -570,12 +615,12 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
       alpha = value;
     }
     if (alpha >= beta) {
-      state.record_alpha_beta_cutoff(player, move_index, depth);
+      state.record_alpha_beta_cutoff(player, move_index, depth, ply, learn_killer);
     }
     return true;
   };
 
-  if (cached_move.has_value() && !search_move(square_index(cached_move->square))) {
+  if (cached_move.has_value() && !search_move(square_index(cached_move->square), false)) {
     return finish_node(std::nullopt);
   }
 
@@ -583,7 +628,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
   while (remaining_moves != 0 && alpha < beta) {
     const std::optional<int> move_index = move_picker.next(remaining_moves);
     assert(move_index.has_value());
-    if (!move_index.has_value() || !search_move(*move_index)) {
+    if (!move_index.has_value() || !search_move(*move_index, true)) {
       return finish_node(std::nullopt);
     }
   }
@@ -853,8 +898,9 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
               << " closuregainqueries " << state.closure_gain_queries() << " gainqueries "
               << state.score_gain_evaluations() + state.closure_gain_queries() << " historyupdates "
               << state.history_updates() << " historymax " << state.maximum_history_score()
-              << " hashentries " << table.size() << " hashcapacity " << table.capacity()
-              << " hashbytes " << table.storage_bytes();
+              << " killerupdates " << state.killer_updates() << " killercutoffs "
+              << state.killer_cutoffs() << " hashentries " << table.size() << " hashcapacity "
+              << table.capacity() << " hashbytes " << table.storage_bytes();
   info(diagnostics.str());
 }
 
