@@ -25,7 +25,12 @@ constexpr std::size_t kChildKeySetCapacity = 64;
 constexpr std::size_t kPlyCount = static_cast<std::size_t>(kCellCount) + 1;
 constexpr std::uint64_t kDeadlineCheckInterval = 256;
 constexpr Score kSearchInfinity = std::numeric_limits<Score>::max();
-using HistoryScores = std::array<std::array<std::uint64_t, kCellCount>, 2>;
+using HistoryScore = std::int16_t;
+using HistoryScores = std::array<std::array<HistoryScore, kCellCount>, 2>;
+constexpr int kHistoryScoreLimit = 16'384;
+// One point of immediate score gain remains valuable, but sufficiently established history may
+// override a small gain difference instead of being limited to exact-gain ties.
+constexpr int kScoreGainHistoryScale = 4'096;
 // On a 7x7 board, one placement can join two length-three runs in each of four directions:
 // 4 * (64 - 4 - 4) = 224 points.
 constexpr Score kMaximumMoveScoreGain = 224;
@@ -65,17 +70,26 @@ class SearchState final {
   }
 
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
-  void record_alpha_beta_cutoff(Player player, int move_index, int depth) noexcept {
+  void record_alpha_beta_cutoff(Player player, int move_index, int depth,
+                                int previously_searched_move) noexcept {
     assert(move_index >= 0 && move_index < kCellCount);
     assert(depth > 0);
     ++alpha_beta_cutoffs_;
     ++history_updates_;
 
-    const std::uint64_t unsigned_depth = static_cast<std::uint64_t>(depth);
-    const std::uint64_t bonus = unsigned_depth * unsigned_depth;
-    std::uint64_t& score = history_scores_[static_cast<std::size_t>(player_index(player))]
-                                          [static_cast<std::size_t>(move_index)];
-    score += std::min(bonus, std::numeric_limits<std::uint64_t>::max() - score);
+    // Shallow cutoffs vastly outnumber deep ones on this board. Weight depth aggressively so
+    // cheap frontier cutoffs do not wash out the moves that prune large subtrees.
+    const std::int64_t squared_depth = static_cast<std::int64_t>(depth) * depth;
+    const int bonus = static_cast<int>(std::min(squared_depth * squared_depth * depth,
+                                                static_cast<std::int64_t>(kHistoryScoreLimit)));
+    update_history(player, move_index, bonus);
+    if (previously_searched_move >= 0) {
+      // Give direct pairwise feedback to the candidate that was tried immediately before the
+      // cutoff. A light penalty captures the failed comparison without letting one node erase
+      // evidence accumulated from many successful cutoffs.
+      ++history_maluses_;
+      update_history(player, previously_searched_move, -bonus / 8);
+    }
   }
   void record_score_gain_evaluations(std::uint64_t count) noexcept {
     score_gain_evaluations_ += count;
@@ -135,23 +149,36 @@ class SearchState final {
   [[nodiscard]] std::uint64_t closure_gain_queries() const noexcept {
     return closure_gain_queries_;
   }
-  [[nodiscard]] std::uint64_t history_score(Player player, int move_index) const noexcept {
+  [[nodiscard]] HistoryScore history_score(Player player, int move_index) const noexcept {
     assert(move_index >= 0 && move_index < kCellCount);
     return history_scores_[static_cast<std::size_t>(player_index(player))]
                           [static_cast<std::size_t>(move_index)];
   }
   [[nodiscard]] std::uint64_t history_updates() const noexcept { return history_updates_; }
+  [[nodiscard]] std::uint64_t history_maluses() const noexcept { return history_maluses_; }
   [[nodiscard]] std::uint64_t maximum_history_score() const noexcept {
     std::uint64_t maximum = 0;
     for (const auto& player_scores : history_scores_) {
-      for (const std::uint64_t score : player_scores) {
-        maximum = std::max(maximum, score);
+      for (const HistoryScore score : player_scores) {
+        maximum = std::max(maximum, static_cast<std::uint64_t>(std::max<HistoryScore>(score, 0)));
       }
     }
     return maximum;
   }
 
  private:
+  void update_history(Player player, int move_index, int bonus) noexcept {
+    assert(move_index >= 0 && move_index < kCellCount);
+    assert(bonus >= -kHistoryScoreLimit && bonus <= kHistoryScoreLimit);
+    HistoryScore& score = history_scores_[static_cast<std::size_t>(player_index(player))]
+                                         [static_cast<std::size_t>(move_index)];
+    const int magnitude = bonus < 0 ? -bonus : bonus;
+    // Gravity keeps the compact signed score responsive as it approaches either bound.
+    const int updated =
+        static_cast<int>(score) + bonus - static_cast<int>(score) * magnitude / kHistoryScoreLimit;
+    score = static_cast<HistoryScore>(std::clamp(updated, -kHistoryScoreLimit, kHistoryScoreLimit));
+  }
+
   Clock::time_point deadline_;
   TranspositionTable& table_;
   HistoryScores& history_scores_;
@@ -169,6 +196,7 @@ class SearchState final {
   std::uint64_t closure_evaluations_ = 0;
   std::uint64_t closure_gain_queries_ = 0;
   std::uint64_t history_updates_ = 0;
+  std::uint64_t history_maluses_ = 0;
 };
 
 class ChildKeySet final {
@@ -370,23 +398,30 @@ class ScoreGainMovePicker final {
       moves_[index].history_score = state.history_score(player, moves_[index].move_index);
     }
     state.record_score_gain_evaluations(size_);
-
-    // Moves arrive in increasing index order, which is already the final tie-break order. A
-    // stable insertion sort therefore preserves row-major order when gain and history both tie.
-    for (std::size_t index = 1; index < size_; ++index) {
-      const ScoredMove candidate = moves_[index];
-      std::size_t insertion = index;
-      while (insertion > 0 && (moves_[insertion - 1].score_gain < candidate.score_gain ||
-                               (moves_[insertion - 1].score_gain == candidate.score_gain &&
-                                moves_[insertion - 1].history_score < candidate.history_score))) {
-        moves_[insertion] = moves_[insertion - 1];
-        --insertion;
-      }
-      moves_[insertion] = candidate;
-    }
   }
 
   [[nodiscard]] std::optional<int> next(Bitboard remaining_moves) noexcept {
+    if (!picked_first_) {
+      // Most cut nodes search only their first ordered move. Find that move in one pass and defer
+      // sorting the rest until a node actually asks for another candidate.
+      const ScoredMove* best = nullptr;
+      for (std::size_t index = 0; index < size_; ++index) {
+        const ScoredMove& candidate = moves_[index];
+        if ((remaining_moves & (Bitboard{1} << candidate.move_index)) == 0) {
+          continue;
+        }
+        if (best == nullptr || is_better(candidate, *best)) {
+          best = &candidate;
+        }
+      }
+      picked_first_ = true;
+      return best == nullptr ? std::nullopt : std::optional<int>{best->move_index};
+    }
+
+    if (!sorted_) {
+      sort_moves();
+      sorted_ = true;
+    }
     while (next_ < size_) {
       const int move_index = moves_[next_++].move_index;
       if ((remaining_moves & (Bitboard{1} << move_index)) != 0) {
@@ -400,12 +435,36 @@ class ScoreGainMovePicker final {
   struct ScoredMove {
     std::uint8_t move_index = 0;
     std::uint8_t score_gain = 0;
-    std::uint64_t history_score = 0;
+    HistoryScore history_score = 0;
   };
+
+  [[nodiscard]] static bool is_better(const ScoredMove& left, const ScoredMove& right) noexcept {
+    const int left_order = static_cast<int>(left.score_gain) * kScoreGainHistoryScale +
+                           static_cast<int>(left.history_score);
+    const int right_order = static_cast<int>(right.score_gain) * kScoreGainHistoryScale +
+                            static_cast<int>(right.history_score);
+    return left_order > right_order;
+  }
+
+  void sort_moves() noexcept {
+    // Moves arrive in increasing index order, which is already the final tie-break order. A
+    // stable insertion sort therefore preserves row-major order when gain and history both tie.
+    for (std::size_t index = 1; index < size_; ++index) {
+      const ScoredMove candidate = moves_[index];
+      std::size_t insertion = index;
+      while (insertion > 0 && is_better(candidate, moves_[insertion - 1])) {
+        moves_[insertion] = moves_[insertion - 1];
+        --insertion;
+      }
+      moves_[insertion] = candidate;
+    }
+  }
 
   std::array<ScoredMove, kCellCount> moves_{};
   std::size_t size_ = 0;
   std::size_t next_ = 0;
+  bool picked_first_ = false;
+  bool sorted_ = false;
 };
 
 struct EmptyPositionView {};
@@ -526,6 +585,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
   const Player player = position.side_to_move();
   NodeResult best;
   bool found_move = false;
+  int previously_searched_move = -1;
 
   const auto search_move = [&](int move_index) -> bool {
     const Bitboard move_bit = Bitboard{1} << move_index;
@@ -570,8 +630,9 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure>
       alpha = value;
     }
     if (alpha >= beta) {
-      state.record_alpha_beta_cutoff(player, move_index, depth);
+      state.record_alpha_beta_cutoff(player, move_index, depth, previously_searched_move);
     }
+    previously_searched_move = move_index;
     return true;
   };
 
@@ -852,9 +913,9 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
               << state.static_evaluations() << " closureevals " << state.closure_evaluations()
               << " closuregainqueries " << state.closure_gain_queries() << " gainqueries "
               << state.score_gain_evaluations() + state.closure_gain_queries() << " historyupdates "
-              << state.history_updates() << " historymax " << state.maximum_history_score()
-              << " hashentries " << table.size() << " hashcapacity " << table.capacity()
-              << " hashbytes " << table.storage_bytes();
+              << state.history_updates() << " historymaluses " << state.history_maluses()
+              << " historymax " << state.maximum_history_score() << " hashentries " << table.size()
+              << " hashcapacity " << table.capacity() << " hashbytes " << table.storage_bytes();
   info(diagnostics.str());
 }
 
@@ -1059,7 +1120,7 @@ void Search::prepare_history(const Position& position) noexcept {
   const PositionKey root = position.key();
   if (history_root_.has_value() && *history_root_ != root) {
     for (auto& player_scores : history_scores_) {
-      for (std::uint64_t& score : player_scores) {
+      for (HistoryScore& score : player_scores) {
         score /= 2;
       }
     }

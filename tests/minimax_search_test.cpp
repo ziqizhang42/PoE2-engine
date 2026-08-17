@@ -54,6 +54,7 @@ struct SearchDiagnostics {
   std::uint64_t closure_gain_queries = 0;
   std::uint64_t gain_queries = 0;
   std::uint64_t history_updates = 0;
+  std::uint64_t history_maluses = 0;
   std::uint64_t history_max = 0;
   std::uint64_t hash_entries = 0;
   std::uint64_t hash_capacity = 0;
@@ -90,6 +91,8 @@ struct SearchDiagnostics {
       diagnostics.gain_queries = value;
     } else if (name == "historyupdates") {
       diagnostics.history_updates = value;
+    } else if (name == "historymaluses") {
+      diagnostics.history_maluses = value;
     } else if (name == "historymax") {
       diagnostics.history_max = value;
     } else if (name == "hashentries") {
@@ -624,7 +627,7 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   REQUIRE(first.nodes == 6918);
   REQUIRE(first_diagnostics.history_updates == first_diagnostics.alpha_beta_cutoffs);
   REQUIRE(first_diagnostics.history_updates > 0);
-  REQUIRE(first_diagnostics.history_max == 1031);
+  REQUIRE(first_diagnostics.history_max == 7938);
   require_legal_principal_variation(position, first);
 
   REQUIRE(second.depth == first.depth);
@@ -633,18 +636,20 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   REQUIRE(second.nodes == 6802);
   REQUIRE(second.nodes < first.nodes);
   REQUIRE(second_diagnostics.history_updates == second_diagnostics.alpha_beta_cutoffs);
-  REQUIRE(second_diagnostics.history_max == 2041);
+  REQUIRE(second_diagnostics.history_max == 12063);
   require_legal_principal_variation(position, second);
 
   SearchDiagnostics same_root_diagnostics;
   static_cast<void>(run_fixed_depth_with_diagnostics(search, position, 1, same_root_diagnostics));
   REQUIRE(same_root_diagnostics.history_updates == 0);
+  REQUIRE(same_root_diagnostics.history_maluses == 0);
   REQUIRE(same_root_diagnostics.history_max == second_diagnostics.history_max);
 
   SearchDiagnostics terminal_diagnostics;
   static_cast<void>(run_with_diagnostics(search, position_with_empty_squares(0),
                                          std::chrono::milliseconds{100}, terminal_diagnostics));
   REQUIRE(terminal_diagnostics.history_updates == 0);
+  REQUIRE(terminal_diagnostics.history_maluses == 0);
   REQUIRE(terminal_diagnostics.history_max == second_diagnostics.history_max);
 
   poe2::Position advanced = position;
@@ -666,6 +671,40 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   static_cast<void>(run_fixed_depth_with_diagnostics(search, advanced, 1, reset_diagnostics));
   REQUIRE(reset_diagnostics.history_updates == 0);
   REQUIRE(reset_diagnostics.history_max == 0);
+}
+
+TEST_CASE("cutoff history penalizes the last failed move with bounded gravity",
+          "[minimax][alphabeta][history][move-ordering]") {
+  const poe2::Position position = position_from_history({
+      {6, 2},
+      {2, 0},
+      {3, 0},
+      {3, 3},
+      {5, 0},
+      {6, 6},
+      {2, 6},
+      {4, 5},
+      {3, 6},
+      {0, 4},
+  });
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
+
+  SearchDiagnostics diagnostics;
+  const poe2::engine::EngineResult result =
+      run_fixed_depth_with_diagnostics(search, position, 5, diagnostics);
+
+  REQUIRE(result.depth == 5);
+  REQUIRE(result.score == 1);
+  REQUIRE(result.best_move == poe2::Move{.square = {4, 0}});
+  REQUIRE(result.nodes == 77638);
+  REQUIRE(diagnostics.history_updates == diagnostics.alpha_beta_cutoffs);
+  REQUIRE(diagnostics.history_maluses == 38);
+  REQUIRE(diagnostics.history_max == 15693);
+  require_legal_principal_variation(position, result);
 }
 
 TEST_CASE("fail-soft bounds are cached and reused", "[minimax][alphabeta][tt]") {
@@ -880,6 +919,7 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
   REQUIRE(idle_diagnostics.symmetry_prunes == 0);
   REQUIRE(idle_diagnostics.move_order_evaluations == 0);
   REQUIRE(idle_diagnostics.history_updates == 0);
+  REQUIRE(idle_diagnostics.history_maluses == 0);
   REQUIRE(idle_diagnostics.hash_entries == populated_entries);
 
   search.new_game();

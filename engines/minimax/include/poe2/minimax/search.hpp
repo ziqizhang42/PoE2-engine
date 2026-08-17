@@ -62,7 +62,7 @@ class Search final {
   bool use_symmetry_ = true;
   bool use_two_ply_closure_ = true;
   TranspositionTable table_;
-  std::array<std::array<std::uint64_t, kCellCount>, 2> history_scores_{};
+  std::array<std::array<std::int16_t, kCellCount>, 2> history_scores_{};
   std::optional<PositionKey> history_root_;
 };
 
