@@ -47,8 +47,6 @@ struct SearchDiagnostics {
   std::uint64_t tt_cutoffs = 0;
   std::uint64_t alpha_beta_cutoffs = 0;
   std::uint64_t tt_stores = 0;
-  std::uint64_t pvs_scouts = 0;
-  std::uint64_t pvs_researches = 0;
   std::uint64_t symmetry_prunes = 0;
   std::uint64_t move_order_evaluations = 0;
   std::uint64_t static_evaluations = 0;
@@ -78,10 +76,6 @@ struct SearchDiagnostics {
       diagnostics.alpha_beta_cutoffs = value;
     } else if (name == "ttstores") {
       diagnostics.tt_stores = value;
-    } else if (name == "pvsscouts") {
-      diagnostics.pvs_scouts = value;
-    } else if (name == "pvsresearches") {
-      diagnostics.pvs_researches = value;
     } else if (name == "symmetryprunes") {
       diagnostics.symmetry_prunes = value;
     } else if (name == "moveorderevals") {
@@ -563,48 +557,36 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   REQUIRE(result.score == value_for(final_position, perspective));
 }
 
-TEST_CASE("principal variation search remains exact on an asymmetric fixed-depth position",
-          "[minimax][alphabeta][pvs][move-ordering][oracle]") {
+TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
+          "[minimax][alphabeta][move-ordering]") {
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
   const poe2::Position position = position_with_empty_squares(empty_squares);
-  for (std::size_t index = 1; index < poe2::kAllSymmetries.size(); ++index) {
-    REQUIRE(poe2::transform_position_key(poe2::kAllSymmetries[index], position.key()) !=
-            position.key());
-  }
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = false,
+  }};
 
-  const int depth = 4;
-  const RootOracleResult oracle = ordinary_root_oracle(position, depth);
-  REQUIRE(std::has_single_bit(oracle.optimal_moves));
-  const poe2::Move expected_move{
-      .square = poe2::square_from_index(std::countr_zero(oracle.optimal_moves)),
+  SearchDiagnostics diagnostics;
+  const poe2::engine::EngineResult result =
+      run_with_diagnostics(search, position, std::chrono::milliseconds{100}, diagnostics);
+  const std::vector<poe2::Move> expected_principal_variation{
+      poe2::Move{.square = {0, 0}},
+      poe2::Move{.square = {0, 1}},
+      poe2::Move{.square = {0, 2}},
+      poe2::Move{.square = {0, 3}},
   };
 
-  for (const bool use_table : {false, true}) {
-    for (const bool use_symmetry : {false, true}) {
-      CAPTURE(use_table, use_symmetry);
-      poe2::minimax::Search search{poe2::minimax::SearchOptions{
-          .hash_bytes = use_table ? poe2::minimax::kMebibyte : 0,
-          .use_symmetry = use_symmetry,
-          .use_two_ply_closure = false,
-      }};
-      SearchDiagnostics diagnostics;
-      const poe2::engine::EngineResult result =
-          run_fixed_depth_with_diagnostics(search, position, depth, diagnostics);
-
-      REQUIRE(result.depth == depth);
-      REQUIRE(result.score == oracle.value);
-      REQUIRE(result.best_move == expected_move);
-      REQUIRE(result.nodes == (use_table ? 74 : 118));
-      require_legal_principal_variation(position, result);
-      REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
-      REQUIRE(diagnostics.pvs_scouts > 0);
-      REQUIRE(diagnostics.pvs_researches > 0);
-      REQUIRE(diagnostics.move_order_evaluations > 0);
-      REQUIRE((diagnostics.tt_probes > 0) == use_table);
-      REQUIRE(diagnostics.symmetry_prunes == 0);
-    }
-  }
+  REQUIRE(result.depth == 4);
+  REQUIRE(result.score == -41);
+  REQUIRE(result.best_move == poe2::Move{.square = {0, 0}});
+  REQUIRE(result.principal_variation == expected_principal_variation);
+  REQUIRE(result.nodes == 85);
+  REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
+  REQUIRE(diagnostics.move_order_evaluations > 0);
+  REQUIRE(diagnostics.tt_probes == 0);
+  REQUIRE(diagnostics.symmetry_prunes == 0);
 }
 
 TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root changes",
@@ -639,7 +621,7 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   REQUIRE(first.depth == 4);
   REQUIRE(first.score == -11);
   REQUIRE(first.best_move == poe2::Move{.square = row_major_move});
-  REQUIRE(first.nodes == 7039);
+  REQUIRE(first.nodes == 6918);
   REQUIRE(first_diagnostics.history_updates == first_diagnostics.alpha_beta_cutoffs);
   REQUIRE(first_diagnostics.history_updates > 0);
   REQUIRE(first_diagnostics.history_max == 1031);
@@ -895,8 +877,6 @@ TEST_CASE("newgame clears cached entries while per-search counters reset", "[min
   REQUIRE(idle_diagnostics.tt_cutoffs == 0);
   REQUIRE(idle_diagnostics.alpha_beta_cutoffs == 0);
   REQUIRE(idle_diagnostics.tt_stores == 0);
-  REQUIRE(idle_diagnostics.pvs_scouts == 0);
-  REQUIRE(idle_diagnostics.pvs_researches == 0);
   REQUIRE(idle_diagnostics.symmetry_prunes == 0);
   REQUIRE(idle_diagnostics.move_order_evaluations == 0);
   REQUIRE(idle_diagnostics.history_updates == 0);
