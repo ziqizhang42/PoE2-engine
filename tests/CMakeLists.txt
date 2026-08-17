@@ -1,4 +1,5 @@
 include(FetchContent)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
@@ -86,9 +87,19 @@ add_test(
           -DMINIMAX_DATA=$<TARGET_FILE:poe2_minimax_data>
           -DLABEL_INPUT=${PROJECT_SOURCE_DIR}/tests/fixtures/minimax-label-positions.txt
           -DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/minimax-label-data-test
+          -DPYTHON=${Python3_EXECUTABLE}
+          -DLABEL_AUDITOR=${PROJECT_SOURCE_DIR}/tools/inspect_minimax_labels.py
           -P ${PROJECT_SOURCE_DIR}/tests/minimax_label_data_test.cmake
 )
 set_tests_properties(minimax_label_data_reproducible PROPERTIES TIMEOUT 30)
+
+add_test(
+  NAME minimax_label_auditor_golden
+  COMMAND ${Python3_EXECUTABLE} -B
+          ${PROJECT_SOURCE_DIR}/tests/minimax_label_auditor_test.py
+          ${PROJECT_SOURCE_DIR}
+          ${CMAKE_CURRENT_BINARY_DIR}/minimax-label-auditor-test
+)
 
 add_custom_target(poe2_tests
   DEPENDS

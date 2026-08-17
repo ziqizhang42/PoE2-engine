@@ -922,6 +922,7 @@ void commit_iteration(engine::EngineResult& result, const NodeResult& iteration,
   result.best_move = iteration.best_move;
   result.score = iteration.value;
   result.depth = depth;
+  result.completed_nodes = state.nodes();
 
   FixedPrincipalVariation principal_variation;
   if constexpr (!UseTable) {
@@ -1282,6 +1283,13 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
       .best_move = Move{.square = square_from_index(std::countr_zero(legal_moves))},
   };
 
+  if (limits.depth.has_value() && *limits.depth <= 0) {
+    if (info) {
+      info("error minimax_requires_positive_depth");
+    }
+    return result;
+  }
+
   if (!has_time_limit(limits) && !has_node_limit(limits) && !has_depth_limit(limits)) {
     if (info) {
       info("error minimax_requires_search_limit");
@@ -1307,7 +1315,7 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
 
 AnalysisResult Search::analyze(const Position& position, const engine::EngineLimits& limits,
                                int multi_pv, const AnalysisProgressSink& progress) {
-  if (multi_pv <= 0) {
+  if (multi_pv <= 0 || (limits.depth.has_value() && *limits.depth <= 0)) {
     return {};
   }
 

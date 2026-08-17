@@ -23,6 +23,7 @@ struct EngineResult {
   std::optional<Score> score;
   int depth = 0;
   std::uint64_t nodes = 0;
+  std::uint64_t completed_nodes = 0;
   std::vector<Move> principal_variation;
 };
 

@@ -319,6 +319,7 @@ TEST_CASE("node-only search stops exactly at its deterministic hard limit",
       second_search.run(position, node_limits(kNodeLimit), {});
 
   REQUIRE(first.nodes == kNodeLimit);
+  REQUIRE(first.completed_nodes <= first.nodes);
   REQUIRE(second.best_move == first.best_move);
   REQUIRE(second.score == first.score);
   REQUIRE(second.depth == first.depth);
@@ -327,6 +328,66 @@ TEST_CASE("node-only search stops exactly at its deterministic hard limit",
   REQUIRE(first.depth > 0);
   REQUIRE(first.score.has_value());
   require_legal_principal_variation(position, first);
+}
+
+TEST_CASE("node caps commit an iteration only at its exact completion boundary",
+          "[minimax][nodes][boundary]") {
+  const poe2::Position position;
+  const poe2::minimax::SearchOptions options{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .use_two_ply_closure = true,
+  };
+  poe2::minimax::Search control_search{options};
+  const poe2::engine::EngineResult control =
+      control_search.run(position, poe2::engine::EngineLimits{.depth = 2}, {});
+  REQUIRE(control.depth == 2);
+  REQUIRE(control.completed_nodes == control.nodes);
+  REQUIRE(control.nodes > 1);
+
+  poe2::minimax::Search short_search{options};
+  const poe2::engine::EngineResult short_result =
+      short_search.run(position, node_limits(control.nodes - 1), {});
+  REQUIRE(short_result.nodes == control.nodes - 1);
+  REQUIRE(short_result.depth < control.depth);
+  REQUIRE(short_result.completed_nodes < short_result.nodes);
+
+  poe2::minimax::Search exact_search{options};
+  const poe2::engine::EngineResult exact =
+      exact_search.run(position, node_limits(control.nodes), {});
+  REQUIRE(exact.depth == control.depth);
+  REQUIRE(exact.nodes == control.nodes);
+  REQUIRE(exact.completed_nodes == control.nodes);
+  REQUIRE(exact.score == control.score);
+  REQUIRE(exact.best_move == control.best_move);
+
+  poe2::minimax::Search extra_search{options};
+  const poe2::engine::EngineResult extra =
+      extra_search.run(position, node_limits(control.nodes + 1), {});
+  REQUIRE(extra.depth == control.depth);
+  REQUIRE(extra.nodes == control.nodes + 1);
+  REQUIRE(extra.completed_nodes == control.nodes);
+  REQUIRE(extra.score == control.score);
+  REQUIRE(extra.best_move == control.best_move);
+}
+
+TEST_CASE("explicit nonpositive depth limits are rejected", "[minimax][depth][limits]") {
+  const poe2::Position position;
+  for (const int depth : {0, -1}) {
+    std::string message;
+    poe2::minimax::Search search;
+    const poe2::engine::EngineResult result =
+        search.run(position, poe2::engine::EngineLimits{.depth = depth, .nodes = 100},
+                   [&message](std::string_view text) { message = text; });
+    REQUIRE(result.best_move == poe2::Move{.square = {0, 0}});
+    REQUIRE_FALSE(result.score.has_value());
+    REQUIRE(result.depth == 0);
+    REQUIRE(result.nodes == 0);
+    REQUIRE(result.completed_nodes == 0);
+    REQUIRE(message == "error minimax_requires_positive_depth");
+    REQUIRE(search.analyze(position, poe2::engine::EngineLimits{.depth = depth, .nodes = 100}, 1)
+                .lines.empty());
+  }
 }
 
 TEST_CASE("node and time limits stop at whichever budget is reached first",

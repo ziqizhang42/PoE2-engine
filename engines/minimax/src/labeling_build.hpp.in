@@ -1,0 +1,19 @@
+#ifndef POE2_MINIMAX_LABELING_BUILD_HPP
+#define POE2_MINIMAX_LABELING_BUILD_HPP
+
+#include <string_view>
+
+namespace poe2::minimax::labeling::build {
+
+inline constexpr std::string_view kGitCommit = "@POE2_LABEL_GIT_COMMIT@";
+inline constexpr bool kGitDirty = @POE2_LABEL_GIT_DIRTY@;
+inline constexpr std::string_view kProjectVersion = "@PROJECT_VERSION@";
+inline constexpr std::string_view kCompilerId = "@CMAKE_CXX_COMPILER_ID@";
+inline constexpr std::string_view kCompilerVersion = "@CMAKE_CXX_COMPILER_VERSION@";
+inline constexpr std::string_view kBuildType = "@CMAKE_BUILD_TYPE@";
+inline constexpr std::string_view kTargetProcessor = "@CMAKE_SYSTEM_PROCESSOR@";
+inline constexpr bool kNativeArchitecture = @POE2_LABEL_NATIVE_ARCH@;
+
+}  // namespace poe2::minimax::labeling::build
+
+#endif  // POE2_MINIMAX_LABELING_BUILD_HPP
