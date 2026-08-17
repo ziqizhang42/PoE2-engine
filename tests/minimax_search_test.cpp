@@ -622,7 +622,7 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
       run_fixed_depth_with_diagnostics(search, position, 4, second_diagnostics);
 
   REQUIRE(first.depth == 4);
-  REQUIRE(first.score == -11);
+  REQUIRE(first.score == -9);
   REQUIRE(first.best_move == poe2::Move{.square = row_major_move});
   REQUIRE(first.nodes == 6918);
   REQUIRE(first_diagnostics.history_updates == first_diagnostics.alpha_beta_cutoffs);

@@ -5,7 +5,7 @@
 
 namespace poe2::minimax {
 
-// Returns the score difference from the side-to-move perspective.
+// Returns the final-piece-count-normalized score difference from the side-to-move perspective.
 // Values are measured in half-points so Player Two's 5.5-point handicap remains exact.
 [[nodiscard]] Score evaluate(const Position& position) noexcept;
 

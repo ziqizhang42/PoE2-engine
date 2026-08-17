@@ -97,7 +97,7 @@ struct ClosureOracleResult {
     const poe2::Score own_gain = required_score_gain(position, player, first_square);
 
     poe2::Score first_value = result.move_values[static_cast<std::size_t>(first_index)] =
-        poe2::minimax::evaluate(position) + 2 * own_gain;
+        poe2::minimax::evaluate(position) + 2 * (own_gain - 1);
     poe2::Bitboard replies = legal_moves & ~poe2::square_bit(first_square);
     if (replies != 0) {
       poe2::Score best_reply_gain = std::numeric_limits<poe2::Score>::lowest();
@@ -108,7 +108,7 @@ struct ClosureOracleResult {
             required_score_gain(position, reply_player, poe2::square_from_index(reply_index));
         best_reply_gain = std::max(best_reply_gain, reply_gain);
       }
-      first_value -= 2 * best_reply_gain;
+      first_value -= 2 * (best_reply_gain - 1);
       result.move_values[static_cast<std::size_t>(first_index)] = first_value;
     }
 
@@ -176,11 +176,12 @@ void require_closure_matches_oracles(const poe2::Position& position) {
 
 }  // namespace
 
-TEST_CASE("minimax evaluation uses exact half-point handicap", "[minimax][evaluation]") {
+TEST_CASE("minimax evaluation normalizes final piece counts with the exact handicap",
+          "[minimax][evaluation]") {
   poe2::Position position;
 
   REQUIRE(position.side_to_move() == poe2::Player::kOne);
-  REQUIRE(poe2::minimax::evaluate(position) == -poe2::kPlayerTwoHandicapHalfPoints);
+  REQUIRE(poe2::minimax::evaluate(position) == 2 - poe2::kPlayerTwoHandicapHalfPoints);
 
   REQUIRE(position.play({0, 0}));
   REQUIRE(position.side_to_move() == poe2::Player::kTwo);
@@ -188,7 +189,29 @@ TEST_CASE("minimax evaluation uses exact half-point handicap", "[minimax][evalua
 
   REQUIRE(position.play({6, 6}));
   REQUIRE(position.side_to_move() == poe2::Player::kOne);
-  REQUIRE(poe2::minimax::evaluate(position) == -poe2::kPlayerTwoHandicapHalfPoints);
+  REQUIRE(poe2::minimax::evaluate(position) == 2 - poe2::kPlayerTwoHandicapHalfPoints);
+}
+
+TEST_CASE("final-count normalization is exactly the expected parity correction",
+          "[minimax][evaluation]") {
+  std::array<int, poe2::kCellCount> move_order{};
+  std::iota(move_order.begin(), move_order.end(), 0);
+  std::mt19937_64 generator{UINT64_C(0xbab1ec0ffee)};  // NOLINT
+  std::shuffle(move_order.begin(), move_order.end(), generator);
+
+  for (int ply = 0; ply <= poe2::kCellCount; ++ply) {
+    const poe2::Position position = position_from_prefix(move_order, ply);
+    const poe2::Score player_one_advantage =
+        2 * (position.score(poe2::Player::kOne) - position.score(poe2::Player::kTwo)) -
+        poe2::kPlayerTwoHandicapHalfPoints;
+    const poe2::Score realized_value = position.side_to_move() == poe2::Player::kOne
+                                           ? player_one_advantage
+                                           : -player_one_advantage;
+    const poe2::Score parity_correction = position.side_to_move() == poe2::Player::kOne ? 2 : 0;
+
+    CAPTURE(ply, position.side_to_move());
+    REQUIRE(poe2::minimax::evaluate(position) == realized_value + parity_correction);
+  }
 }
 
 TEST_CASE("minimax evaluation is invariant under every board symmetry",

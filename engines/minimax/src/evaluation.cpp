@@ -17,9 +17,11 @@ static_assert(6 * kConservativeMaximumPlayerScore + kPlayerTwoHandicapHalfPoints
 }  // namespace
 
 Score evaluate(const Position& position) noexcept {
-  const Score player_one_half_points = position.score(Player::kOne) * 2;
+  const Score player_one_stones = (position.ply() + 1) / 2;
+  const Score player_two_stones = position.ply() / 2;
+  const Score player_one_half_points = (position.score(Player::kOne) - player_one_stones + 25) * 2;
   const Score player_two_half_points =
-      position.score(Player::kTwo) * 2 + kPlayerTwoHandicapHalfPoints;
+      (position.score(Player::kTwo) - player_two_stones + 24) * 2 + kPlayerTwoHandicapHalfPoints;
   const Score player_one_advantage = player_one_half_points - player_two_half_points;
 
   return position.side_to_move() == Player::kOne ? player_one_advantage : -player_one_advantage;
@@ -43,7 +45,8 @@ Score evaluate_two_ply_closure(const Position& position, Bitboard legal_moves,
   const Player player = position.side_to_move();
   if (empty_count == 1) {
     const int move_index = std::countr_zero(legal_moves);
-    return base + 2 * position.score_gain_unchecked(player, move_index);
+    // evaluate() already credits the baseline point for every remaining placement.
+    return base + 2 * (position.score_gain_unchecked(player, move_index) - 1);
   }
 
   const Player reply_player = opponent(player);
