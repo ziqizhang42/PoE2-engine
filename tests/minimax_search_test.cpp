@@ -55,8 +55,6 @@ struct SearchDiagnostics {
   std::uint64_t gain_queries = 0;
   std::uint64_t history_updates = 0;
   std::uint64_t history_max = 0;
-  std::uint64_t killer_updates = 0;
-  std::uint64_t killer_cutoffs = 0;
   std::uint64_t hash_entries = 0;
   std::uint64_t hash_capacity = 0;
   std::uint64_t hash_bytes = 0;
@@ -94,10 +92,6 @@ struct SearchDiagnostics {
       diagnostics.history_updates = value;
     } else if (name == "historymax") {
       diagnostics.history_max = value;
-    } else if (name == "killerupdates") {
-      diagnostics.killer_updates = value;
-    } else if (name == "killercutoffs") {
-      diagnostics.killer_cutoffs = value;
     } else if (name == "hashentries") {
       diagnostics.hash_entries = value;
     } else if (name == "hashcapacity") {
@@ -563,8 +557,8 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   REQUIRE(result.score == value_for(final_position, perspective));
 }
 
-TEST_CASE("fail-soft alpha-beta remains exact with gain, killer, and history ordering",
-          "[minimax][alphabeta][killer][history][move-ordering]") {
+TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
+          "[minimax][alphabeta][move-ordering]") {
   const poe2::Bitboard empty_squares = poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) |
                                        poe2::square_bit({0, 2}) | poe2::square_bit({0, 3});
   const poe2::Position position = position_with_empty_squares(empty_squares);
@@ -591,8 +585,6 @@ TEST_CASE("fail-soft alpha-beta remains exact with gain, killer, and history ord
   REQUIRE(result.nodes == 85);
   REQUIRE(diagnostics.alpha_beta_cutoffs > 0);
   REQUIRE(diagnostics.move_order_evaluations > 0);
-  REQUIRE(diagnostics.killer_updates > 0);
-  REQUIRE(diagnostics.killer_cutoffs > 0);
   REQUIRE(diagnostics.tt_probes == 0);
   REQUIRE(diagnostics.symmetry_prunes == 0);
 }
@@ -632,9 +624,7 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   REQUIRE(first.nodes == 6918);
   REQUIRE(first_diagnostics.history_updates == first_diagnostics.alpha_beta_cutoffs);
   REQUIRE(first_diagnostics.history_updates > 0);
-  REQUIRE(first_diagnostics.history_max == 1423);
-  REQUIRE(first_diagnostics.killer_updates > 0);
-  REQUIRE(first_diagnostics.killer_cutoffs > 0);
+  REQUIRE(first_diagnostics.history_max == 1031);
   require_legal_principal_variation(position, first);
 
   REQUIRE(second.depth == first.depth);
@@ -643,25 +633,19 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   REQUIRE(second.nodes == 6802);
   REQUIRE(second.nodes < first.nodes);
   REQUIRE(second_diagnostics.history_updates == second_diagnostics.alpha_beta_cutoffs);
-  REQUIRE(second_diagnostics.history_max == 2865);
-  REQUIRE(second_diagnostics.killer_updates > 0);
-  REQUIRE(second_diagnostics.killer_cutoffs > 0);
+  REQUIRE(second_diagnostics.history_max == 2041);
   require_legal_principal_variation(position, second);
 
   SearchDiagnostics same_root_diagnostics;
   static_cast<void>(run_fixed_depth_with_diagnostics(search, position, 1, same_root_diagnostics));
   REQUIRE(same_root_diagnostics.history_updates == 0);
   REQUIRE(same_root_diagnostics.history_max == second_diagnostics.history_max);
-  REQUIRE(same_root_diagnostics.killer_updates == 0);
-  REQUIRE(same_root_diagnostics.killer_cutoffs == 0);
 
   SearchDiagnostics terminal_diagnostics;
   static_cast<void>(run_with_diagnostics(search, position_with_empty_squares(0),
                                          std::chrono::milliseconds{100}, terminal_diagnostics));
   REQUIRE(terminal_diagnostics.history_updates == 0);
   REQUIRE(terminal_diagnostics.history_max == second_diagnostics.history_max);
-  REQUIRE(terminal_diagnostics.killer_updates == 0);
-  REQUIRE(terminal_diagnostics.killer_cutoffs == 0);
 
   poe2::Position advanced = position;
   REQUIRE(advanced.play({0, 0}));
