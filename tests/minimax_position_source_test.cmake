@@ -109,7 +109,7 @@ execute_process(
           --source-shard 0
           --output-dir "${label_output}"
           --mode teacher
-          --nodes 100
+          --nodes 1000
           --hash-mb 1
           --workers 6
           --progress-every 2

@@ -136,6 +136,10 @@ TEST_CASE("exact label generation reaches terminal values and records canonical 
     REQUIRE(record.mode == poe2::minimax::labeling::LabelMode::kExact);
     REQUIRE(record.completed_depth == record.terminal_depth);
     REQUIRE(record.attempted_depth == record.terminal_depth);
+    REQUIRE(record.deepest_completed_depth == record.completed_depth);
+    REQUIRE(record.deepest_completed_nodes == record.completed_nodes);
+    REQUIRE(record.deepest_value == record.value);
+    REQUIRE(record.deepest_best_move_index == record.best_move_index);
     REQUIRE(record.nodes <= dataset.options.node_limit);
     REQUIRE(record.completed_nodes <= record.nodes);
     REQUIRE(record.source_id == inputs[index].source_id);
@@ -202,6 +206,8 @@ TEST_CASE("label generation is byte deterministic and has a fixed versioned head
           poe2::minimax::labeling::serialize_manifest(second, digest));
   REQUIRE(poe2::minimax::labeling::serialize_manifest(first, digest).find("fixture\\nname") !=
           std::string::npos);
+  REQUIRE(poe2::minimax::labeling::serialize_manifest(first, digest)
+              .find("\"target_selection\": \"deepest_terminal_parity\"") != std::string::npos);
 }
 
 TEST_CASE("parallel label generation is identical to serial generation and preserves input order",
@@ -318,9 +324,62 @@ TEST_CASE("exact mode rejects incomplete searches while teacher mode records com
   REQUIRE(teacher.records.size() == 1);
   REQUIRE(teacher.records.front().mode == poe2::minimax::labeling::LabelMode::kTeacher);
   REQUIRE(teacher.records.front().completed_depth < teacher.records.front().terminal_depth);
-  REQUIRE(teacher.records.front().attempted_depth == teacher.records.front().completed_depth + 1);
+  REQUIRE(teacher.records.front().completed_depth % 2 ==
+          teacher.records.front().terminal_depth % 2);
+  REQUIRE(teacher.records.front().attempted_depth ==
+          teacher.records.front().deepest_completed_depth + 1);
   REQUIRE(teacher.records.front().completed_nodes < teacher.records.front().nodes);
   REQUIRE(teacher.records.front().nodes == 100);
+}
+
+TEST_CASE("teacher labels select terminal parity and retain the two deepest iterations",
+          "[minimax][labeling][teacher][parity]") {
+  const poe2::Position position = position_with_empty_squares(
+      poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) | poe2::square_bit({0, 2}) |
+      poe2::square_bit({0, 3}) | poe2::square_bit({0, 4}));
+  poe2::minimax::Search control{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = true,
+      .use_two_ply_closure = true,
+  }};
+  const poe2::engine::EngineResult depth_two =
+      control.run(position, poe2::engine::EngineLimits{.depth = 2}, {});
+  REQUIRE(depth_two.depth == 2);
+  REQUIRE(depth_two.previous_iteration.has_value());
+  REQUIRE(depth_two.previous_iteration->depth == 1);
+
+  const std::vector<poe2::minimax::labeling::LabelInput> inputs{{
+      .position = position,
+      .source_id = 17,
+      .source_line = 9,
+  }};
+  const poe2::minimax::labeling::LabelDataset dataset = poe2::minimax::labeling::generate_labels(
+      inputs,
+      poe2::minimax::labeling::LabelingOptions{
+          .mode = poe2::minimax::labeling::LabelMode::kTeacher,
+          .node_limit = depth_two.completed_nodes,
+          .hash_bytes = 0,
+          .require_all = true,
+      },
+      label_source("parity fixture"));
+
+  REQUIRE(dataset.records.size() == 1);
+  const auto& record = dataset.records.front();
+  REQUIRE(record.terminal_depth == 3);
+  REQUIRE(record.deepest_completed_depth == 2);
+  REQUIRE(record.previous_completed_depth == 1);
+  REQUIRE(record.completed_depth == 1);
+  REQUIRE(record.attempted_depth == 3);
+  REQUIRE(record.value == depth_two.previous_iteration->score);
+  REQUIRE(record.completed_nodes == depth_two.previous_iteration->nodes);
+  REQUIRE(record.best_move_index ==
+          poe2::square_index(depth_two.previous_iteration->best_move.square));
+  REQUIRE(record.deepest_value == *depth_two.score);
+  REQUIRE(record.deepest_completed_nodes == depth_two.completed_nodes);
+  REQUIRE(record.deepest_best_move_index == poe2::square_index(depth_two.best_move->square));
+  REQUIRE(record.previous_value == record.value);
+  REQUIRE(record.previous_completed_nodes == record.completed_nodes);
+  REQUIRE(record.previous_best_move_index == record.best_move_index);
 }
 
 TEST_CASE("SHA-256 uses the standard byte representation", "[minimax][labeling][digest]") {

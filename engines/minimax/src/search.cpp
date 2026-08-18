@@ -919,6 +919,15 @@ void commit_iteration(engine::EngineResult& result, const NodeResult& iteration,
     return;
   }
 
+  if (result.depth > 0 && result.best_move.has_value() && result.score.has_value()) {
+    result.previous_iteration = engine::CompletedSearchIteration{
+        .best_move = *result.best_move,
+        .score = *result.score,
+        .depth = result.depth,
+        .nodes = result.completed_nodes,
+    };
+  }
+
   result.best_move = iteration.best_move;
   result.score = iteration.value;
   result.depth = depth;

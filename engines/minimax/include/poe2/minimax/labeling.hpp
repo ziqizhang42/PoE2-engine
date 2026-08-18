@@ -15,9 +15,9 @@
 
 namespace poe2::minimax::labeling {
 
-inline constexpr std::uint32_t kLabelDatasetSchemaVersion = 1;
+inline constexpr std::uint32_t kLabelDatasetSchemaVersion = 2;
 inline constexpr std::uint32_t kLabelDatasetHeaderSize = 112;
-inline constexpr std::uint32_t kLabelDatasetRecordSize = 112;
+inline constexpr std::uint32_t kLabelDatasetRecordSize = 140;
 inline constexpr std::string_view kBinaryFileName = "labels.bin";
 inline constexpr std::string_view kManifestFileName = "manifest.json";
 inline constexpr std::string_view kIncompleteMarkerName = "INCOMPLETE";
@@ -89,6 +89,14 @@ struct LabelRecord {
   std::uint16_t policy_id = 0;
   std::uint16_t sample_index = 0;
   DatasetSplit split = DatasetSplit::kTrain;
+  std::uint64_t deepest_completed_nodes = 0;
+  Score deepest_value = 0;
+  std::uint8_t deepest_completed_depth = 0;
+  std::uint8_t deepest_best_move_index = 0xff;
+  std::uint64_t previous_completed_nodes = 0;
+  Score previous_value = 0;
+  std::uint8_t previous_completed_depth = 0;
+  std::uint8_t previous_best_move_index = 0xff;
 
   friend constexpr bool operator==(const LabelRecord&, const LabelRecord&) = default;
 };

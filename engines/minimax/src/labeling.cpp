@@ -142,16 +142,44 @@ void write_text_file(const fs::path& path, std::string_view text) {
   if (result.nodes > options.node_limit || result.completed_nodes > result.nodes) {
     throw std::logic_error{"search exceeded or misreported the configured node limit"};
   }
+  const engine::CompletedSearchIteration deepest{
+      .best_move = *result.best_move,
+      .score = *result.score,
+      .depth = result.depth,
+      .nodes = result.completed_nodes,
+  };
+  if (result.previous_iteration.has_value() &&
+      (result.previous_iteration->depth + 1 != deepest.depth ||
+       result.previous_iteration->nodes > deepest.nodes)) {
+    throw std::logic_error{"search misreported its previous completed iteration"};
+  }
+
+  const engine::CompletedSearchIteration* target = &deepest;
+  if (deepest.depth % 2 != terminal_depth % 2) {
+    if (!result.previous_iteration.has_value() ||
+        result.previous_iteration->depth % 2 != terminal_depth % 2) {
+      return std::nullopt;
+    }
+    target = &*result.previous_iteration;
+  }
 
   const PositionKey canonical_key = canonicalize_position_key(input.position.key()).key;
-  const int move_index = square_index(result.best_move->square);
+  const int target_move_index = square_index(target->best_move.square);
+  const int deepest_move_index = square_index(deepest.best_move.square);
+  const int previous_move_index = result.previous_iteration.has_value()
+                                      ? square_index(result.previous_iteration->best_move.square)
+                                      : -1;
   const int attempted_depth =
       result.depth < terminal_depth ? std::min(result.depth + 1, terminal_depth) : result.depth;
   assert(input.position.ply() >= 0 && input.position.ply() <= kCellCount);
+  assert(target->depth > 0 && target->depth <= result.depth);
+  assert(target->depth % 2 == terminal_depth % 2);
   assert(result.depth >= 0 && result.depth <= kCellCount);
   assert(attempted_depth >= result.depth && attempted_depth <= kCellCount);
   assert(terminal_depth >= 0 && terminal_depth <= kCellCount);
-  assert(move_index >= 0 && move_index < kCellCount);
+  assert(target_move_index >= 0 && target_move_index < kCellCount);
+  assert(deepest_move_index >= 0 && deepest_move_index < kCellCount);
+  assert(previous_move_index < kCellCount);
   return LabelRecord{
       .player_one = input.position.board().bits(Player::kOne),
       .player_two = input.position.board().bits(Player::kTwo),
@@ -162,20 +190,32 @@ void write_text_file(const fs::path& path, std::string_view text) {
       .parent_id = input.parent_id,
       .trajectory_index = input.trajectory_index,
       .nodes = result.nodes,
-      .completed_nodes = result.completed_nodes,
+      .completed_nodes = target->nodes,
       .source_line = input.source_line,
       .source_ordinal = input.source_ordinal,
-      .value = *result.score,
+      .value = target->score,
       .ply = static_cast<std::uint8_t>(input.position.ply()),
       .side_to_move = input.position.side_to_move(),
       .mode = options.mode,
-      .completed_depth = static_cast<std::uint8_t>(result.depth),
+      .completed_depth = static_cast<std::uint8_t>(target->depth),
       .attempted_depth = static_cast<std::uint8_t>(attempted_depth),
       .terminal_depth = static_cast<std::uint8_t>(terminal_depth),
-      .best_move_index = static_cast<std::uint8_t>(move_index),
+      .best_move_index = static_cast<std::uint8_t>(target_move_index),
       .policy_id = input.policy_id,
       .sample_index = input.sample_index,
       .split = input.split,
+      .deepest_completed_nodes = deepest.nodes,
+      .deepest_value = deepest.score,
+      .deepest_completed_depth = static_cast<std::uint8_t>(deepest.depth),
+      .deepest_best_move_index = static_cast<std::uint8_t>(deepest_move_index),
+      .previous_completed_nodes =
+          result.previous_iteration.has_value() ? result.previous_iteration->nodes : 0,
+      .previous_value =
+          result.previous_iteration.has_value() ? result.previous_iteration->score : 0,
+      .previous_completed_depth = static_cast<std::uint8_t>(
+          result.previous_iteration.has_value() ? result.previous_iteration->depth : 0),
+      .previous_best_move_index = static_cast<std::uint8_t>(
+          result.previous_iteration.has_value() ? previous_move_index : 0xff),
   };
 }
 
@@ -422,6 +462,16 @@ std::vector<std::uint8_t> serialize_binary(const LabelDataset& dataset) {
     output.push_back(static_cast<std::uint8_t>(record.split));
     append_little_endian(output, record.policy_id);
     append_little_endian(output, record.sample_index);
+    append_little_endian(output, record.deepest_completed_nodes);
+    append_little_endian(
+        output, static_cast<std::uint32_t>(static_cast<std::int32_t>(record.deepest_value)));
+    output.push_back(record.deepest_completed_depth);
+    output.push_back(record.deepest_best_move_index);
+    append_little_endian(output, record.previous_completed_nodes);
+    append_little_endian(
+        output, static_cast<std::uint32_t>(static_cast<std::int32_t>(record.previous_value)));
+    output.push_back(record.previous_completed_depth);
+    output.push_back(record.previous_best_move_index);
     assert(output.size() - record_start == kLabelDatasetRecordSize);
   }
   return output;
@@ -429,8 +479,12 @@ std::vector<std::uint8_t> serialize_binary(const LabelDataset& dataset) {
 
 std::string serialize_manifest(const LabelDataset& dataset, const Sha256Digest& binary_digest) {
   std::size_t terminal_records = 0;
+  std::size_t parity_backoffs = 0;
+  std::size_t previous_records = 0;
   for (const LabelRecord& record : dataset.records) {
     terminal_records += record.completed_depth == record.terminal_depth ? 1 : 0;
+    parity_backoffs += record.completed_depth < record.deepest_completed_depth ? 1 : 0;
+    previous_records += record.previous_completed_depth > 0 ? 1 : 0;
   }
 
   std::ostringstream output;
@@ -473,11 +527,14 @@ std::string serialize_manifest(const LabelDataset& dataset, const Sha256Digest& 
          << "    \"workers_used\": " << dataset.workers_used << ",\n"
          << "    \"require_all\": " << (dataset.options.require_all ? "true" : "false") << ",\n"
          << "    \"symmetry\": true,\n"
-         << "    \"two_ply_closure\": true\n"
+         << "    \"two_ply_closure\": true,\n"
+         << "    \"target_selection\": \"deepest_terminal_parity\"\n"
          << "  },\n"
          << "  \"results\": {\n"
          << "    \"records\": " << dataset.records.size() << ",\n"
          << "    \"terminal_records\": " << terminal_records << ",\n"
+         << "    \"parity_backoffs\": " << parity_backoffs << ",\n"
+         << "    \"previous_records\": " << previous_records << ",\n"
          << "    \"unsolved\": " << dataset.unsolved_source_lines.size() << ",\n"
          << "    \"unsolved_source_lines\": [";
   for (std::size_t index = 0; index < dataset.unsolved_source_lines.size(); ++index) {

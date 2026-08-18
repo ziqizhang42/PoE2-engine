@@ -18,6 +18,16 @@ struct EngineLimits {
   std::optional<std::uint64_t> nodes;
 };
 
+struct CompletedSearchIteration {
+  Move best_move;
+  Score score = 0;
+  int depth = 0;
+  std::uint64_t nodes = 0;
+
+  friend constexpr bool operator==(const CompletedSearchIteration&,
+                                   const CompletedSearchIteration&) = default;
+};
+
 struct EngineResult {
   std::optional<Move> best_move;
   std::optional<Score> score;
@@ -25,6 +35,7 @@ struct EngineResult {
   std::uint64_t nodes = 0;
   std::uint64_t completed_nodes = 0;
   std::vector<Move> principal_variation;
+  std::optional<CompletedSearchIteration> previous_iteration;
 };
 
 using InfoSink = std::function<void(std::string_view)>;

@@ -114,6 +114,14 @@ add_test(
           ${CMAKE_CURRENT_BINARY_DIR}/minimax-label-auditor-test
 )
 
+add_test(
+  NAME minimax_label_comparison_golden
+  COMMAND ${Python3_EXECUTABLE} -B
+          ${PROJECT_SOURCE_DIR}/tests/minimax_label_comparison_test.py
+          ${PROJECT_SOURCE_DIR}
+          ${CMAKE_CURRENT_BINARY_DIR}/minimax-label-comparison-test
+)
+
 add_custom_target(poe2_tests
   DEPENDS
     poe2_core_tests

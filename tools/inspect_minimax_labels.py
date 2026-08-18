@@ -14,9 +14,11 @@ from typing import Any
 
 
 MAGIC = b"POE2LBL\0"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = (1, SCHEMA_VERSION)
 HEADER = struct.Struct("<8sIIIIQQ32s32sII")
-RECORD = struct.Struct("<11QIIi8BHH")
+RECORD_V1 = struct.Struct("<11QIIi8BHH")
+RECORD = struct.Struct("<11QIIi8BHHQiBBQiBB")
 ENDIAN_MARKER = 0x01020304
 BOARD_SIZE = 7
 CELL_COUNT = BOARD_SIZE * BOARD_SIZE
@@ -113,6 +115,14 @@ def _integer(value: Any, field: str) -> int:
     return value
 
 
+def record_struct(schema_version: int) -> struct.Struct:
+    if schema_version == 1:
+        return RECORD_V1
+    if schema_version == SCHEMA_VERSION:
+        return RECORD
+    raise DatasetError(f"unsupported schema version {schema_version}")
+
+
 def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSummary:
     directory = Path(directory)
     complete = directory / "COMPLETE"
@@ -154,14 +164,14 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
     _require(hashlib.sha256(manifest_bytes).digest() == marker_manifest_digest,
              "manifest digest does not match the COMPLETE marker")
     _require(manifest.get("schema") == "poe2-minimax-labels", "unknown manifest schema")
-    _require(
-        _integer(manifest.get("schema_version"), "schema_version") == SCHEMA_VERSION,
-        "unsupported schema version",
-    )
+    schema_version = _integer(manifest.get("schema_version"), "schema_version")
+    _require(schema_version in SUPPORTED_SCHEMA_VERSIONS, "unsupported schema version")
+    record_layout = record_struct(schema_version)
     format_info = _object(manifest.get("format"), "format")
     _require(_integer(format_info.get("header_bytes"), "format.header_bytes") == HEADER.size,
              "manifest header size is wrong")
-    _require(_integer(format_info.get("record_bytes"), "format.record_bytes") == RECORD.size,
+    _require(_integer(format_info.get("record_bytes"), "format.record_bytes") ==
+             record_layout.size,
              "manifest record size is wrong")
 
     try:
@@ -179,7 +189,7 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
 
     (
         magic,
-        schema_version,
+        binary_schema_version,
         header_size,
         record_size,
         endian_marker,
@@ -191,11 +201,11 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
         shard_count,
     ) = HEADER.unpack_from(binary)
     _require(magic == MAGIC, "binary magic is wrong")
-    _require(schema_version == SCHEMA_VERSION, "binary schema version is wrong")
+    _require(binary_schema_version == schema_version, "binary schema version is wrong")
     _require(header_size == HEADER.size, "binary header size is wrong")
-    _require(record_size == RECORD.size, "binary record size is wrong")
+    _require(record_size == record_layout.size, "binary record size is wrong")
     _require(endian_marker == ENDIAN_MARKER, "binary endian marker is wrong")
-    _require(len(binary) == HEADER.size + record_count * RECORD.size,
+    _require(len(binary) == HEADER.size + record_count * record_layout.size,
              "binary length does not match its record count")
 
     corpus = _object(manifest.get("corpus"), "corpus")
@@ -239,6 +249,9 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
     _require(search.get("evaluator") == "b", "search evaluator is unknown")
     _require(search.get("symmetry") is True, "symmetry must be enabled")
     _require(search.get("two_ply_closure") is True, "two-ply closure must be enabled")
+    if schema_version >= 2:
+        _require(search.get("target_selection") == "deepest_terminal_parity",
+                 "teacher target selection is unknown")
     _require(_integer(search.get("hash_bytes_requested"), "search.hash_bytes_requested") >= 0,
              "requested hash bytes is negative")
     _require(_integer(search.get("hash_bytes_effective"), "search.hash_bytes_effective") >= 0,
@@ -263,10 +276,12 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
     exact_records = 0
     teacher_records = 0
     terminal_records = 0
+    parity_backoffs = 0
+    previous_records = 0
     source_ordinals = set()
     for record_index in range(record_count):
-        offset = HEADER.size + record_index * RECORD.size
-        fields = RECORD.unpack_from(binary, offset)
+        offset = HEADER.size + record_index * record_layout.size
+        fields = record_layout.unpack_from(binary, offset)
         (
             player_one,
             player_two,
@@ -281,7 +296,7 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
             completed_nodes,
             source_line,
             source_ordinal,
-            _value,
+            value,
             ply,
             side_to_move,
             mode,
@@ -292,7 +307,27 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
             split,
             _policy_id,
             _sample_index,
-        ) = fields
+        ) = fields[:24]
+        if schema_version >= 2:
+            (
+                deepest_completed_nodes,
+                deepest_value,
+                deepest_completed_depth,
+                deepest_best_move,
+                previous_completed_nodes,
+                previous_value,
+                previous_completed_depth,
+                previous_best_move,
+            ) = fields[24:]
+        else:
+            deepest_completed_nodes = completed_nodes
+            deepest_value = value
+            deepest_completed_depth = completed_depth
+            deepest_best_move = best_move
+            previous_completed_nodes = 0
+            previous_value = 0
+            previous_completed_depth = 0
+            previous_best_move = 0xFF
         label = f"record {record_index}"
         _require((player_one | player_two) & ~BOARD_MASK == 0, f"{label} has off-board bits")
         _require(player_one & player_two == 0, f"{label} has overlapping bitboards")
@@ -314,20 +349,64 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
         empty_count = CELL_COUNT - ply
         expected_terminal_depth = max(1, empty_count - 2)
         _require(terminal_depth == expected_terminal_depth, f"{label} terminal depth is wrong")
-        _require(0 < completed_depth <= attempted_depth <= terminal_depth,
-                 f"{label} depth fields are inconsistent")
         _require(best_move < CELL_COUNT and not (occupied & (1 << best_move)),
                  f"{label} best move is illegal")
         _require(split in (1, 2, 3), f"{label} dataset split is invalid")
+        if schema_version >= 2:
+            _require(0 < completed_depth <= deepest_completed_depth <= attempted_depth <=
+                     terminal_depth, f"{label} depth fields are inconsistent")
+            _require(completed_depth % 2 == terminal_depth % 2,
+                     f"{label} target depth has the wrong terminal parity")
+            _require(0 < deepest_completed_nodes <= nodes,
+                     f"{label} deepest completed-node count is invalid")
+            _require(deepest_best_move < CELL_COUNT and
+                     not (occupied & (1 << deepest_best_move)),
+                     f"{label} deepest best move is illegal")
+            expected_attempted = (deepest_completed_depth if
+                                  deepest_completed_depth == terminal_depth else
+                                  deepest_completed_depth + 1)
+            _require(attempted_depth == expected_attempted,
+                     f"{label} attempted depth does not follow the deepest result")
+            if previous_completed_depth == 0:
+                _require(previous_completed_nodes == 0 and previous_value == 0 and
+                         previous_best_move == 0xFF,
+                         f"{label} absent previous iteration is not canonical")
+            else:
+                previous_records += 1
+                _require(previous_completed_depth + 1 == deepest_completed_depth,
+                         f"{label} previous depth does not precede the deepest result")
+                _require(0 < previous_completed_nodes <= deepest_completed_nodes,
+                         f"{label} previous completed-node count is invalid")
+                _require(previous_best_move < CELL_COUNT and
+                         not (occupied & (1 << previous_best_move)),
+                         f"{label} previous best move is illegal")
+            if deepest_completed_depth % 2 == terminal_depth % 2:
+                _require(completed_depth == deepest_completed_depth and
+                         completed_nodes == deepest_completed_nodes and
+                         value == deepest_value and best_move == deepest_best_move,
+                         f"{label} did not select its parity-aligned deepest result")
+            else:
+                parity_backoffs += 1
+                _require(completed_depth == previous_completed_depth and
+                         completed_nodes == previous_completed_nodes and
+                         value == previous_value and best_move == previous_best_move,
+                         f"{label} did not select its parity-aligned previous result")
+        else:
+            _require(0 < completed_depth <= attempted_depth <= terminal_depth,
+                     f"{label} depth fields are inconsistent")
         if mode == 1:
             exact_records += 1
             _require(completed_depth == terminal_depth and attempted_depth == terminal_depth,
                      f"{label} exact label did not reach terminal depth")
             _require(completed_nodes == nodes,
                      f"{label} exact label has post-completion nodes")
+            if schema_version >= 2:
+                _require(deepest_completed_depth == terminal_depth and
+                         deepest_completed_nodes == nodes,
+                         f"{label} exact deepest result is inconsistent")
         else:
             teacher_records += 1
-            if completed_depth < terminal_depth:
+            if schema_version == 1 and completed_depth < terminal_depth:
                 _require(attempted_depth == completed_depth + 1,
                          f"{label} teacher attempted depth is wrong")
         if completed_depth == terminal_depth:
@@ -335,6 +414,11 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
 
     _require(_integer(results.get("terminal_records"), "results.terminal_records") ==
              terminal_records, "terminal record count differs from binary")
+    if schema_version >= 2:
+        _require(_integer(results.get("parity_backoffs"), "results.parity_backoffs") ==
+                 parity_backoffs, "parity-backoff count differs from binary")
+        _require(_integer(results.get("previous_records"), "results.previous_records") ==
+                 previous_records, "previous-record count differs from binary")
     return AuditSummary(
         inputs=input_count,
         records=record_count,

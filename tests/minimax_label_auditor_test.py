@@ -56,6 +56,14 @@ def write_golden(auditor, directory: Path) -> None:
         1,
         4,
         5,
+        5,
+        -7,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0xFF,
     )
     header = auditor.HEADER.pack(
         auditor.MAGIC,
@@ -73,7 +81,7 @@ def write_golden(auditor, directory: Path) -> None:
     binary = header + record
     manifest = {
         "schema": "poe2-minimax-labels",
-        "schema_version": 1,
+        "schema_version": auditor.SCHEMA_VERSION,
         "format": {"header_bytes": auditor.HEADER.size, "record_bytes": auditor.RECORD.size},
         "binary_digest": qualified(hashlib.sha256(binary).digest()),
         "corpus": {"id": corpus_id, "digest": qualified(corpus_digest),
@@ -86,9 +94,11 @@ def write_golden(auditor, directory: Path) -> None:
                    "hash_bytes_requested": 0, "hash_bytes_effective": 0,
                    "hash_capacity": 0, "workers_requested": 1, "workers_used": 1,
                    "require_all": True, "symmetry": True, "two_ply_closure": True},
-        "results": {"records": 1, "terminal_records": 0, "unsolved": 0,
+        "results": {"records": 1, "terminal_records": 0, "parity_backoffs": 0,
+                    "previous_records": 0, "unsolved": 0,
                     "unsolved_source_lines": []},
     }
+    manifest["search"]["target_selection"] = "deepest_terminal_parity"
     directory.mkdir(parents=True)
     (directory / "labels.bin").write_bytes(binary)
     manifest_bytes = json.dumps(manifest).encode("utf-8")
@@ -139,6 +149,27 @@ def main() -> int:
     summary = auditor.audit_dataset(golden)
     assert summary.records == 1
     assert summary.teacher_records == 1
+
+    legacy = temporary_root / "legacy"
+    shutil.copytree(golden, legacy)
+    current_binary = (legacy / "labels.bin").read_bytes()
+    header_fields = list(auditor.HEADER.unpack_from(current_binary))
+    header_fields[1] = 1
+    header_fields[3] = auditor.RECORD_V1.size
+    current_fields = auditor.RECORD.unpack_from(current_binary, auditor.HEADER.size)
+    legacy_binary = (auditor.HEADER.pack(*header_fields) +
+                     auditor.RECORD_V1.pack(*current_fields[:24]))
+    (legacy / "labels.bin").write_bytes(legacy_binary)
+    legacy_manifest_path = legacy / "manifest.json"
+    legacy_manifest = json.loads(legacy_manifest_path.read_text(encoding="utf-8"))
+    legacy_manifest["schema_version"] = 1
+    legacy_manifest["format"]["record_bytes"] = auditor.RECORD_V1.size
+    legacy_manifest["search"].pop("target_selection")
+    legacy_manifest["results"].pop("parity_backoffs")
+    legacy_manifest["results"].pop("previous_records")
+    legacy_manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+    refresh_integrity(legacy)
+    assert auditor.audit_dataset(legacy).teacher_records == 1
 
     incomplete = temporary_root / "incomplete"
     shutil.copytree(golden, incomplete)
