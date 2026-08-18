@@ -16,6 +16,10 @@ dependencies = [
 
 [project.scripts]
 poe2-training-smoke = "poe2_training.smoke:main"
+poe2-train-baselines = "poe2_training.baseline:main"
+poe2-train-patterns = "poe2_training.pattern_experiment:main"
+poe2-evaluate-pattern = "poe2_training.pattern_evaluation:main"
+poe2-verify-pattern-gain = "poe2_training.pattern_integration:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/poe2_training"]

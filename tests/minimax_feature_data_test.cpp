@@ -34,7 +34,7 @@ namespace {
 
 }  // namespace
 
-TEST_CASE("offline feature extraction reuses exact B values and marginal gains",
+TEST_CASE("offline feature extraction reuses exact two-ply closure and marginal gains",
           "[minimax][features][extraction]") {
   poe2::Position position;
   constexpr std::array<poe2::Square, 9> kMoves{{
@@ -55,7 +55,7 @@ TEST_CASE("offline feature extraction reuses exact B values and marginal gains",
   const poe2::minimax::feature_data::PositionFeatures features =
       poe2::minimax::feature_data::extract_position_features(position);
   REQUIRE(features.normalized_value == poe2::minimax::evaluate(position));
-  REQUIRE(features.b_value == poe2::minimax::evaluate_two_ply_closure(position));
+  REQUIRE(features.two_ply_closure_value == poe2::minimax::evaluate_two_ply_closure(position));
 
   const auto& lengths = poe2::minimax::feature_data::scoring_line_lengths();
   REQUIRE(lengths.size() == poe2::minimax::feature_data::kScoringLineCount);
@@ -118,9 +118,9 @@ TEST_CASE("offline feature datasets have fixed deterministic framing",
       .trajectory_id = 13,
       .trajectory_index = 14,
       .completed_nodes = 500,
-      .teacher_value = values.b_value + 4,
+      .teacher_value = values.two_ply_closure_value + 4,
       .normalized_value = values.normalized_value,
-      .b_value = values.b_value,
+      .two_ply_closure_value = values.two_ply_closure_value,
       .residual = 4,
       .policy_id = 1,
       .ply = static_cast<std::uint8_t>(position.ply()),

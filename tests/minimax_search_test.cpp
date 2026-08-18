@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -336,7 +338,7 @@ TEST_CASE("node caps commit an iteration only at its exact completion boundary",
   const poe2::minimax::SearchOptions options{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = true,
+      .evaluator = poe2::minimax::Evaluator::kTwoPlyClosure,
   };
   poe2::minimax::Search control_search{options};
   const poe2::engine::EngineResult control =
@@ -462,10 +464,11 @@ TEST_CASE("iterative deepening keeps the last completed negamax result", "[minim
     REQUIRE(leaf.play(move.square));
   }
   if (result.principal_variation.size() == static_cast<std::size_t>(result.depth)) {
-    const poe2::Score leaf_value = poe2::minimax::evaluate_two_ply_closure(leaf);
-    const poe2::Score expected_value =
-        perspective == leaf.side_to_move() ? leaf_value : -leaf_value;
-    REQUIRE(result.score == expected_value);
+    poe2::minimax::FixedEvaluation leaf_value = poe2::minimax::evaluate_pattern_gain_fixed(leaf);
+    if (perspective != leaf.side_to_move()) {
+      leaf_value = -leaf_value;
+    }
+    REQUIRE(result.score == poe2::minimax::round_pattern_gain_evaluation(leaf_value));
   }
 }
 
@@ -475,7 +478,7 @@ TEST_CASE("minimax honors a positive maximum depth without changing uncapped beh
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   SearchDiagnostics diagnostics;
   const poe2::engine::EngineResult result =
@@ -504,7 +507,7 @@ TEST_CASE("closure stops at its exact terminal horizon with one two or three emp
     poe2::minimax::Search closure{poe2::minimax::SearchOptions{
         .hash_bytes = 0,
         .use_symmetry = false,
-        .use_two_ply_closure = true,
+        .evaluator = poe2::minimax::Evaluator::kTwoPlyClosure,
     }};
     SearchDiagnostics diagnostics;
     const poe2::engine::EngineResult result =
@@ -564,12 +567,12 @@ TEST_CASE("closure search depth d equals ordinary search depth d plus two withou
     poe2::minimax::Search control{poe2::minimax::SearchOptions{
         .hash_bytes = 0,
         .use_symmetry = false,
-        .use_two_ply_closure = false,
+        .evaluator = poe2::minimax::Evaluator::kStatic,
     }};
     poe2::minimax::Search closure{poe2::minimax::SearchOptions{
         .hash_bytes = 0,
         .use_symmetry = false,
-        .use_two_ply_closure = true,
+        .evaluator = poe2::minimax::Evaluator::kTwoPlyClosure,
     }};
     SearchDiagnostics control_diagnostics;
     SearchDiagnostics closure_diagnostics;
@@ -612,12 +615,12 @@ TEST_CASE("closure depth equivalence holds with production TT and D4 pruning",
     poe2::minimax::Search control{poe2::minimax::SearchOptions{
         .hash_bytes = poe2::minimax::kMebibyte,
         .use_symmetry = true,
-        .use_two_ply_closure = false,
+        .evaluator = poe2::minimax::Evaluator::kStatic,
     }};
     poe2::minimax::Search closure{poe2::minimax::SearchOptions{
         .hash_bytes = poe2::minimax::kMebibyte,
         .use_symmetry = true,
-        .use_two_ply_closure = true,
+        .evaluator = poe2::minimax::Evaluator::kTwoPlyClosure,
     }};
     SearchDiagnostics control_diagnostics;
     SearchDiagnostics closure_diagnostics;
@@ -669,7 +672,7 @@ TEST_CASE("negamax searches a small game to completion with the exact handicap",
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   SearchDiagnostics diagnostics;
   const poe2::engine::EngineResult result =
@@ -699,7 +702,7 @@ TEST_CASE("fail-soft alpha-beta remains exact with score-gain move ordering",
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
 
   SearchDiagnostics diagnostics;
@@ -743,7 +746,7 @@ TEST_CASE("cutoff history breaks equal-gain ties and ages only when the root cha
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   SearchDiagnostics first_diagnostics;
   const poe2::engine::EngineResult first =
@@ -821,7 +824,7 @@ TEST_CASE("cutoff history penalizes the last failed move with bounded gravity",
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
 
   SearchDiagnostics diagnostics;
@@ -845,7 +848,7 @@ TEST_CASE("fail-soft bounds are cached and reused", "[minimax][alphabeta][tt]") 
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
 
   const poe2::engine::EngineResult first =
@@ -918,7 +921,7 @@ TEST_CASE("symmetry pruning works without a transposition table", "[minimax][sym
   poe2::minimax::Search symmetric_search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = true,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   SearchDiagnostics symmetric_diagnostics;
   const poe2::engine::EngineResult symmetric_result = run_with_diagnostics(
@@ -927,7 +930,7 @@ TEST_CASE("symmetry pruning works without a transposition table", "[minimax][sym
   poe2::minimax::Search raw_search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   SearchDiagnostics raw_diagnostics;
   const poe2::engine::EngineResult raw_result =
@@ -954,7 +957,7 @@ TEST_CASE("all board orientations reuse canonical entries and remap cached moves
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = true,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
 
   SearchDiagnostics seed_diagnostics;
@@ -986,7 +989,7 @@ TEST_CASE("raw-key transposition entries are reused when symmetry is disabled", 
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
 
   SearchDiagnostics first_diagnostics;
@@ -1067,7 +1070,7 @@ TEST_CASE("collision-broken cached principal variations remain legal prefixes", 
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = 64,
       .use_symmetry = true,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   REQUIRE(search.transposition_table().capacity() == 2);
   REQUIRE(search.transposition_table().storage_bytes() == 64);
@@ -1089,7 +1092,7 @@ TEST_CASE("single-PV analysis exactly preserves the native search result",
   const poe2::minimax::SearchOptions options{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = true,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   };
   poe2::minimax::Search native_search{options};
   poe2::minimax::Search analysis_search{options};
@@ -1132,7 +1135,7 @@ TEST_CASE("fixed-depth Multi-PV matches a root oracle and survives a warm root e
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = true,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
 
   const poe2::engine::EngineLimits limits = timed_limits(std::chrono::seconds{5}, depth);
@@ -1179,7 +1182,7 @@ TEST_CASE("symmetric placements share ranks while equal unrelated groups remain 
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = false,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   const poe2::minimax::AnalysisResult result =
       search.analyze(position, timed_limits(std::chrono::seconds{5}, 1), 5);
@@ -1219,7 +1222,7 @@ TEST_CASE(
   poe2::minimax::Search search{poe2::minimax::SearchOptions{
       .hash_bytes = poe2::minimax::kMebibyte,
       .use_symmetry = true,
-      .use_two_ply_closure = false,
+      .evaluator = poe2::minimax::Evaluator::kStatic,
   }};
   std::vector<poe2::minimax::AnalysisResult> updates;
   const poe2::minimax::AnalysisResult result =
@@ -1237,4 +1240,82 @@ TEST_CASE(
   REQUIRE(result.completed_depth == updates.front().completed_depth);
   REQUIRE(result.lines == updates.front().lines);
   REQUIRE(result.nodes > updates.front().nodes);
+}
+
+TEST_CASE("pattern/gain search keeps residual fractions", "[minimax][pattern-gain][fixed-point]") {
+  struct Candidate {
+    int move_index = 0;
+    poe2::Score gain = 0;
+    poe2::minimax::FixedEvaluation value = 0;
+  };
+
+  poe2::Position fixture;
+  Candidate expected;
+  bool found_fixture = false;
+  for (std::uint32_t seed = 1; seed <= 64 && !found_fixture; ++seed) {
+    std::vector<int> move_order(poe2::kCellCount);
+    std::iota(move_order.begin(), move_order.end(), 0);
+    std::mt19937 generator(seed);
+    std::shuffle(move_order.begin(), move_order.end(), generator);
+
+    for (int ply_count = 4; ply_count <= 36 && !found_fixture; ++ply_count) {
+      poe2::Position position;
+      for (int ply = 0; ply < ply_count; ++ply) {
+        REQUIRE(position.play(poe2::square_from_index(move_order[static_cast<std::size_t>(ply)])));
+      }
+
+      std::vector<Candidate> candidates;
+      poe2::Bitboard moves = position.legal_moves();
+      while (moves != 0) {
+        const int move_index = std::countr_zero(moves);
+        moves &= moves - poe2::Bitboard{1};
+        poe2::Position child = position;
+        poe2::MoveUndo undo;
+        REQUIRE(child.make_move(poe2::square_from_index(move_index), undo));
+        candidates.push_back(Candidate{
+            .move_index = move_index,
+            .gain = position.score_gain_unchecked(position.side_to_move(), move_index),
+            .value = -poe2::minimax::evaluate_pattern_gain_fixed(child),
+        });
+      }
+      std::stable_sort(
+          candidates.begin(), candidates.end(),
+          [](const Candidate& left, const Candidate& right) { return left.gain > right.gain; });
+
+      const auto fixed_best = std::max_element(
+          candidates.begin(), candidates.end(),
+          [](const Candidate& left, const Candidate& right) { return left.value < right.value; });
+      REQUIRE(fixed_best != candidates.end());
+      if (std::count_if(candidates.begin(), candidates.end(), [&](const Candidate& candidate) {
+            return candidate.value == fixed_best->value;
+          }) != 1) {
+        continue;
+      }
+
+      const poe2::Score rounded_best =
+          poe2::minimax::round_pattern_gain_evaluation(fixed_best->value);
+      const bool earlier_rounded_tie =
+          std::any_of(candidates.begin(), fixed_best, [&](const Candidate& candidate) {
+            return candidate.value < fixed_best->value &&
+                   poe2::minimax::round_pattern_gain_evaluation(candidate.value) == rounded_best;
+          });
+      if (earlier_rounded_tie) {
+        fixture = position;
+        expected = *fixed_best;
+        found_fixture = true;
+      }
+    }
+  }
+
+  REQUIRE(found_fixture);
+  poe2::minimax::Search search{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = false,
+      .evaluator = poe2::minimax::Evaluator::kPatternGain,
+  }};
+  const poe2::engine::EngineResult result =
+      search.run(fixture, poe2::engine::EngineLimits{.depth = 1}, {});
+
+  REQUIRE(result.best_move == poe2::Move{.square = poe2::square_from_index(expected.move_index)});
+  REQUIRE(result.score == poe2::minimax::round_pattern_gain_evaluation(expected.value));
 }

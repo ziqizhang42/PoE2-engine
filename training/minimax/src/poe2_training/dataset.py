@@ -37,7 +37,7 @@ RECORD_DTYPE = np.dtype(
             "deepest_value",
             "previous_value",
             "normalized_value",
-            "b_value",
+            "two_ply_closure_value",
             "residual",
             "duplicate_count",
             "policy_id",
@@ -164,7 +164,7 @@ class NumpyFeatureBatch:
     own_gains: np.ndarray
     opponent_gains: np.ndarray
     teacher_values: np.ndarray
-    b_values: np.ndarray
+    two_ply_closure_values: np.ndarray
     residuals: np.ndarray
     plys: np.ndarray
     completed_depths: np.ndarray
@@ -193,7 +193,7 @@ class TorchFeatureBatch:
     own_gains: Any
     opponent_gains: Any
     teacher_values: Any
-    b_values: Any
+    two_ply_closure_values: Any
     residuals: Any
     plys: Any
     completed_depths: Any
@@ -245,10 +245,10 @@ class MappedFeatureDataset:
             raise ValueError("records contain an unknown split")
 
         teacher = np.asarray(self.records["teacher_value"], dtype=np.int64)
-        b_value = np.asarray(self.records["b_value"], dtype=np.int64)
+        closure_value = np.asarray(self.records["two_ply_closure_value"], dtype=np.int64)
         residual = np.asarray(self.records["residual"], dtype=np.int64)
-        if not np.array_equal(residual, teacher - b_value):
-            raise ValueError("record residuals differ from teacher minus B")
+        if not np.array_equal(residual, teacher - closure_value):
+            raise ValueError("record residuals differ from teacher minus two-ply closure")
 
         key_low = np.asarray(self.records["key_low"])
         key_high = np.asarray(self.records["key_high"])
@@ -288,7 +288,7 @@ class MappedFeatureDataset:
             own_gains=array("own_gains", np.int16),
             opponent_gains=array("opponent_gains", np.int16),
             teacher_values=array("teacher_value", np.float32),
-            b_values=array("b_value", np.float32),
+            two_ply_closure_values=array("two_ply_closure_value", np.float32),
             residuals=array("residual", np.float32),
             plys=array("ply", np.uint8),
             completed_depths=array("completed_depth", np.uint8),
@@ -322,7 +322,7 @@ def to_torch(batch: NumpyFeatureBatch) -> TorchFeatureBatch:
         "own_gains",
         "opponent_gains",
         "teacher_values",
-        "b_values",
+        "two_ply_closure_values",
         "residuals",
         "plys",
         "completed_depths",
@@ -334,4 +334,15 @@ def to_torch(batch: NumpyFeatureBatch) -> TorchFeatureBatch:
     return TorchFeatureBatch(**{
         name: torch.from_numpy(getattr(batch, name))
         for name in names
+    })
+
+
+def subset_batch(batch: NumpyFeatureBatch, selected: np.ndarray) -> NumpyFeatureBatch:
+    """Select aligned records from an already materialized NumPy batch."""
+    mask = np.asarray(selected)
+    if mask.shape != (batch.records,) or mask.dtype != np.bool_:
+        raise ValueError("batch selection must be a boolean vector matching the record count")
+    return NumpyFeatureBatch(**{
+        field.name: np.ascontiguousarray(getattr(batch, field.name)[mask])
+        for field in fields(batch)
     })

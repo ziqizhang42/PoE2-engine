@@ -312,9 +312,12 @@ struct LoadedLabelShard {
 };
 
 [[nodiscard]] LabelProvenance parse_label_provenance(std::string_view manifest) {
+  // Label schema v2 artifacts produced before the evaluator rename used the value "b".
+  const bool supported_evaluator =
+      manifest.find("\"evaluator\": \"two-ply-closure\"") != std::string_view::npos ||
+      manifest.find("\"evaluator\": \"b\"") != std::string_view::npos;
   if (manifest.find("\"schema\": \"poe2-minimax-labels\"") == std::string_view::npos ||
-      manifest.find("\"schema_version\": 2") == std::string_view::npos ||
-      manifest.find("\"evaluator\": \"b\"") == std::string_view::npos ||
+      manifest.find("\"schema_version\": 2") == std::string_view::npos || !supported_evaluator ||
       manifest.find("\"symmetry\": true") == std::string_view::npos ||
       manifest.find("\"two_ply_closure\": true") == std::string_view::npos) {
     throw std::runtime_error{"label manifest has unsupported semantics"};
@@ -537,8 +540,8 @@ struct SelectedCandidate {
       .deepest_value = label.deepest_value,
       .previous_value = label.previous_value,
       .normalized_value = features.normalized_value,
-      .b_value = features.b_value,
-      .residual = label.value - features.b_value,
+      .two_ply_closure_value = features.two_ply_closure_value,
+      .residual = label.value - features.two_ply_closure_value,
       .duplicate_count = candidate.duplicate_count,
       .policy_id = label.policy_id,
       .sample_index = label.sample_index,
@@ -635,7 +638,7 @@ const std::array<std::uint8_t, kScoringLineCount>& scoring_line_lengths() noexce
 PositionFeatures extract_position_features(const Position& position) {
   PositionFeatures result{
       .normalized_value = evaluate(position),
-      .b_value = evaluate_two_ply_closure(position),
+      .two_ply_closure_value = evaluate_two_ply_closure(position),
   };
   const Bitboard player_one = position.board().bits(Player::kOne);
   const Bitboard player_two = position.board().bits(Player::kTwo);
@@ -849,7 +852,7 @@ std::vector<std::uint8_t> serialize_feature_binary(const FeatureDataset& dataset
     append_signed32(output, record.deepest_value);
     append_signed32(output, record.previous_value);
     append_signed32(output, record.normalized_value);
-    append_signed32(output, record.b_value);
+    append_signed32(output, record.two_ply_closure_value);
     append_signed32(output, record.residual);
     append_little_endian(output, record.duplicate_count);
     append_little_endian(output, record.policy_id);

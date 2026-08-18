@@ -71,11 +71,13 @@ struct SearchBudget {
 
 class SearchState final {
  public:
-  SearchState(SearchBudget budget, TranspositionTable& table, HistoryScores& history_scores)
+  SearchState(SearchBudget budget, TranspositionTable& table, HistoryScores& history_scores,
+              Evaluator evaluator)
       : deadline_(budget.deadline),
         node_limit_(budget.node_limit),
         table_(table),
-        history_scores_(history_scores) {}
+        history_scores_(history_scores),
+        evaluator_(evaluator) {}
 
   template <bool CheckTime, bool CheckNodes>
   [[nodiscard]] bool enter_node() noexcept {
@@ -137,6 +139,18 @@ class SearchState final {
     ++closure_evaluations_;
     closure_gain_queries_ += gain_queries;
   }
+  void record_model_evaluation(std::uint64_t gain_queries) noexcept {
+    ++model_evaluations_;
+    model_gain_queries_ += gain_queries;
+  }
+
+  [[nodiscard]] bool uses_pattern_gain() const noexcept {
+    return evaluator_ == Evaluator::kPatternGain;
+  }
+  [[nodiscard]] Score public_score(Score value) const noexcept {
+    return uses_pattern_gain() ? round_pattern_gain_evaluation(static_cast<FixedEvaluation>(value))
+                               : value;
+  }
 
   void store(PositionKey key, PositionHash hash, TranspositionValue value) {
     if (table_.store(key, hash, value)) {
@@ -187,6 +201,11 @@ class SearchState final {
   [[nodiscard]] std::uint64_t closure_gain_queries() const noexcept {
     return closure_gain_queries_;
   }
+  [[nodiscard]] std::uint64_t model_evaluations() const noexcept { return model_evaluations_; }
+  [[nodiscard]] std::uint64_t model_gain_queries() const noexcept { return model_gain_queries_; }
+  [[nodiscard]] int evaluation_scale() const noexcept {
+    return uses_pattern_gain() ? kPatternGainScale : 1;
+  }
   [[nodiscard]] HistoryScore history_score(Player player, int move_index) const noexcept {
     assert(move_index >= 0 && move_index < kCellCount);
     return history_scores_[static_cast<std::size_t>(player_index(player))]
@@ -221,6 +240,7 @@ class SearchState final {
   std::uint64_t node_limit_;
   TranspositionTable& table_;
   HistoryScores& history_scores_;
+  Evaluator evaluator_;
   std::array<std::array<Move, kCellCount>, kPlyCount> principal_variations_{};
   std::array<std::uint8_t, kPlyCount> principal_variation_lengths_{};
   std::uint64_t nodes_ = 0;
@@ -234,6 +254,8 @@ class SearchState final {
   std::uint64_t static_evaluations_ = 0;
   std::uint64_t closure_evaluations_ = 0;
   std::uint64_t closure_gain_queries_ = 0;
+  std::uint64_t model_evaluations_ = 0;
+  std::uint64_t model_gain_queries_ = 0;
   std::uint64_t history_updates_ = 0;
   std::uint64_t history_maluses_ = 0;
 };
@@ -587,8 +609,15 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
   if (depth == 0 || legal_moves == 0) {
     state.record_static_evaluation();
     Score value = 0;
-    if constexpr (UseTwoPlyClosure) {
-      const int empty_count = std::popcount(legal_moves);
+    const int empty_count = std::popcount(legal_moves);
+    if (state.uses_pattern_gain()) {
+      const std::uint64_t gain_queries = empty_count == 0 ? 0
+                                         : empty_count == 1
+                                             ? 1
+                                             : static_cast<std::uint64_t>(2 * empty_count);
+      state.record_model_evaluation(gain_queries);
+      value = evaluate_pattern_gain_fixed(position, legal_moves, empty_count);
+    } else if constexpr (UseTwoPlyClosure) {
       const std::uint64_t gain_queries =
           empty_count == 1 ? 1 : static_cast<std::uint64_t>(2 * empty_count);
       state.record_closure_evaluation(gain_queries);
@@ -902,7 +931,7 @@ template <typename Policy, bool UseTable>
       .rank = rank,
       .move = best_move,
       .equivalent_moves = moves_in_group(group),
-      .score = score,
+      .score = state.public_score(score),
   };
   line.principal_variation.assign(
       principal_variation.moves.begin(),
@@ -929,7 +958,7 @@ void commit_iteration(engine::EngineResult& result, const NodeResult& iteration,
   }
 
   result.best_move = iteration.best_move;
-  result.score = iteration.value;
+  result.score = state.public_score(iteration.value);
   result.depth = depth;
   result.completed_nodes = state.nodes();
 
@@ -964,10 +993,14 @@ void emit_diagnostics(const engine::InfoSink& info, const SearchState& state,
               << " moveorderevals " << state.score_gain_evaluations() << " staticevals "
               << state.static_evaluations() << " closureevals " << state.closure_evaluations()
               << " closuregainqueries " << state.closure_gain_queries() << " gainqueries "
-              << state.score_gain_evaluations() + state.closure_gain_queries() << " historyupdates "
-              << state.history_updates() << " historymaluses " << state.history_maluses()
-              << " historymax " << state.maximum_history_score() << " hashentries " << table.size()
-              << " hashcapacity " << table.capacity() << " hashbytes " << table.storage_bytes();
+              << state.score_gain_evaluations() + state.closure_gain_queries() +
+                     state.model_gain_queries()
+              << " modelevals " << state.model_evaluations() << " modelgainqueries "
+              << state.model_gain_queries() << " evalscale " << state.evaluation_scale()
+              << " historyupdates " << state.history_updates() << " historymaluses "
+              << state.history_maluses() << " historymax " << state.maximum_history_score()
+              << " hashentries " << table.size() << " hashcapacity " << table.capacity()
+              << " hashbytes " << table.storage_bytes();
   info(diagnostics.str());
 }
 
@@ -975,9 +1008,9 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
 [[nodiscard]] engine::EngineResult run_search(const Position& position, SearchBudget budget,
                                               int maximum_depth, const engine::InfoSink& info,
                                               TranspositionTable& table,
-                                              HistoryScores& history_scores,
+                                              HistoryScores& history_scores, Evaluator evaluator,
                                               engine::EngineResult result) {
-  SearchState state{budget, table, history_scores};
+  SearchState state{budget, table, history_scores, evaluator};
   Position search_position = position;
   Policy policy{search_position};
   SearchPositionView<Policy, UseTable> root_view;
@@ -1006,57 +1039,56 @@ template <bool UseTwoPlyClosure, bool CheckTime, bool CheckNodes>
 [[nodiscard]] engine::EngineResult run_configured_search(
     const Position& position, SearchBudget budget, int maximum_depth, const engine::InfoSink& info,
     bool use_symmetry, TranspositionTable& table, HistoryScores& history_scores,
-    engine::EngineResult result) {
+    Evaluator evaluator, engine::EngineResult result) {
   if (use_symmetry) {
     if (table.capacity() == 0) {
       return run_search<D4Policy, false, UseTwoPlyClosure, CheckTime, CheckNodes>(
-          position, budget, maximum_depth, info, table, history_scores, std::move(result));
+          position, budget, maximum_depth, info, table, history_scores, evaluator,
+          std::move(result));
     }
     return run_search<D4Policy, true, UseTwoPlyClosure, CheckTime, CheckNodes>(
-        position, budget, maximum_depth, info, table, history_scores, std::move(result));
+        position, budget, maximum_depth, info, table, history_scores, evaluator, std::move(result));
   }
   if (table.capacity() == 0) {
     return run_search<IdentityPolicy, false, UseTwoPlyClosure, CheckTime, CheckNodes>(
-        position, budget, maximum_depth, info, table, history_scores, std::move(result));
+        position, budget, maximum_depth, info, table, history_scores, evaluator, std::move(result));
   }
   return run_search<IdentityPolicy, true, UseTwoPlyClosure, CheckTime, CheckNodes>(
-      position, budget, maximum_depth, info, table, history_scores, std::move(result));
+      position, budget, maximum_depth, info, table, history_scores, evaluator, std::move(result));
 }
 
 template <bool UseTwoPlyClosure>
-[[nodiscard]] engine::EngineResult dispatch_search(const Position& position,
-                                                   const engine::EngineLimits& limits,
-                                                   int maximum_depth, const engine::InfoSink& info,
-                                                   bool use_symmetry, TranspositionTable& table,
-                                                   HistoryScores& history_scores,
-                                                   engine::EngineResult result) {
+[[nodiscard]] engine::EngineResult dispatch_search(
+    const Position& position, const engine::EngineLimits& limits, int maximum_depth,
+    const engine::InfoSink& info, bool use_symmetry, TranspositionTable& table,
+    HistoryScores& history_scores, Evaluator evaluator, engine::EngineResult result) {
   const SearchBudget budget = make_search_budget(limits);
   if (has_time_limit(limits)) {
     if (has_node_limit(limits)) {
-      return run_configured_search<UseTwoPlyClosure, true, true>(position, budget, maximum_depth,
-                                                                 info, use_symmetry, table,
-                                                                 history_scores, std::move(result));
+      return run_configured_search<UseTwoPlyClosure, true, true>(
+          position, budget, maximum_depth, info, use_symmetry, table, history_scores, evaluator,
+          std::move(result));
     }
-    return run_configured_search<UseTwoPlyClosure, true, false>(position, budget, maximum_depth,
-                                                                info, use_symmetry, table,
-                                                                history_scores, std::move(result));
+    return run_configured_search<UseTwoPlyClosure, true, false>(
+        position, budget, maximum_depth, info, use_symmetry, table, history_scores, evaluator,
+        std::move(result));
   }
   if (has_node_limit(limits)) {
-    return run_configured_search<UseTwoPlyClosure, false, true>(position, budget, maximum_depth,
-                                                                info, use_symmetry, table,
-                                                                history_scores, std::move(result));
+    return run_configured_search<UseTwoPlyClosure, false, true>(
+        position, budget, maximum_depth, info, use_symmetry, table, history_scores, evaluator,
+        std::move(result));
   }
-  return run_configured_search<UseTwoPlyClosure, false, false>(position, budget, maximum_depth,
-                                                               info, use_symmetry, table,
-                                                               history_scores, std::move(result));
+  return run_configured_search<UseTwoPlyClosure, false, false>(
+      position, budget, maximum_depth, info, use_symmetry, table, history_scores, evaluator,
+      std::move(result));
 }
 
 template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime, bool CheckNodes>
 [[nodiscard]] AnalysisResult run_single_analysis(
     const Position& position, SearchBudget budget, int maximum_depth,
     const AnalysisProgressSink& progress, TranspositionTable& table, HistoryScores& history_scores,
-    const std::vector<RootMoveGroup>& groups, engine::EngineResult result) {
-  SearchState state{budget, table, history_scores};
+    const std::vector<RootMoveGroup>& groups, Evaluator evaluator, engine::EngineResult result) {
+  SearchState state{budget, table, history_scores, evaluator};
   Position search_position = position;
   Policy policy{search_position};
   SearchPositionView<Policy, UseTable> root_view;
@@ -1086,62 +1118,61 @@ template <bool UseTwoPlyClosure, bool CheckTime, bool CheckNodes>
 [[nodiscard]] AnalysisResult run_configured_single_analysis(
     const Position& position, SearchBudget budget, int maximum_depth,
     const AnalysisProgressSink& progress, bool use_symmetry, TranspositionTable& table,
-    HistoryScores& history_scores, const std::vector<RootMoveGroup>& groups,
+    HistoryScores& history_scores, const std::vector<RootMoveGroup>& groups, Evaluator evaluator,
     engine::EngineResult result) {
   if (use_symmetry) {
     if (table.capacity() == 0) {
       return run_single_analysis<D4Policy, false, UseTwoPlyClosure, CheckTime, CheckNodes>(
-          position, budget, maximum_depth, progress, table, history_scores, groups,
+          position, budget, maximum_depth, progress, table, history_scores, groups, evaluator,
           std::move(result));
     }
     return run_single_analysis<D4Policy, true, UseTwoPlyClosure, CheckTime, CheckNodes>(
-        position, budget, maximum_depth, progress, table, history_scores, groups,
+        position, budget, maximum_depth, progress, table, history_scores, groups, evaluator,
         std::move(result));
   }
   if (table.capacity() == 0) {
     return run_single_analysis<IdentityPolicy, false, UseTwoPlyClosure, CheckTime, CheckNodes>(
-        position, budget, maximum_depth, progress, table, history_scores, groups,
+        position, budget, maximum_depth, progress, table, history_scores, groups, evaluator,
         std::move(result));
   }
   return run_single_analysis<IdentityPolicy, true, UseTwoPlyClosure, CheckTime, CheckNodes>(
-      position, budget, maximum_depth, progress, table, history_scores, groups, std::move(result));
+      position, budget, maximum_depth, progress, table, history_scores, groups, evaluator,
+      std::move(result));
 }
 
 template <bool UseTwoPlyClosure>
 [[nodiscard]] AnalysisResult dispatch_single_analysis(
     const Position& position, const engine::EngineLimits& limits, int maximum_depth,
     const AnalysisProgressSink& progress, bool use_symmetry, TranspositionTable& table,
-    HistoryScores& history_scores, const std::vector<RootMoveGroup>& groups,
+    HistoryScores& history_scores, const std::vector<RootMoveGroup>& groups, Evaluator evaluator,
     engine::EngineResult result) {
   const SearchBudget budget = make_search_budget(limits);
   if (has_time_limit(limits)) {
     if (has_node_limit(limits)) {
       return run_configured_single_analysis<UseTwoPlyClosure, true, true>(
           position, budget, maximum_depth, progress, use_symmetry, table, history_scores, groups,
-          std::move(result));
+          evaluator, std::move(result));
     }
     return run_configured_single_analysis<UseTwoPlyClosure, true, false>(
         position, budget, maximum_depth, progress, use_symmetry, table, history_scores, groups,
-        std::move(result));
+        evaluator, std::move(result));
   }
   if (has_node_limit(limits)) {
     return run_configured_single_analysis<UseTwoPlyClosure, false, true>(
         position, budget, maximum_depth, progress, use_symmetry, table, history_scores, groups,
-        std::move(result));
+        evaluator, std::move(result));
   }
   return run_configured_single_analysis<UseTwoPlyClosure, false, false>(
       position, budget, maximum_depth, progress, use_symmetry, table, history_scores, groups,
-      std::move(result));
+      evaluator, std::move(result));
 }
 
 template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime, bool CheckNodes>
-[[nodiscard]] AnalysisResult run_multi_analysis(const Position& position, SearchBudget budget,
-                                                int maximum_depth, std::size_t line_count,
-                                                const AnalysisProgressSink& progress,
-                                                TranspositionTable& table,
-                                                HistoryScores& history_scores,
-                                                const std::vector<RootMoveGroup>& groups) {
-  SearchState state{budget, table, history_scores};
+[[nodiscard]] AnalysisResult run_multi_analysis(
+    const Position& position, SearchBudget budget, int maximum_depth, std::size_t line_count,
+    const AnalysisProgressSink& progress, TranspositionTable& table, HistoryScores& history_scores,
+    const std::vector<RootMoveGroup>& groups, Evaluator evaluator) {
+  SearchState state{budget, table, history_scores, evaluator};
   Position search_position = position;
   Policy policy{search_position};
   SearchPositionView<Policy, UseTable> root_view;
@@ -1202,56 +1233,58 @@ template <bool UseTwoPlyClosure, bool CheckTime, bool CheckNodes>
 [[nodiscard]] AnalysisResult run_configured_multi_analysis(
     const Position& position, SearchBudget budget, int maximum_depth, std::size_t line_count,
     const AnalysisProgressSink& progress, bool use_symmetry, TranspositionTable& table,
-    HistoryScores& history_scores, const std::vector<RootMoveGroup>& groups) {
+    HistoryScores& history_scores, const std::vector<RootMoveGroup>& groups, Evaluator evaluator) {
   if (use_symmetry) {
     if (table.capacity() == 0) {
       return run_multi_analysis<D4Policy, false, UseTwoPlyClosure, CheckTime, CheckNodes>(
-          position, budget, maximum_depth, line_count, progress, table, history_scores, groups);
+          position, budget, maximum_depth, line_count, progress, table, history_scores, groups,
+          evaluator);
     }
     return run_multi_analysis<D4Policy, true, UseTwoPlyClosure, CheckTime, CheckNodes>(
-        position, budget, maximum_depth, line_count, progress, table, history_scores, groups);
+        position, budget, maximum_depth, line_count, progress, table, history_scores, groups,
+        evaluator);
   }
   if (table.capacity() == 0) {
     return run_multi_analysis<IdentityPolicy, false, UseTwoPlyClosure, CheckTime, CheckNodes>(
-        position, budget, maximum_depth, line_count, progress, table, history_scores, groups);
+        position, budget, maximum_depth, line_count, progress, table, history_scores, groups,
+        evaluator);
   }
   return run_multi_analysis<IdentityPolicy, true, UseTwoPlyClosure, CheckTime, CheckNodes>(
-      position, budget, maximum_depth, line_count, progress, table, history_scores, groups);
+      position, budget, maximum_depth, line_count, progress, table, history_scores, groups,
+      evaluator);
 }
 
 template <bool UseTwoPlyClosure>
-[[nodiscard]] AnalysisResult dispatch_multi_analysis(const Position& position,
-                                                     const engine::EngineLimits& limits,
-                                                     int maximum_depth, std::size_t line_count,
-                                                     const AnalysisProgressSink& progress,
-                                                     bool use_symmetry, TranspositionTable& table,
-                                                     HistoryScores& history_scores,
-                                                     const std::vector<RootMoveGroup>& groups) {
+[[nodiscard]] AnalysisResult dispatch_multi_analysis(
+    const Position& position, const engine::EngineLimits& limits, int maximum_depth,
+    std::size_t line_count, const AnalysisProgressSink& progress, bool use_symmetry,
+    TranspositionTable& table, HistoryScores& history_scores,
+    const std::vector<RootMoveGroup>& groups, Evaluator evaluator) {
   const SearchBudget budget = make_search_budget(limits);
   if (has_time_limit(limits)) {
     if (has_node_limit(limits)) {
       return run_configured_multi_analysis<UseTwoPlyClosure, true, true>(
           position, budget, maximum_depth, line_count, progress, use_symmetry, table,
-          history_scores, groups);
+          history_scores, groups, evaluator);
     }
     return run_configured_multi_analysis<UseTwoPlyClosure, true, false>(
         position, budget, maximum_depth, line_count, progress, use_symmetry, table, history_scores,
-        groups);
+        groups, evaluator);
   }
   if (has_node_limit(limits)) {
     return run_configured_multi_analysis<UseTwoPlyClosure, false, true>(
         position, budget, maximum_depth, line_count, progress, use_symmetry, table, history_scores,
-        groups);
+        groups, evaluator);
   }
   return run_configured_multi_analysis<UseTwoPlyClosure, false, false>(
       position, budget, maximum_depth, line_count, progress, use_symmetry, table, history_scores,
-      groups);
+      groups, evaluator);
 }
 
 }  // namespace
 
 Search::Search(SearchOptions options)
-    : use_symmetry_(options.use_symmetry), use_two_ply_closure_(options.use_two_ply_closure) {
+    : use_symmetry_(options.use_symmetry), evaluator_(options.evaluator) {
   table_.resize_bytes(options.hash_bytes);
 }
 
@@ -1282,7 +1315,7 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
   const Bitboard legal_moves = position.legal_moves();
   if (legal_moves == 0) {
     if (has_time_limit(limits) || has_node_limit(limits) || has_depth_limit(limits)) {
-      SearchState state{make_search_budget(limits), table_, history_scores_};
+      SearchState state{make_search_budget(limits), table_, history_scores_, evaluator_};
       emit_diagnostics(info, state, table_);
     }
     return {};
@@ -1314,12 +1347,12 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
     prepare_history(position);
   }
 
-  if (use_two_ply_closure_) {
+  if (evaluator_ == Evaluator::kTwoPlyClosure) {
     return dispatch_search<true>(position, limits, maximum_depth, info, use_symmetry_, table_,
-                                 history_scores_, std::move(result));
+                                 history_scores_, evaluator_, std::move(result));
   }
   return dispatch_search<false>(position, limits, maximum_depth, info, use_symmetry_, table_,
-                                history_scores_, std::move(result));
+                                history_scores_, evaluator_, std::move(result));
 }
 
 AnalysisResult Search::analyze(const Position& position, const engine::EngineLimits& limits,
@@ -1351,22 +1384,24 @@ AnalysisResult Search::analyze(const Position& position, const engine::EngineLim
     engine::EngineResult result{
         .best_move = Move{.square = square_from_index(std::countr_zero(legal_moves))},
     };
-    if (use_two_ply_closure_) {
+    if (evaluator_ == Evaluator::kTwoPlyClosure) {
       return dispatch_single_analysis<true>(position, limits, maximum_depth, progress,
                                             use_symmetry_, table_, history_scores_, groups,
-                                            std::move(result));
+                                            evaluator_, std::move(result));
     }
     return dispatch_single_analysis<false>(position, limits, maximum_depth, progress, use_symmetry_,
-                                           table_, history_scores_, groups, std::move(result));
+                                           table_, history_scores_, groups, evaluator_,
+                                           std::move(result));
   }
 
   const std::size_t line_count = std::min(static_cast<std::size_t>(multi_pv), groups.size());
-  if (use_two_ply_closure_) {
+  if (evaluator_ == Evaluator::kTwoPlyClosure) {
     return dispatch_multi_analysis<true>(position, limits, maximum_depth, line_count, progress,
-                                         use_symmetry_, table_, history_scores_, groups);
+                                         use_symmetry_, table_, history_scores_, groups,
+                                         evaluator_);
   }
   return dispatch_multi_analysis<false>(position, limits, maximum_depth, line_count, progress,
-                                        use_symmetry_, table_, history_scores_, groups);
+                                        use_symmetry_, table_, history_scores_, groups, evaluator_);
 }
 
 int Search::terminal_depth(const Position& position) const noexcept {
@@ -1376,7 +1411,7 @@ int Search::terminal_depth(const Position& position) const noexcept {
   }
   // A closure leaf resolves up to two remaining placements. Keep one explicit root ply so the
   // search still returns a move when two or fewer squares remain.
-  return use_two_ply_closure_ ? std::max(1, empty_count - 2) : empty_count;
+  return evaluator_ == Evaluator::kStatic ? empty_count : std::max(1, empty_count - 2);
 }
 
 }  // namespace poe2::minimax

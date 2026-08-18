@@ -38,7 +38,7 @@ One policy is selected for each trajectory:
 - `random`: uniformly selects a legal square.
 - `immediate-gain`: selects the move with the largest exact non-mutating score gain.
 - `opponent-aware`: selects the exact immediate two-ply key: own gain minus the opponent's best remaining gain.
-- `noisy-search`: normally uses a deterministic node-limited B search and selects a random legal move at the configured noise percentage.
+- `noisy-search`: normally uses deterministic node-limited two-ply-closure search and selects a random legal move at the configured noise percentage.
 
 Ties are resolved by the trajectory's deterministic random stream. Each trajectory contributes at most one position from each of eight phase buckets spanning plies 4 through 46. With fewer than eight requested samples, the buckets are selected deterministically and then emitted in ply order. This avoids treating every adjacent state in a game as an independent example while retaining early-, middle-, and late-game coverage.
 

@@ -55,7 +55,7 @@ class FeatureRecord:
     deepest_value: int
     previous_value: int
     normalized_value: int
-    b_value: int
+    two_ply_closure_value: int
     residual: int
     duplicate_count: int
     policy_id: int
@@ -249,7 +249,7 @@ def _normalized_value(record: FeatureRecord) -> int:
     return advantage if record.side_to_move == 0 else -advantage
 
 
-def _b_value(record: FeatureRecord) -> int:
+def _two_ply_closure_value(record: FeatureRecord) -> int:
     legal = [index for index, gain in enumerate(record.own_gains) if gain != OCCUPIED_GAIN]
     if not legal:
         return record.normalized_value
@@ -467,7 +467,8 @@ def audit_feature_dataset(directory: Path, label_directory: Path | None = None,
                      record.teacher_value == record.previous_value and
                      record.best_move == record.previous_best_move,
                      f"{label} selected result differs from its previous result")
-        _require(record.residual == record.teacher_value - record.b_value,
+        _require(record.residual ==
+                 record.teacher_value - record.two_ply_closure_value,
                  f"{label} has an inconsistent residual")
         _require(record.flags & ~KNOWN_FLAGS == 0 and record.reserved_one == 0 and
                  record.reserved_two == 0 and record.reserved_three == 0 and
@@ -491,8 +492,9 @@ def audit_feature_dataset(directory: Path, label_directory: Path | None = None,
                 _require(record.own_gains[cell] >= 1 and record.opponent_gains[cell] >= 1,
                          f"{label} has a nonpositive legal gain")
         _require(record.normalized_value == _normalized_value(record),
-                 f"{label} normalized B base is wrong")
-        _require(record.b_value == _b_value(record), f"{label} B closure is wrong")
+                 f"{label} normalized static value is wrong")
+        _require(record.two_ply_closure_value == _two_ply_closure_value(record),
+                 f"{label} two-ply closure is wrong")
         terminal_records += terminal
         parity_backoffs += bool(record.flags & PARITY_BACKOFF_FLAG)
         split_counts[record.split] += 1

@@ -26,7 +26,7 @@ inline constexpr std::string_view kFeatureCompleteMarkerName = "COMPLETE";
 
 struct PositionFeatures {
   Score normalized_value = 0;
-  Score b_value = 0;
+  Score two_ply_closure_value = 0;
   std::array<std::uint16_t, kScoringLineCount> line_patterns{};
   std::array<std::int16_t, kCellCount> own_gains{};
   std::array<std::int16_t, kCellCount> opponent_gains{};
@@ -53,7 +53,7 @@ struct FeatureRecord {
   Score deepest_value = 0;
   Score previous_value = 0;
   Score normalized_value = 0;
-  Score b_value = 0;
+  Score two_ply_closure_value = 0;
   Score residual = 0;
   std::uint32_t duplicate_count = 1;
   std::uint16_t policy_id = 0;

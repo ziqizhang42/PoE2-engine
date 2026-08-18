@@ -888,7 +888,7 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
         search.emplace(SearchOptions{
             .hash_bytes = options.search_hash_bytes,
             .use_symmetry = true,
-            .use_two_ply_closure = true,
+            .evaluator = Evaluator::kTwoPlyClosure,
         });
       }
       while (!stop.load(std::memory_order_relaxed)) {

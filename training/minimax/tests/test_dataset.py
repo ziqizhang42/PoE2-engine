@@ -24,7 +24,7 @@ class MappedFeatureDatasetTest(unittest.TestCase):
                 self.assertEqual(batch.line_patterns.shape, (1, 36))
                 self.assertEqual(batch.own_gains.shape, (1, 49))
                 self.assertEqual(batch.teacher_values.tolist(), [8.0])
-                self.assertEqual(batch.b_values.tolist(), [6.0])
+                self.assertEqual(batch.two_ply_closure_values.tolist(), [6.0])
                 self.assertEqual(batch.residuals.tolist(), [2.0])
 
 

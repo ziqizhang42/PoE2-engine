@@ -246,7 +246,9 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
     _require(node_limit > 0, "search.node_limit must be positive")
     expected_mode = {"exact": 1, "teacher": 2}.get(search.get("mode"))
     _require(expected_mode is not None, "search.mode is unknown")
-    _require(search.get("evaluator") == "b", "search evaluator is unknown")
+    # Schema-v2 artifacts predating the descriptive evaluator names used "b".
+    _require(search.get("evaluator") in ("two-ply-closure", "b"),
+             "search evaluator is unknown")
     _require(search.get("symmetry") is True, "symmetry must be enabled")
     _require(search.get("two_ply_closure") is True, "two-ply closure must be enabled")
     if schema_version >= 2:

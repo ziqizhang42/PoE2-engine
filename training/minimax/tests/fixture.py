@@ -5,24 +5,59 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from poe2_training.artifact import CELL_COUNT, HEADER, LINE_COUNT, MAGIC, RECORD_BYTES
 
 
-def write_feature_fixture(directory: Path, *, dirty: bool = False) -> Path:
+@dataclass(frozen=True)
+class FixtureRecord:
+    key: int
+    split: int
+    ply: int
+    teacher_value: int
+    two_ply_closure_value: int
+    own_gains: tuple[int, ...] = (1,) * CELL_COUNT
+    opponent_gains: tuple[int, ...] = (1,) * CELL_COUNT
+    flags: int = 0
+
+
+def write_feature_fixture(directory: Path, *, dirty: bool = False,
+                          rows: Sequence[FixtureRecord] | None = None) -> Path:
     directory.mkdir()
     corpus_id = "training-loader-test"
     corpus_digest = hashlib.sha256(corpus_id.encode()).digest()
     label_digest = hashlib.sha256(b"labels").digest()
 
-    record = bytearray(RECORD_BYTES)
-    struct.pack_into("<Q", record, 16, 1)  # canonical key low
-    struct.pack_into("<i", record, 112, 8)  # teacher value
-    struct.pack_into("<i", record, 128, 6)  # B value
-    struct.pack_into("<i", record, 132, 2)  # residual
-    struct.pack_into("<I", record, 136, 1)  # duplicate count
-    record[146] = 1  # train split
+    selected_rows = tuple(rows or (
+        FixtureRecord(key=1, split=1, ply=0, teacher_value=8, two_ply_closure_value=6),
+    ))
+    if not selected_rows:
+        raise ValueError("fixture requires at least one record")
+    if tuple(row.key for row in selected_rows) != tuple(sorted(row.key for row in selected_rows)):
+        raise ValueError("fixture records must be sorted by unique key")
+
+    encoded_records: list[bytes] = []
+    for row in selected_rows:
+        if len(row.own_gains) != CELL_COUNT or len(row.opponent_gains) != CELL_COUNT:
+            raise ValueError("fixture gain arrays must have 49 values")
+        record = bytearray(RECORD_BYTES)
+        struct.pack_into("<Q", record, 16, row.key)  # canonical key low
+        struct.pack_into("<i", record, 112, row.teacher_value)
+        struct.pack_into("<i", record, 128, row.two_ply_closure_value)
+        struct.pack_into("<i", record, 132,
+                         row.teacher_value - row.two_ply_closure_value)
+        struct.pack_into("<I", record, 136, 1)  # duplicate count
+        record[144] = row.ply
+        record[146] = row.split
+        record[156] = row.flags
+        struct.pack_into("<49h", record, 232, *row.own_gains)
+        struct.pack_into("<49h", record, 330, *row.opponent_gains)
+        encoded_records.append(bytes(record))
+
+    split_counts = tuple(sum(row.split == split for row in selected_rows) for split in (1, 2, 3))
 
     header = HEADER.pack(
         MAGIC,
@@ -30,8 +65,8 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False) -> Path:
         HEADER.size,
         RECORD_BYTES,
         0x01020304,
-        1,
-        1,
+        len(selected_rows),
+        len(selected_rows),
         0,
         corpus_digest,
         label_digest,
@@ -40,7 +75,7 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False) -> Path:
         1,
         0,
     )
-    binary = header + record
+    binary = header + b"".join(encoded_records)
     binary_digest = hashlib.sha256(binary).hexdigest()
     manifest = {
         "schema": "poe2-minimax-features",
@@ -53,7 +88,7 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False) -> Path:
         "inputs": {
             "label_set_digest": f"sha256:{label_digest.hex()}",
             "shards": 1,
-            "source_records": 1,
+            "source_records": len(selected_rows),
             "label_build": {
                 "git_commit": "1" * 40,
                 "git_dirty": dirty,
@@ -69,12 +104,12 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False) -> Path:
             "cell_count": CELL_COUNT,
         },
         "results": {
-            "records": 1,
+            "records": len(selected_rows),
             "duplicates_removed": 0,
             "split_counts": {
-                "train": 1,
-                "validation": 0,
-                "test": 0,
+                "train": split_counts[0],
+                "validation": split_counts[1],
+                "test": split_counts[2],
             },
         },
     }

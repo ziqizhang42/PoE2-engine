@@ -340,13 +340,18 @@ TEST_CASE("teacher labels select terminal parity and retain the two deepest iter
   poe2::minimax::Search control{poe2::minimax::SearchOptions{
       .hash_bytes = 0,
       .use_symmetry = true,
-      .use_two_ply_closure = true,
+      .evaluator = poe2::minimax::Evaluator::kTwoPlyClosure,
   }};
   const poe2::engine::EngineResult depth_two =
       control.run(position, poe2::engine::EngineLimits{.depth = 2}, {});
   REQUIRE(depth_two.depth == 2);
-  REQUIRE(depth_two.previous_iteration.has_value());
-  REQUIRE(depth_two.previous_iteration->depth == 1);
+  if (!depth_two.previous_iteration.has_value() || !depth_two.score.has_value() ||
+      !depth_two.best_move.has_value()) {
+    FAIL("depth-two search should return current and previous complete iterations");
+    return;
+  }
+  const poe2::engine::CompletedSearchIteration& previous = *depth_two.previous_iteration;
+  REQUIRE(previous.depth == 1);
 
   const std::vector<poe2::minimax::labeling::LabelInput> inputs{{
       .position = position,
@@ -370,10 +375,9 @@ TEST_CASE("teacher labels select terminal parity and retain the two deepest iter
   REQUIRE(record.previous_completed_depth == 1);
   REQUIRE(record.completed_depth == 1);
   REQUIRE(record.attempted_depth == 3);
-  REQUIRE(record.value == depth_two.previous_iteration->score);
-  REQUIRE(record.completed_nodes == depth_two.previous_iteration->nodes);
-  REQUIRE(record.best_move_index ==
-          poe2::square_index(depth_two.previous_iteration->best_move.square));
+  REQUIRE(record.value == previous.score);
+  REQUIRE(record.completed_nodes == previous.nodes);
+  REQUIRE(record.best_move_index == poe2::square_index(previous.best_move.square));
   REQUIRE(record.deepest_value == *depth_two.score);
   REQUIRE(record.deepest_completed_nodes == depth_two.completed_nodes);
   REQUIRE(record.deepest_best_move_index == poe2::square_index(depth_two.best_move->square));

@@ -16,10 +16,16 @@ namespace poe2::minimax {
 inline constexpr std::size_t kMebibyte = std::size_t{1024} * 1024;
 inline constexpr std::size_t kDefaultHashBytes = std::size_t{64} * kMebibyte;
 
+enum class Evaluator : std::uint8_t {
+  kStatic,
+  kTwoPlyClosure,
+  kPatternGain,
+};
+
 struct SearchOptions {
   std::size_t hash_bytes = kDefaultHashBytes;
   bool use_symmetry = true;
-  bool use_two_ply_closure = true;
+  Evaluator evaluator = Evaluator::kPatternGain;
 
   friend constexpr bool operator==(const SearchOptions&, const SearchOptions&) = default;
 };
@@ -61,7 +67,7 @@ class Search final {
   void prepare_history(const Position& position) noexcept;
 
   bool use_symmetry_ = true;
-  bool use_two_ply_closure_ = true;
+  Evaluator evaluator_ = Evaluator::kPatternGain;
   TranspositionTable table_;
   std::array<std::array<std::int16_t, kCellCount>, 2> history_scores_{};
   std::optional<PositionKey> history_root_;

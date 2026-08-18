@@ -30,14 +30,14 @@ TEST_CASE("minimax command-line options have stable defaults", "[minimax][cli]")
   REQUIRE(value == poe2::minimax::SearchOptions{});
   REQUIRE(value.hash_bytes == 64 * poe2::minimax::kMebibyte);
   REQUIRE(value.use_symmetry);
-  REQUIRE(value.use_two_ply_closure);
+  REQUIRE(value.evaluator == poe2::minimax::Evaluator::kPatternGain);
   REQUIRE(error.empty());
 }
 
-TEST_CASE("minimax command-line options allow disabling search features", "[minimax][cli]") {
+TEST_CASE("minimax command-line options select explicit evaluator modes", "[minimax][cli]") {
   std::string error;
   const std::optional<poe2::minimax::SearchOptions> options =
-      parse({"--hash-mb", "0", "--no-symmetry", "--no-two-ply-closure"}, error);
+      parse({"--hash-mb", "0", "--no-symmetry", "--evaluator", "pattern-gain"}, error);
 
   if (!options.has_value()) {
     FAIL("explicit minimax options should parse");
@@ -46,8 +46,17 @@ TEST_CASE("minimax command-line options allow disabling search features", "[mini
   const poe2::minimax::SearchOptions value = *options;
   REQUIRE(value.hash_bytes == 0);
   REQUIRE_FALSE(value.use_symmetry);
-  REQUIRE_FALSE(value.use_two_ply_closure);
+  REQUIRE(value.evaluator == poe2::minimax::Evaluator::kPatternGain);
   REQUIRE(error.empty());
+
+  const poe2::minimax::SearchOptions static_options{
+      .evaluator = poe2::minimax::Evaluator::kStatic,
+  };
+  REQUIRE(parse({"--evaluator", "static"}, error) == static_options);
+  const poe2::minimax::SearchOptions closure_options{
+      .evaluator = poe2::minimax::Evaluator::kTwoPlyClosure,
+  };
+  REQUIRE(parse({"--evaluator", "two-ply-closure"}, error) == closure_options);
 }
 
 TEST_CASE("minimax command-line options reject malformed and missing hash sizes",
@@ -73,4 +82,14 @@ TEST_CASE("minimax command-line options reject overflow and unknown arguments", 
 
   REQUIRE_FALSE(parse({"--mystery"}, error).has_value());
   REQUIRE(error == "unknown argument: --mystery");
+}
+
+TEST_CASE("minimax command-line options reject missing and unknown evaluators", "[minimax][cli]") {
+  std::string error;
+
+  REQUIRE_FALSE(parse({"--evaluator"}, error).has_value());
+  REQUIRE(error == "missing value for --evaluator");
+
+  REQUIRE_FALSE(parse({"--evaluator", "future"}, error).has_value());
+  REQUIRE(error == "--evaluator must be static, two-ply-closure, or pattern-gain: future");
 }

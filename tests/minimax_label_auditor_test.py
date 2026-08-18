@@ -90,7 +90,7 @@ def write_golden(auditor, directory: Path) -> None:
         "build": {"git_commit": "test", "git_dirty": False, "project_version": "test",
                   "compiler_id": "test", "compiler_version": "test", "build_type": "test",
                   "target_processor": "test", "native_architecture": False},
-        "search": {"evaluator": "b", "mode": "teacher", "node_limit": 10,
+        "search": {"evaluator": "two-ply-closure", "mode": "teacher", "node_limit": 10,
                    "hash_bytes_requested": 0, "hash_bytes_effective": 0,
                    "hash_capacity": 0, "workers_requested": 1, "workers_used": 1,
                    "require_all": True, "symmetry": True, "two_ply_closure": True},

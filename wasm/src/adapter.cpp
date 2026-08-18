@@ -79,7 +79,7 @@ Analyzer::Analyzer(std::size_t hash_bytes)
     : search_(minimax::SearchOptions{
           .hash_bytes = hash_bytes,
           .use_symmetry = true,
-          .use_two_ply_closure = true,
+          .evaluator = minimax::Evaluator::kPatternGain,
       }) {}
 
 AnalysisResponse Analyzer::analyze(const AnalysisRequest& request,

@@ -306,7 +306,7 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
     Search sized_search{SearchOptions{
         .hash_bytes = options.hash_bytes,
         .use_symmetry = true,
-        .use_two_ply_closure = true,
+        .evaluator = Evaluator::kTwoPlyClosure,
     }};
     dataset.hash_capacity = sized_search.transposition_table().capacity();
     dataset.hash_storage_bytes = sized_search.transposition_table().storage_bytes();
@@ -356,7 +356,7 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
       Search search{SearchOptions{
           .hash_bytes = options.hash_bytes,
           .use_symmetry = true,
-          .use_two_ply_closure = true,
+          .evaluator = Evaluator::kTwoPlyClosure,
       }};
       while (!stop.load(std::memory_order_relaxed)) {
         const std::size_t input_index = next_input.fetch_add(1, std::memory_order_relaxed);
@@ -517,7 +517,7 @@ std::string serialize_manifest(const LabelDataset& dataset, const Sha256Digest& 
          << "\n"
          << "  },\n"
          << "  \"search\": {\n"
-         << "    \"evaluator\": \"b\",\n"
+         << "    \"evaluator\": \"two-ply-closure\",\n"
          << "    \"mode\": \"" << label_mode_name(dataset.options.mode) << "\",\n"
          << "    \"node_limit\": " << dataset.options.node_limit << ",\n"
          << "    \"hash_bytes_requested\": " << dataset.options.hash_bytes << ",\n"

@@ -116,7 +116,7 @@ def _dataset_smoke(torch: object, dataset_path: Path, device: str,
 
         residual_ok = bool(torch.equal(
             device_batch.residuals,
-            device_batch.teacher_values - device_batch.b_values,
+            device_batch.teacher_values - device_batch.two_ply_closure_values,
         ))
         if not residual_ok:
             raise RuntimeError("device tensors failed the residual identity")

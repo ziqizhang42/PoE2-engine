@@ -1,6 +1,7 @@
 add_library(poe2_minimax_engine STATIC
   src/engine.cpp
   src/evaluation.cpp
+  src/evaluation_pattern_gain.cpp
   src/options.cpp
   src/search.cpp
 )
@@ -92,4 +93,15 @@ if(POE2_BUILD_NATIVE_APPS)
   )
 
   target_compile_features(poe2_minimax PRIVATE cxx_std_23)
+
+  add_executable(poe2_minimax_infer
+    src/infer_main.cpp
+  )
+
+  target_link_libraries(poe2_minimax_infer
+    PRIVATE
+      poe2::minimax_engine
+  )
+
+  target_compile_features(poe2_minimax_infer PRIVATE cxx_std_23)
 endif()

@@ -41,8 +41,23 @@ std::optional<SearchOptions> parse_search_options(std::span<const std::string_vi
       options.use_symmetry = false;
       continue;
     }
-    if (argument == "--no-two-ply-closure") {
-      options.use_two_ply_closure = false;
+    if (argument == "--evaluator") {
+      ++index;
+      if (index == arguments.size()) {
+        error = "missing value for --evaluator";
+        return std::nullopt;
+      }
+      if (arguments[index] == "static") {
+        options.evaluator = Evaluator::kStatic;
+      } else if (arguments[index] == "two-ply-closure") {
+        options.evaluator = Evaluator::kTwoPlyClosure;
+      } else if (arguments[index] == "pattern-gain") {
+        options.evaluator = Evaluator::kPatternGain;
+      } else {
+        error = "--evaluator must be static, two-ply-closure, or pattern-gain: ";
+        error += arguments[index];
+        return std::nullopt;
+      }
       continue;
     }
     if (argument == "--hash-mb") {

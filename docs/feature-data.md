@@ -70,7 +70,7 @@ Record:
 | 32 | 40 | Source, family, trajectory, parent, and trajectory-index IDs |
 | 72 | 32 | Total, selected, deepest, and previous node counts |
 | 104 | 8 | Source shard and shard-local ordinal |
-| 112 | 24 | Selected, deepest, previous, normalized, B, and residual scores |
+| 112 | 24 | Selected, deepest, previous, static, two-ply-closure, and residual scores |
 | 136 | 4 | Duplicate multiplicity |
 | 140 | 4 | Policy and sample IDs |
 | 144 | 16 | Ply, side, split, mode, depths, moves, flags, and reserved zeros |
@@ -79,6 +79,6 @@ Record:
 | 330 | 98 | 49 signed 16-bit opponent gains |
 | 428 | 4 | Reserved zero |
 
-The independent auditor verifies framing and digests, canonical uniqueness and ordering, split and multiplicity accounting, line-pattern encoding, normalized scores, B closure arithmetic, and a deterministic sample of marginal gains recomputed from the game rules.
+The independent auditor verifies framing and digests, canonical uniqueness and ordering, split and multiplicity accounting, line-pattern encoding, normalized static scores, two-ply-closure arithmetic, and a deterministic sample of marginal gains recomputed from the game rules.
 
 The isolated offline consumer and its manual uv/PyTorch setup are documented in [`training/minimax/README.md`](../training/minimax/README.md).

@@ -383,3 +383,72 @@ TEST_CASE("two-ply closure handles unique tied and contested reply maxima",
   REQUIRE(found_contested_best);
   REQUIRE(found_own_gain_trap);
 }
+
+TEST_CASE("pattern/gain evaluator retains exact two-ply closure with at most two empty squares",
+          "[minimax][evaluation][pattern-gain][endgame]") {
+  std::array<int, poe2::kCellCount> row_major{};
+  std::iota(row_major.begin(), row_major.end(), 0);
+
+  for (const int empty_count : {0, 1, 2}) {
+    const poe2::Position position = position_from_prefix(row_major, poe2::kCellCount - empty_count);
+    REQUIRE(poe2::minimax::evaluate_pattern_gain_fixed(position) ==
+            poe2::minimax::evaluate_two_ply_closure(position) * poe2::minimax::kPatternGainScale);
+  }
+}
+
+TEST_CASE("pattern/gain evaluator is invariant under every board symmetry",
+          "[minimax][evaluation][pattern-gain][symmetry]") {
+  const std::vector<poe2::Square> history{
+      {0, 1}, {6, 5}, {2, 4}, {4, 2}, {1, 6}, {5, 0}, {3, 3}, {0, 4}, {6, 2},
+      {2, 1}, {4, 5}, {1, 3}, {5, 3}, {3, 0}, {3, 6}, {0, 0}, {6, 6},
+  };
+  const poe2::minimax::FixedEvaluation expected =
+      poe2::minimax::evaluate_pattern_gain_fixed(position_from_history(history));
+
+  for (const poe2::Symmetry symmetry : poe2::kAllSymmetries) {
+    REQUIRE(poe2::minimax::evaluate_pattern_gain_fixed(position_from_history(history, symmetry)) ==
+            expected);
+  }
+}
+
+TEST_CASE("pattern/gain evaluator preserves position state across make evaluate and unmake",
+          "[minimax][evaluation][pattern-gain][make-unmake]") {
+  poe2::Position position = position_from_history({
+      {0, 1},
+      {6, 5},
+      {2, 4},
+      {4, 2},
+      {1, 6},
+      {5, 0},
+      {3, 3},
+      {0, 4},
+      {6, 2},
+  });
+  const poe2::PositionKey key = position.key();
+  const poe2::PositionHash hash = position.hash();
+  const poe2::ScoreByPlayer scores = position.scores();
+  const poe2::Bitboard player_one = position.board().bits(poe2::Player::kOne);
+  const poe2::Bitboard player_two = position.board().bits(poe2::Player::kTwo);
+  const poe2::Bitboard legal_moves = position.legal_moves();
+  const poe2::minimax::FixedEvaluation expected =
+      poe2::minimax::evaluate_pattern_gain_fixed(position);
+
+  poe2::Bitboard moves = legal_moves;
+  while (moves != 0) {
+    const int move_index = std::countr_zero(moves);
+    moves &= moves - poe2::Bitboard{1};
+    poe2::MoveUndo undo;
+    REQUIRE(position.make_move(poe2::square_from_index(move_index), undo));
+    static_cast<void>(poe2::minimax::evaluate_pattern_gain_fixed(position));
+    position.unmake_move(undo);
+
+    REQUIRE(position.key() == key);
+    REQUIRE(position.hash() == hash);
+    REQUIRE(position.scores().player_one == scores.player_one);
+    REQUIRE(position.scores().player_two == scores.player_two);
+    REQUIRE(position.board().bits(poe2::Player::kOne) == player_one);
+    REQUIRE(position.board().bits(poe2::Player::kTwo) == player_two);
+    REQUIRE(position.legal_moves() == legal_moves);
+    REQUIRE(poe2::minimax::evaluate_pattern_gain_fixed(position) == expected);
+  }
+}

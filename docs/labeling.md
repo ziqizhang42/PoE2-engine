@@ -1,6 +1,6 @@
 # Deterministic Minimax Labels
 
-`poe2_minimax_data` turns a completed deterministic position source, or a validated opening book, into reproducible minimax labels. It is the data boundary between the production B evaluator/search and future offline evaluation experiments. Position generation and model training are deliberately separate. See [Deterministic Position Sources](position-source.md) for the preferred metadata-aware input and [Deterministic Minimax Feature Data](feature-data.md) for corpus-wide preflight, deduplication, and primitive feature export.
+`poe2_minimax_data` turns a completed deterministic position source, or a validated opening book, into reproducible minimax labels. It is the data boundary between production two-ply-closure search and offline evaluation experiments. Position generation and model training are deliberately separate. See [Deterministic Position Sources](position-source.md) for the preferred metadata-aware input and [Deterministic Minimax Feature Data](feature-data.md) for corpus-wide preflight, deduplication, and primitive feature export.
 
 ## Build and run
 
@@ -28,7 +28,7 @@ The required mode is one of:
 - `exact`: requests the remaining terminal depth and emits a record only when that entire search finishes. Add `--require-all` when any unsolved input should fail the job.
 - `teacher`: uses the requested node budget as a hard cap and selects the deepest completed result whose depth parity matches the known terminal depth. The deepest and immediately previous completed results are retained alongside that training target. A teacher record remains identified as a teacher record even if it reaches terminal depth.
 
-Both modes require a positive `--nodes` budget. Every position starts with cleared transposition and history state. Search uses board-symmetry canonicalization and the production B two-ply closure. No clock, random seed, scheduling decision, progress message, path to the output directory, or wall-clock timestamp enters the artifacts.
+Both modes require a positive `--nodes` budget. Every position starts with cleared transposition and history state. Search uses board-symmetry canonicalization and the production two-ply-closure evaluator. No clock, random seed, scheduling decision, progress message, path to the output directory, or wall-clock timestamp enters the artifacts.
 
 `--workers` defaults to one. Each worker owns an isolated search, history, and transposition table; inputs are scheduled dynamically but restored to source order before serialization. Binary records are therefore independent of worker count. The manifest records requested and effective worker counts, so manifests made with different worker settings intentionally differ. `--hash-mb` is per worker.
 
@@ -112,7 +112,7 @@ Record:
 | 102 | 1 | Label mode (`1` exact, `2` teacher) |
 | 103 | 1 | Selected parity-aligned explicit depth |
 | 104 | 1 | Attempted explicit depth after the deepest completed iteration |
-| 105 | 1 | Explicit depth required for terminal value with B closure |
+| 105 | 1 | Explicit depth required for terminal value with two-ply closure |
 | 106 | 1 | Selected parity-aligned best-move board index |
 | 107 | 1 | Dataset split (`1` train, `2` validation, `3` test) |
 | 108 | 2 | Source policy ID |
