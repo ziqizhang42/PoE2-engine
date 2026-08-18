@@ -80,3 +80,5 @@ Record:
 | 428 | 4 | Reserved zero |
 
 The independent auditor verifies framing and digests, canonical uniqueness and ordering, split and multiplicity accounting, line-pattern encoding, normalized scores, B closure arithmetic, and a deterministic sample of marginal gains recomputed from the game rules.
+
+The isolated offline consumer and its manual uv/PyTorch setup are documented in [`training/minimax/README.md`](../training/minimax/README.md).
