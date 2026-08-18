@@ -16,10 +16,26 @@ namespace {
 constexpr std::size_t kScoringLineCount = 36;
 constexpr std::size_t kRawPatternCount = 3276;
 constexpr std::uint16_t kUnassignedOrbit = std::numeric_limits<std::uint16_t>::max();
+constexpr std::size_t kMaximumLinesPerCell = 4;
+constexpr std::size_t kPackedCountLaneBits = 8;
+constexpr std::uint32_t kPackedCountLaneMask = (1U << kPackedCountLaneBits) - 1U;
+constexpr std::array<Score, 4> kGainThresholds{{2, 4, 8, 16}};
+
+static_assert(kCellCount <= kPackedCountLaneMask);
 
 struct ScoringLine {
   std::array<std::uint8_t, kBoardSize> cells{};
   std::uint8_t length = 0;
+};
+
+struct LineContribution {
+  std::uint16_t place = 0;
+  std::uint8_t line = 0;
+};
+
+struct CellLineContributions {
+  // Corners use one zero-initialized entry, whose addition to line zero is a no-op.
+  std::array<LineContribution, kMaximumLinesPerCell> values{};
 };
 
 [[nodiscard]] consteval std::array<ScoringLine, kScoringLineCount> make_scoring_lines() {
@@ -101,9 +117,47 @@ struct ScoringLine {
   return result;
 }
 
+[[nodiscard]] consteval std::array<CellLineContributions, kCellCount> make_cell_line_contributions(
+    const std::array<ScoringLine, kScoringLineCount>& lines) {
+  std::array<CellLineContributions, kCellCount> result{};
+  std::array<std::uint8_t, kCellCount> counts{};
+  for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
+    const ScoringLine& line = lines[line_index];
+    std::uint16_t place = 1;
+    for (std::uint8_t offset = 0; offset < line.length; ++offset) {
+      CellLineContributions& contributions = result[line.cells[offset]];
+      contributions.values[counts[line.cells[offset]]++] = LineContribution{
+          .place = place,
+          .line = static_cast<std::uint8_t>(line_index),
+      };
+      place = static_cast<std::uint16_t>(place * 3);
+    }
+  }
+  return result;
+}
+
+using RawLineWeights =
+    std::array<std::array<std::int16_t, frozen_pattern_gain_model::kLineKnots.size()>,
+               kRawPatternCount>;
+
+[[nodiscard]] consteval RawLineWeights make_raw_line_weights(
+    const std::array<std::uint16_t, kRawPatternCount>& raw_to_orbit) {
+  RawLineWeights result{};
+  for (std::size_t pattern = 0; pattern < result.size(); ++pattern) {
+    const std::size_t orbit = raw_to_orbit[pattern];
+    for (std::size_t knot = 0; knot < result[pattern].size(); ++knot) {
+      result[pattern][knot] = frozen_pattern_gain_model::kLineWeights
+          [knot * frozen_pattern_gain_model::kReversalOrbitCount + orbit];
+    }
+  }
+  return result;
+}
+
 inline constexpr auto kScoringLines = make_scoring_lines();
 inline constexpr auto kPatternOffsets = make_pattern_offsets();
 inline constexpr auto kRawToReversalOrbit = make_raw_to_reversal_orbit();
+inline constexpr auto kCellLineContributions = make_cell_line_contributions(kScoringLines);
+inline constexpr auto kRawLineWeights = make_raw_line_weights(kRawToReversalOrbit);
 
 static_assert(kScoringLines.size() == kScoringLineCount);
 static_assert(kPatternOffsets[7] + 2187 == kRawPatternCount);
@@ -118,8 +172,26 @@ static_assert(frozen_pattern_gain_model::kGainWeights.size() ==
               frozen_pattern_gain_model::kGainKnots.size() *
                   frozen_pattern_gain_model::kGainFeatureCount);
 
+template <std::uint16_t Digit>
+void accumulate_line_codes(std::array<std::uint16_t, kScoringLineCount>& codes,
+                           Bitboard pieces) noexcept {
+  static_assert(Digit == 1 || Digit == 2);
+  while (pieces != 0) {
+    const int cell = std::countr_zero(pieces);
+    pieces &= pieces - Bitboard{1};
+    const CellLineContributions& contributions = kCellLineContributions[cell];
+    for (const LineContribution contribution : contributions.values) {
+      codes[contribution.line] =
+          static_cast<std::uint16_t>(codes[contribution.line] + Digit * contribution.place);
+    }
+  }
+}
+
 template <std::size_t Size>
 void insert_descending(std::array<Score, Size>& values, Score value) noexcept {
+  if (value <= values.back()) {
+    return;
+  }
   for (std::size_t index = 0; index < values.size(); ++index) {
     if (value > values[index]) {
       for (std::size_t shifted = values.size() - 1; shifted > index; --shifted) {
@@ -136,20 +208,29 @@ struct GainEvaluation {
   std::array<std::int64_t, frozen_pattern_gain_model::kGainFeatureCount> features{};
 };
 
+[[nodiscard]] constexpr std::uint32_t threshold_count_increment(Score gain) noexcept {
+  std::uint32_t increment = 0;
+  for (std::size_t index = 0; index < kGainThresholds.size(); ++index) {
+    increment |= static_cast<std::uint32_t>(gain >= kGainThresholds[index])
+                 << (index * kPackedCountLaneBits);
+  }
+  return increment;
+}
+
 [[nodiscard]] GainEvaluation evaluate_gains(const Position& position, Bitboard legal_moves,
                                             int empty_count) noexcept {
   assert(empty_count > 2);
-  std::array<Score, kCellCount> own_gains{};
-  std::array<Score, kCellCount> opponent_gains{};
   std::array<Score, 4> own_top{};
   std::array<Score, 4> opponent_top{};
-  std::array<std::int64_t, 4> own_counts{};
-  std::array<std::int64_t, 4> opponent_counts{};
-  constexpr std::array<Score, 4> kThresholds{{2, 4, 8, 16}};
+  std::uint32_t own_counts = 0;
+  std::uint32_t opponent_counts = 0;
 
   const Player player = position.side_to_move();
+  int best_own_index = -1;
+  Bitboard best_own_moves = 0;
   int opponent_best_index = -1;
-  int opponent_best_count = 0;
+  Score own_gain_at_opponent_best = 0;
+  Bitboard opponent_best_moves = 0;
   Bitboard moves = legal_moves;
   while (moves != 0) {
     const int move_index = std::countr_zero(moves);
@@ -157,51 +238,38 @@ struct GainEvaluation {
     const ScoreByPlayer gains = position.score_gains_unchecked(move_index);
     const Score own = player == Player::kOne ? gains.player_one : gains.player_two;
     const Score reply = player == Player::kOne ? gains.player_two : gains.player_one;
-    own_gains[static_cast<std::size_t>(move_index)] = own;
-    opponent_gains[static_cast<std::size_t>(move_index)] = reply;
+    const Bitboard move = Bitboard{1} << move_index;
+
+    if (own > own_top[0]) {
+      best_own_index = move_index;
+      best_own_moves = move;
+    } else if (own == own_top[0]) {
+      best_own_moves |= move;
+    }
+    if (reply > opponent_top[0]) {
+      opponent_best_index = move_index;
+      own_gain_at_opponent_best = own;
+      opponent_best_moves = move;
+    } else if (reply == opponent_top[0]) {
+      opponent_best_moves |= move;
+    }
+
     insert_descending(own_top, own);
     insert_descending(opponent_top, reply);
-    for (std::size_t threshold = 0; threshold < kThresholds.size(); ++threshold) {
-      own_counts[threshold] += own >= kThresholds[threshold] ? 1 : 0;
-      opponent_counts[threshold] += reply >= kThresholds[threshold] ? 1 : 0;
-    }
+    own_counts += threshold_count_increment(own);
+    opponent_counts += threshold_count_increment(reply);
   }
 
-  moves = legal_moves;
-  bool contested_best = false;
-  while (moves != 0) {
-    const int move_index = std::countr_zero(moves);
-    moves &= moves - Bitboard{1};
-    const std::size_t index = static_cast<std::size_t>(move_index);
-    if (opponent_gains[index] == opponent_top[0]) {
-      opponent_best_index = move_index;
-      ++opponent_best_count;
-    }
-    contested_best = contested_best ||
-                     (own_gains[index] == own_top[0] && opponent_gains[index] == opponent_top[0]);
-  }
-
-  const bool unique_opponent_best = opponent_best_count == 1;
-  Score best_pair_value = std::numeric_limits<Score>::lowest();
-  Score selected_reply = opponent_top[0];
-  moves = legal_moves;
-  while (moves != 0) {
-    const int move_index = std::countr_zero(moves);
-    moves &= moves - Bitboard{1};
-    const std::size_t index = static_cast<std::size_t>(move_index);
-    const Score reply = unique_opponent_best && move_index == opponent_best_index ? opponent_top[1]
-                                                                                  : opponent_top[0];
-    const Score candidate = own_gains[index] - reply;
-    if (candidate > best_pair_value) {
-      best_pair_value = candidate;
-      selected_reply = reply;
-    } else if (candidate == best_pair_value) {
-      // A row-major tie-break would make the denial feature orientation dependent. Choosing the
-      // largest reply is equivalent to the minimum denial among all closure-optimal squares and
-      // is D4 invariant.
-      selected_reply = std::max(selected_reply, reply);
-    }
-  }
+  const bool contested_best = (best_own_moves & opponent_best_moves) != 0;
+  const bool unique_opponent_best = std::has_single_bit(opponent_best_moves);
+  const Score best_other_own_gain = best_own_index == opponent_best_index ? own_top[1] : own_top[0];
+  const Score opponent_best_candidate = own_gain_at_opponent_best - opponent_top[1];
+  const Score other_candidate = best_other_own_gain - opponent_top[0];
+  const bool select_opponent_best = opponent_best_candidate > other_candidate;
+  const Score best_pair_value = select_opponent_best ? opponent_best_candidate : other_candidate;
+  // On equal closure values, selecting the larger reply minimizes denial and preserves D4
+  // invariance. The ordinary candidate always has the largest reply gain.
+  const Score selected_reply = select_opponent_best ? opponent_top[1] : opponent_top[0];
 
   GainEvaluation result{
       .closure_value = evaluate(position) + 2 * best_pair_value,
@@ -213,11 +281,13 @@ struct GainEvaluation {
   for (const Score value : opponent_top) {
     result.features[feature++] = value;
   }
-  for (const std::int64_t value : own_counts) {
-    result.features[feature++] = value;
+  for (std::size_t threshold = 0; threshold < kGainThresholds.size(); ++threshold) {
+    result.features[feature++] =
+        (own_counts >> (threshold * kPackedCountLaneBits)) & kPackedCountLaneMask;
   }
-  for (const std::int64_t value : opponent_counts) {
-    result.features[feature++] = value;
+  for (std::size_t threshold = 0; threshold < kGainThresholds.size(); ++threshold) {
+    result.features[feature++] =
+        (opponent_counts >> (threshold * kPackedCountLaneBits)) & kPackedCountLaneMask;
   }
   result.features[feature++] = contested_best ? 1 : 0;
   result.features[feature++] = unique_opponent_best ? 1 : 0;
@@ -255,29 +325,20 @@ template <std::size_t KnotCount>
 
 [[nodiscard]] std::int64_t line_residual(const Position& position) noexcept {
   std::array<std::int64_t, frozen_pattern_gain_model::kLineKnots.size()> sums{};
+  const Player own = position.side_to_move();
   const Bitboard player_one = position.board().bits(Player::kOne);
   const Bitboard player_two = position.board().bits(Player::kTwo);
-  const Player side_to_move = position.side_to_move();
-
-  for (const ScoringLine& line : kScoringLines) {
-    std::uint16_t code = 0;
-    std::uint16_t place = 1;
-    for (std::uint8_t offset = 0; offset < line.length; ++offset) {
-      const Bitboard bit = Bitboard{1} << line.cells[offset];
-      std::uint16_t digit = 0;
-      if ((player_one & bit) != 0) {
-        digit = side_to_move == Player::kOne ? 1 : 2;
-      } else if ((player_two & bit) != 0) {
-        digit = side_to_move == Player::kTwo ? 1 : 2;
-      }
-      code = static_cast<std::uint16_t>(code + digit * place);
-      place = static_cast<std::uint16_t>(place * 3);
-    }
-    const std::size_t pattern = kPatternOffsets[line.length] + code;
-    const std::size_t orbit = kRawToReversalOrbit[pattern];
+  const Bitboard own_pieces = own == Player::kOne ? player_one : player_two;
+  const Bitboard opponent_pieces = own == Player::kOne ? player_two : player_one;
+  std::array<std::uint16_t, kScoringLineCount> codes{};
+  accumulate_line_codes<1>(codes, own_pieces);
+  accumulate_line_codes<2>(codes, opponent_pieces);
+  for (std::size_t line_index = 0; line_index < kScoringLines.size(); ++line_index) {
+    const ScoringLine& line = kScoringLines[line_index];
+    const std::size_t pattern = kPatternOffsets[line.length] + codes[line_index];
+    const auto& weights = kRawLineWeights[pattern];
     for (std::size_t knot = 0; knot < sums.size(); ++knot) {
-      sums[knot] += frozen_pattern_gain_model::kLineWeights
-          [knot * frozen_pattern_gain_model::kReversalOrbitCount + orbit];
+      sums[knot] += weights[knot];
     }
   }
   return interpolate(sums, frozen_pattern_gain_model::kLineKnots, position.ply());
