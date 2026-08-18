@@ -38,6 +38,7 @@ target_link_libraries(poe2_engine_stdio_tests
 
 add_executable(poe2_minimax_tests
   minimax_evaluation_test.cpp
+  minimax_feature_data_test.cpp
   minimax_labeling_test.cpp
   minimax_options_test.cpp
   minimax_position_source_test.cpp
@@ -105,6 +106,20 @@ add_test(
           -P ${PROJECT_SOURCE_DIR}/tests/minimax_position_source_test.cmake
 )
 set_tests_properties(minimax_position_source_reproducible PROPERTIES TIMEOUT 30)
+
+add_test(
+  NAME minimax_feature_data_reproducible
+  COMMAND ${CMAKE_COMMAND}
+          -DMINIMAX_DATA=$<TARGET_FILE:poe2_minimax_data>
+          -DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/minimax-feature-data-test
+          -DPYTHON=${Python3_EXECUTABLE}
+          -DSOURCE_AUDITOR=${PROJECT_SOURCE_DIR}/tools/inspect_position_source.py
+          -DLABEL_AUDITOR=${PROJECT_SOURCE_DIR}/tools/inspect_minimax_labels.py
+          -DCORPUS_PREFLIGHT=${PROJECT_SOURCE_DIR}/tools/preflight_minimax_corpus.py
+          -DFEATURE_AUDITOR=${PROJECT_SOURCE_DIR}/tools/inspect_minimax_features.py
+          -P ${PROJECT_SOURCE_DIR}/tests/minimax_feature_data_test.cmake
+)
+set_tests_properties(minimax_feature_data_reproducible PROPERTIES TIMEOUT 60)
 
 add_test(
   NAME minimax_label_auditor_golden

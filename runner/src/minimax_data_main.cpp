@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "poe2/match_runner.hpp"
+#include "poe2/minimax/feature_data.hpp"
 #include "poe2/minimax/labeling.hpp"
 #include "poe2/minimax/position_source.hpp"
 #include "poe2/move.hpp"
@@ -22,6 +23,7 @@ namespace {
 
 namespace fs = std::filesystem;
 namespace labeling = poe2::minimax::labeling;
+namespace feature_data = poe2::minimax::feature_data;
 namespace position_source = poe2::minimax::position_source;
 
 struct LabelCommandOptions {
@@ -48,6 +50,12 @@ struct SourceCommandOptions {
   bool has_seed = false;
 };
 
+struct FeatureCommandOptions {
+  fs::path source_directory;
+  fs::path label_directory;
+  fs::path output_directory;
+};
+
 void print_usage(std::ostream& output) {
   output << "usage:\n"
          << "  poe2_minimax_data source --output-dir <directory> --corpus-id <id>\n"
@@ -60,12 +68,46 @@ void print_usage(std::ostream& output) {
          << "                            [--opponent-weight <n>] [--search-weight <n>]\n"
          << "                            [--progress-every <n>]\n"
          << "\n"
+         << "  poe2_minimax_data features --source <position-source-directory>\n"
+         << "                              --labels <label-corpus-directory>\n"
+         << "                              --output-dir <directory>\n"
+         << "\n"
          << "  poe2_minimax_data labels --input <opening-book-or-source-corpus>\n"
          << "                            --output-dir <directory> --mode exact|teacher\n"
          << "                            --nodes <n> [--hash-mb <n>] [--workers <n>]\n"
          << "                            [--corpus-id <id>] [--source-shard <zero-based>]\n"
          << "                            [--shard-index <zero-based>] [--shard-count <n>]\n"
          << "                            [--progress-every <n>] [--require-all]\n";
+}
+
+[[nodiscard]] FeatureCommandOptions parse_feature_options(int argc, char* argv[]) {
+  FeatureCommandOptions options;
+  for (int index = 2; index < argc; ++index) {
+    const std::string_view argument{argv[index]};
+    if (index + 1 >= argc) {
+      throw std::invalid_argument{"missing value for " + std::string{argument}};
+    }
+    const std::string_view value{argv[++index]};
+    if (argument == "--source") {
+      options.source_directory = value;
+    } else if (argument == "--labels") {
+      options.label_directory = value;
+    } else if (argument == "--output-dir") {
+      options.output_directory = value;
+    } else {
+      throw std::invalid_argument{"unknown argument: " + std::string{argument}};
+    }
+  }
+  if (options.source_directory.empty()) {
+    throw std::invalid_argument{"missing --source"};
+  }
+  if (options.label_directory.empty()) {
+    throw std::invalid_argument{"missing --labels"};
+  }
+  if (options.output_directory.empty()) {
+    throw std::invalid_argument{"missing --output-dir"};
+  }
+  return options;
 }
 
 [[nodiscard]] std::optional<std::uint64_t> parse_u64(std::string_view text) {
@@ -381,6 +423,19 @@ int run_source(const SourceCommandOptions& options) {
   return 0;
 }
 
+int run_features(const FeatureCommandOptions& options) {
+  const feature_data::FeatureDataset dataset =
+      feature_data::build_feature_dataset(options.source_directory, options.label_directory);
+  feature_data::write_feature_dataset(options.output_directory, dataset);
+  std::cout << "feature_dataset source_records=" << dataset.source_record_count
+            << " records=" << dataset.records.size()
+            << " duplicates=" << dataset.duplicate_record_count
+            << " duplicate_groups=" << dataset.duplicate_group_count
+            << " varying_label_groups=" << dataset.varying_label_group_count
+            << " output_dir=" << options.output_directory.string() << '\n';
+  return 0;
+}
+
 int run(int argc, char* argv[]) {
   if (argc == 2 && std::string_view{argv[1]} == "--help") {
     print_usage(std::cout);
@@ -396,7 +451,10 @@ int run(int argc, char* argv[]) {
   if (command == "source") {
     return run_source(parse_source_options(argc, argv));
   }
-  throw std::invalid_argument{"expected source or labels subcommand"};
+  if (command == "features") {
+    return run_features(parse_feature_options(argc, argv));
+  }
+  throw std::invalid_argument{"expected source, labels, or features subcommand"};
 }
 
 }  // namespace

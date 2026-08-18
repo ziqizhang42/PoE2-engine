@@ -1,6 +1,6 @@
 # Deterministic Minimax Labels
 
-`poe2_minimax_data` turns a completed deterministic position source, or a validated opening book, into reproducible minimax labels. It is the data boundary between the production B evaluator/search and future offline evaluation experiments. Position generation and model training are deliberately separate. See [Deterministic Position Sources](position-source.md) for the preferred metadata-aware input.
+`poe2_minimax_data` turns a completed deterministic position source, or a validated opening book, into reproducible minimax labels. It is the data boundary between the production B evaluator/search and future offline evaluation experiments. Position generation and model training are deliberately separate. See [Deterministic Position Sources](position-source.md) for the preferred metadata-aware input and [Deterministic Minimax Feature Data](feature-data.md) for corpus-wide preflight, deduplication, and primitive feature export.
 
 ## Build and run
 
