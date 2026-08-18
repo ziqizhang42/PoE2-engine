@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import { readFile, stat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const [loaderPath, packagePath, wasmPath] = process.argv.slice(2);
+const [loaderPath, packagePath, wasmPath, expectedVersion] = process.argv.slice(2);
 assert(loaderPath, "loader path is required");
 assert(packagePath, "package path is required");
 assert(wasmPath, "WASM path is required");
+assert(expectedVersion, "expected version is required");
 
 const packageMetadata = JSON.parse(await readFile(packagePath, "utf8"));
 assert.equal(packageMetadata.name, "@poe2/engine-wasm");
-assert.equal(packageMetadata.version, "0.1.0");
+assert.equal(packageMetadata.version, expectedVersion);
 assert((await stat(wasmPath)).size > 0, "WASM asset must not be empty");
 
 const { default: createEngine } = await import(pathToFileURL(loaderPath).href);

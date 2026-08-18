@@ -52,7 +52,7 @@ void require_aliases(const poe2::wasm::AnalysisSuccess& success) {
 TEST_CASE("WASM adapter exposes stable versions and a 16 MiB hash", "[wasm][adapter]") {
   const poe2::wasm::Analyzer analyzer;
 
-  REQUIRE(poe2::wasm::engine_version() == "0.1.0");
+  REQUIRE(poe2::wasm::engine_version() == POE2_PROJECT_VERSION);
   REQUIRE(poe2::wasm::kApiVersion == 1);
   REQUIRE(analyzer.hash_storage_bytes() == 16 * poe2::minimax::kMebibyte);
 }

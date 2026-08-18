@@ -28,7 +28,9 @@ make tidy-fix
 make fix
 make git-build PRESET=release
 make git-test PRESET=release
+make training-test
 make wasm-test
+make release-verify
 make eval-smoke BASE=<baseline-build-id> NEW_ENGINE=<name> BASE_ENGINE=<name> PRESET=release
 make eval-gate BASE=<baseline-build-id> NEW_ENGINE=<name> BASE_ENGINE=<name> PRESET=release
 make clean

@@ -99,5 +99,6 @@ if(BUILD_TESTING)
       ${POE2_WASM_PACKAGE_DIR}/index.mjs
       ${POE2_WASM_PACKAGE_DIR}/package.json
       ${POE2_WASM_PACKAGE_DIR}/poe2-engine.wasm
+      ${PROJECT_VERSION}
   )
 endif()

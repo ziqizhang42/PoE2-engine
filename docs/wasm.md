@@ -17,6 +17,8 @@ Source `emsdk_env.sh` in every shell that configures or builds the preset.
 
 ## Build and Install
 
+For a local development build with an installed SDK:
+
 ```bash
 cd /path/to/PoE2-engine
 cmake --preset wasm-release
@@ -29,6 +31,14 @@ The generated npm package is `build/wasm-release/package`; install it from the f
 ```bash
 npm install /path/to/PoE2-engine/build/wasm-release/package
 ```
+
+For the reproducible release package, Docker supplies the pinned SDK and Node.js:
+
+```bash
+make release-package
+```
+
+This runs the WebAssembly smoke test and writes the npm tarball and its checksum under `build/dist/v<version>/`. It does not publish an image or package. See [Releasing](releasing.md) for the full release checklist.
 
 ## Use
 

@@ -37,25 +37,13 @@ jobs:
         run: make check
 
   wasm:
-    name: Browser WebAssembly
+    name: Browser WebAssembly Package
     runs-on: ubuntu-24.04
-    container: emscripten/emsdk:6.0.6
     timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install Ninja
-        run: |
-          apt-get update
-          apt-get install --yes ninja-build
-
-      - name: Configure
-        run: cmake --preset wasm-release
-
-      - name: Build
-        run: cmake --build --preset wasm-release
-
-      - name: Test
-        run: ctest --preset wasm-release
+      - name: Build, test, and pack
+        run: make release-package DIST_DIR=build/dist/ci

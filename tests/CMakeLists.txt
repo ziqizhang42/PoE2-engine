@@ -53,6 +53,11 @@ target_link_libraries(poe2_minimax_tests
     Catch2::Catch2WithMain
 )
 
+target_compile_definitions(poe2_minimax_tests
+  PRIVATE
+    POE2_PROJECT_VERSION="${PROJECT_VERSION}"
+)
+
 add_executable(poe2_match_runner_tests
   match_runner_test.cpp
 )

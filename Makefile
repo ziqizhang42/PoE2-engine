@@ -1,6 +1,9 @@
 .DEFAULT_GOAL := check
 
 PRESET ?= debug
+PROJECT_VERSION = $(shell awk '$$1 == "VERSION" { print $$2; exit }' CMakeLists.txt)
+EMSCRIPTEN_VERSION = $(shell sed -n '1p' .emscripten-version)
+DIST_DIR ?= build/dist/v$(PROJECT_VERSION)
 GIT_COMMIT_COUNT = $(shell git rev-list --count HEAD)
 GIT_COMMIT = $(shell git rev-parse --short=12 HEAD)
 GIT_BUILD_ID = $(shell printf "%06d-%s" $(GIT_COMMIT_COUNT) $(GIT_COMMIT))
@@ -23,7 +26,7 @@ SEQUENTIAL_ALT ?= 20
 SEQUENTIAL_ALPHA ?= 0.05
 SEQUENTIAL_BETA ?= 0.05
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
+.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release release-package release-verify training-test wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
 
 configure:
 	cmake --preset $(PRESET)
@@ -71,6 +74,25 @@ debug:
 
 release:
 	$(MAKE) check PRESET=release
+
+release-package:
+	docker buildx build \
+	  --progress=plain \
+	  --file docker/wasm-release.Dockerfile \
+	  --build-arg EMSCRIPTEN_VERSION=$(EMSCRIPTEN_VERSION) \
+	  --target release-artifacts \
+	  --output type=local,dest=$(DIST_DIR) \
+	  .
+	cd $(DIST_DIR) && sha256sum --check SHA256SUMS
+
+release-verify:
+	$(MAKE) full-check
+	$(MAKE) training-test
+	$(MAKE) release-package
+
+training-test:
+	cd training/minimax && uv lock --check
+	cd training/minimax && uv run --frozen python -m unittest discover -s tests -v
 
 wasm-configure:
 	cmake --preset wasm-release

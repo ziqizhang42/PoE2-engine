@@ -1,0 +1,14 @@
+**
+!CMakeLists.txt
+!CMakePresets.json
+!.emscripten-version
+!cmake/
+!cmake/**
+!docker/
+!docker/wasm-release.Dockerfile
+!engines/
+!engines/**
+!game/
+!game/**
+!wasm/
+!wasm/**
