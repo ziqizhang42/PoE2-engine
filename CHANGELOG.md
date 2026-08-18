@@ -32,6 +32,8 @@ The selected combined model has 5,293 parameters and uses the checkpoint from st
 
 On the sealed test, the combined float model reduced MAE by 73.84% versus two-ply closure and by 36.88% versus the gain-summary control.
 
+In a paired 100 ms/move gate against the `v0.1` engine baseline (`000053-96a4b598a45e`), the `v0.2` candidate (`000072-1f8162e8fd16`) scored 91.7% (77–7 over 84 games from 42 side-swapped openings). The 95% paired confidence sequence was 78.9%–98.2%, and the normalized-Elo GSPRT stopped with `accept_alt`.
+
 ## 0.1.0 - 2026-08-13
 
 - Add the browser WebAssembly engine package.
