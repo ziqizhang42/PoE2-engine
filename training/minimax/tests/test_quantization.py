@@ -10,6 +10,62 @@ from fixture import FixtureRecord, write_feature_fixture
 
 @unittest.skipUnless(importlib.util.find_spec("numpy"), "NumPy is not installed")
 class PatternQuantizationTest(unittest.TestCase):
+    def test_frozen_model_uses_engine_scale_instead_of_validation_tie_break(self) -> None:
+        import numpy as np
+
+        from poe2_training.dataset import NumpyFeatureBatch
+        from poe2_training.pattern_experiment import (
+            FROZEN_PATTERN_GAIN_MODEL_ID,
+            GAIN_KNOTS,
+            _quantization_report,
+        )
+
+        records = 2
+        zeros = np.zeros(records, dtype=np.int64)
+        batch = NumpyFeatureBatch(
+            indices=np.arange(records),
+            line_patterns=np.zeros((records, 36), dtype=np.uint16),
+            own_gains=np.ones((records, 49), dtype=np.int16),
+            opponent_gains=np.ones((records, 49), dtype=np.int16),
+            teacher_values=np.asarray((1, -1), dtype=np.int32),
+            two_ply_closure_values=np.zeros(records, dtype=np.int32),
+            residuals=np.asarray((1, -1), dtype=np.int32),
+            plys=np.asarray((0, 49), dtype=np.uint8),
+            completed_depths=zeros,
+            deepest_completed_depths=zeros,
+            terminal_depths=zeros,
+            flags=np.asarray((1, 0), dtype=np.uint8),
+            duplicate_counts=zeros,
+            family_ids=zeros,
+            trajectory_ids=zeros,
+            parent_ids=zeros,
+        )
+        metadata = {
+            "line_center": np.zeros(1716).tolist(),
+            "line_scale": np.ones(1716).tolist(),
+            "gain_center": np.zeros(19).tolist(),
+            "gain_scale": np.ones(19).tolist(),
+        }
+        model = {
+            "name": FROZEN_PATTERN_GAIN_MODEL_ID,
+            "config": {"line_knots": [0, 28, 49], "gain_knots": list(GAIN_KNOTS)},
+            "phase_weights": np.zeros(50).tolist(),
+            "line_weights": np.zeros((3, 1716)).tolist(),
+            "gain_weights": np.zeros((5, 19)).tolist(),
+        }
+
+        frozen = _quantization_report(batch, metadata, model, np.zeros(records))
+        self.assertEqual(frozen["selection"], "fixed_scale_32_engine_contract")
+        self.assertEqual(frozen["fractional_bits"], 5)
+        self.assertEqual(frozen["scale"], 32)
+
+        exploratory = _quantization_report(
+            batch, metadata, {**model, "name": "exploratory"}, np.zeros(records))
+        self.assertEqual(
+            exploratory["selection"],
+            "validation_mae_then_rmse_then_fractional_bits")
+        self.assertEqual(exploratory["fractional_bits"], 4)
+
     def test_folded_and_quantized_lookup_predictions(self) -> None:
         import numpy as np
 

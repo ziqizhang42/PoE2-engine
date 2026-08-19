@@ -49,6 +49,8 @@ SCHEMA = "poe2-minimax-pattern-experiment"
 SCHEMA_VERSION = 1
 COMPLETE_HEADER = SCHEMA
 GAIN_KNOTS = (0, 12, 24, 36, 49)
+FROZEN_PATTERN_GAIN_MODEL_ID = "frozen_c_line_0_28_49_gain_phase_5_huber8"
+FROZEN_PATTERN_GAIN_FRACTIONAL_BITS = 5
 
 
 class PatternExperimentError(ValueError):
@@ -129,7 +131,7 @@ def frozen_pattern_gain_suite() -> tuple[ModelConfig, ...]:
     """Return the architecture selected on the development corpus."""
     return (ModelConfig(
         # Immutable identifier embedded in the already-authenticated training report.
-        name="frozen_c_line_0_28_49_gain_phase_5_huber8",
+        name=FROZEN_PATTERN_GAIN_MODEL_ID,
         line_knots=(0, 28, 49),
         gain_knots=GAIN_KNOTS,
         loss="huber",
@@ -421,11 +423,22 @@ def _quantization_report(
             metrics,
         ))
     _require(bool(candidates), "no fixed-point scale fits the pattern tables")
-    candidates.sort(key=lambda candidate: candidate[0])
-    _, selected, selected_metrics = candidates[0]
+    if model.get("name") == FROZEN_PATTERN_GAIN_MODEL_ID:
+        deployment = [
+            candidate for candidate in candidates
+            if candidate[1].fractional_bits == FROZEN_PATTERN_GAIN_FRACTIONAL_BITS
+        ]
+        _require(len(deployment) == 1,
+                 "frozen pattern/gain model does not fit the deployment scale")
+        _, selected, selected_metrics = deployment[0]
+        selection = "fixed_scale_32_engine_contract"
+    else:
+        candidates.sort(key=lambda candidate: candidate[0])
+        _, selected, selected_metrics = candidates[0]
+        selection = "validation_mae_then_rmse_then_fractional_bits"
     return {
         "definition": "int16-tables-int32-intercept-power-of-two-v1",
-        "selection": "validation_mae_then_rmse_then_fractional_bits",
+        "selection": selection,
         "folded_maximum_absolute_difference": maximum_difference,
         "path": path,
         "fractional_bits": selected.fractional_bits,

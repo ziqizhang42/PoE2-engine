@@ -1,8 +1,8 @@
 schema_version = 1
 
 [run]
-name = "pattern-pilot-v1"
-output_dir = "build/training-runs/pattern-pilot-v1"
+name = "pattern-pilot-v2"
+output_dir = "build/training-runs/pattern-pilot-v2"
 build_preset = "release"
 
 [datasets.development]

@@ -12,7 +12,10 @@ from typing import Any, Callable
 from .artifact import FeatureArtifact, open_feature_artifact
 from .baseline import open_baseline_report
 from .pattern_evaluation import open_pattern_evaluation
-from .pattern_experiment import open_pattern_report
+from .pattern_experiment import (
+    FROZEN_PATTERN_GAIN_FRACTIONAL_BITS,
+    open_pattern_report,
+)
 from .pattern_suites import pattern_suite
 from .shared import open_json_report, sha256_file
 from .workflow_config import (
@@ -450,6 +453,11 @@ def authenticate_training(dataset: DatasetConfig,
     if iteration.candidate_validation is not None:
         _require(isinstance(quantized_validation, dict),
                  "candidate training report has no quantized validation metrics")
+        _require(quantization.get("fractional_bits") ==
+                 FROZEN_PATTERN_GAIN_FRACTIONAL_BITS and
+                 quantization.get("scale") ==
+                 1 << FROZEN_PATTERN_GAIN_FRACTIONAL_BITS,
+                 "candidate training report does not use deployment scale-32 quantization")
     return {
         "report_sha256": sha256_file(iteration.training_directory / "report.json"),
         "kind": training.type, "selected_model": selected.get("name"),

@@ -8,6 +8,8 @@ import unittest
 class PatternRepresentationTest(unittest.TestCase):
     def test_frozen_pattern_gain_suite_matches_the_development_selection(self) -> None:
         from poe2_training.pattern_experiment import (
+            FROZEN_PATTERN_GAIN_FRACTIONAL_BITS,
+            FROZEN_PATTERN_GAIN_MODEL_ID,
             GAIN_KNOTS,
             frozen_pattern_gain_suite,
             line_pattern_audit_suite,
@@ -15,6 +17,8 @@ class PatternRepresentationTest(unittest.TestCase):
 
         configs = frozen_pattern_gain_suite()
         self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0].name, FROZEN_PATTERN_GAIN_MODEL_ID)
+        self.assertEqual(FROZEN_PATTERN_GAIN_FRACTIONAL_BITS, 5)
         self.assertEqual(configs[0].line_knots, (0, 28, 49))
         self.assertEqual(configs[0].gain_knots, GAIN_KNOTS)
         self.assertEqual(configs[0].loss, "huber")

@@ -126,7 +126,7 @@ search_positions = 32
 search_movetime_ms = 100
 ```
 
-Candidate validation builds isolated inference, engine, and runner binaries; checks Python/C++ and D4 parity; and records benchmarks, digests, logs, resources, and separate float and exported-quantized metrics.
+Candidate validation builds isolated inference, engine, and runner binaries; checks Python/C++ and D4 parity; and records benchmarks, digests, logs, resources, and separate float and exported-quantized metrics. The deployable frozen suite fixes its quantization at the engine's scale-32 contract before sealed evaluation.
 
 Add the gate only after the candidate header has been reviewed, installed, and committed:
 

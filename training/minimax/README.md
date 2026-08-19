@@ -74,7 +74,7 @@ The pattern experiment fits reversal-tied ternary scoring-line tables to the sam
 
 The integrated `pattern-gain` evaluator is closure plus one frozen learned residual. Its inputs are the 36 board scoring lines encoded as own/opponent/empty ternary patterns, and 19 cheap summaries of legal-move gains: each side's top four gains, four threshold counts per side, contested-best and unique-opponent-best flags, and denied opponent gain. Line weights interpolate across plies 0/28/49; gain-summary weights interpolate across plies 0/12/24/36/49; a per-ply intercept completes the model.
 
-Each trained model also folds the training standardization into raw lookup weights and selects an int16 fixed-point scale on validation data. The selected integer tables and per-ply int32 intercept are stored in the authenticated report. The test split remains excluded from training, checkpoint selection, quantization selection, and reported metrics.
+Each trained model also folds the training standardization into raw lookup weights and quantizes int16 tables plus a per-ply int32 intercept. Exploratory suites select a fixed-point scale on validation data; the deployable `frozen-pattern-gain` suite fixes scale 32 to match the engine contract before sealed evaluation. The test split remains excluded from training, checkpoint selection, quantization decisions, and reported metrics.
 
 From `training/minimax`, train the frozen model with:
 
