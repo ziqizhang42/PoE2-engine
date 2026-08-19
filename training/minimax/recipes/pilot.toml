@@ -1,15 +1,16 @@
 schema_version = 1
 
 [run]
-name = "pattern-pilot-v2"
-output_dir = "build/training-runs/pattern-pilot-v2"
+name = "pilot"
+output_dir = "build/training-runs/pilot"
 build_preset = "release"
 
-[datasets.development]
+# Small corpus used to compare model shapes.
+[datasets.selection]
 kind = "managed"
 
-[datasets.development.source]
-corpus_id = "poe2-pattern-pilot-development-v1"
+[datasets.selection.source]
+corpus_id = "poe2-pilot-selection"
 seed = 20260817
 trajectories = 1000
 samples_per_trajectory = 8
@@ -24,7 +25,7 @@ opponent_weight = 20
 search_weight = 30
 progress_every = 100
 
-[datasets.development.labels]
+[datasets.selection.labels]
 mode = "teacher"
 nodes = 100000
 hash_mb = 16
@@ -32,11 +33,12 @@ workers = 6
 progress_every = 100
 require_all = true
 
-[datasets.frozen]
+# Independent corpus used to train and evaluate the chosen shape.
+[datasets.final]
 kind = "managed"
 
-[datasets.frozen.source]
-corpus_id = "poe2-pattern-pilot-frozen-v1"
+[datasets.final.source]
+corpus_id = "poe2-pilot-final"
 seed = 20260818
 trajectories = 2000
 samples_per_trajectory = 8
@@ -51,7 +53,7 @@ opponent_weight = 20
 search_weight = 30
 progress_every = 100
 
-[datasets.frozen.labels]
+[datasets.final.labels]
 mode = "teacher"
 nodes = 100000
 hash_mb = 16
@@ -59,9 +61,10 @@ workers = 6
 progress_every = 100
 require_all = true
 
+# Choose the model shape using only the selection corpus.
 [[iterations]]
-name = "development-ladder"
-dataset = "development"
+name = "select-model"
+dataset = "selection"
 
 [iterations.training]
 type = "pattern"
@@ -69,10 +72,11 @@ device = "cuda"
 seed = 20260818
 suite = "default"
 
+# Train the chosen shape on the independent final corpus.
 [[iterations]]
-name = "frozen-pattern-gain"
-dataset = "frozen"
-depends_on = ["development-ladder"]
+name = "train-final-model"
+dataset = "final"
+depends_on = ["select-model"]
 
 [iterations.training]
 type = "pattern"
@@ -81,13 +85,13 @@ seed = 20260818
 suite = "frozen-pattern-gain"
 
 [iterations.sealed_evaluation]
-exclude_datasets = ["development"]
+exclude_datasets = ["selection"]
 
 [iterations.candidate_validation]
 promotable = false
 samples = 4096
 symmetry_samples = 512
 benchmark_iterations = 100
-opening_book = "eval/openings/development.txt"
+opening_book = "eval/openings/pilot.txt"
 search_positions = 32
 search_movetime_ms = 100
