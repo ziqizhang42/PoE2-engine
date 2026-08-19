@@ -17,7 +17,7 @@ make git-test PRESET=release
 The output path is ordered by commit count and abbreviated SHA:
 
 ```text
-build/by-commit/000015-d74d255e5cfd/release/
+build/by-commit/BUILD_ID/release/
 ```
 
 To build an older commit, switch to it from a clean tree, run `make git-test PRESET=release`, then switch back. The old artifact stays under `build/by-commit/`.
@@ -27,7 +27,7 @@ To build an older commit, switch to it from a clean tree, run `make git-test PRE
 Use a strength gate when a change may affect move choice or search behavior:
 
 ```bash
-make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy GAMES=2000
+make eval-gate BASE=BASE_BUILD_ID NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy GAMES=2000
 ```
 
 This target:
@@ -60,14 +60,14 @@ The gate uses a generalized sequential probability ratio test with normalized-El
 Adjust them at the command line:
 
 ```bash
-make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy \
+make eval-gate BASE=BASE_BUILD_ID NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy \
   GAMES=5000 WORKERS=8 GO_MOVETIME_MS=250 TIMEOUT_MS=1000 SEQUENTIAL_ALT=10
 ```
 
 Every eval run names both engine binaries explicitly:
 
 ```bash
-make eval-smoke BASE=build/by-commit/000015-d74d255e5cfd/release \
+make eval-smoke BASE=build/by-commit/BASE_BUILD_ID/release \
   NEW_ENGINE=poe2_greedy \
   BASE_ENGINE=poe2_random_legal \
   BASE_ENGINE_ARGS='--seed 1' \
@@ -126,9 +126,9 @@ For evaluation runs, one opening is selected for each adjacent side-swapped pair
 `BASE` can be a build id, a build directory, or an engine binary:
 
 ```bash
-make eval-gate BASE=000014-abcd1234 NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
-make eval-gate BASE=build/by-commit/000014-abcd1234/release NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
-make eval-gate BASE=build/by-commit/000014-abcd1234/release/engines/poe2_greedy NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
+make eval-gate BASE=BASE_BUILD_ID NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
+make eval-gate BASE=build/by-commit/BASE_BUILD_ID/release NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
+make eval-gate BASE=build/by-commit/BASE_BUILD_ID/release/engines/poe2_greedy NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
 ```
 
 ## Saved Runs
@@ -147,7 +147,11 @@ command.txt
 runner.log
 summary.json
 games.csv
+ledger-row.csv
 ```
+
+`ledger-row.csv` is a self-contained header and row for this run. It is retained even with
+`--no-ledger`, so a separately authenticated workflow can deliberately promote the result later.
 
 The committed master ledger is:
 
@@ -156,6 +160,8 @@ eval/results.csv
 ```
 
 It stores one summary row per evaluation run. Keep the raw logs in `build/eval/runs/`; they are intentionally not committed. Each row records both artifact identities as `new_id + new_engine + new_engine_args` and `base_id + base_engine + base_engine_args`.
+
+Native evaluation and workflow promotion serialize master-ledger updates through the same persistent `<ledger>.lock` sidecar and append-mode write protocol, so concurrent writers cannot overwrite or interleave rows.
 
 Every ledger row includes validity, sampling identity, the analysis version, statistical unit, pair-score counts, normalized-Elo estimate, GSPRT LLR and boundaries, betting diagnostics, and the final decision. Historical rows remain in their original order and are classified with their legacy model and score-rate units; unavailable fields remain blank. `summary.json` contains the complete analysis report, `manifest.json` records the resolved opening seed and book digest, and `games.csv` remains the raw source of truth.
 
@@ -168,9 +174,10 @@ Any timeout, disconnect, malformed or illegal move, protocol error, or startup f
 The Make targets call `poe2_runner eval`, but the runner can also be used directly:
 
 ```bash
-build/by-commit/000015-d74d255e5cfd/release/runner/poe2_runner eval \
-  --new-build build/by-commit/000015-d74d255e5cfd/release \
-  --base 000014-abcd1234 \
+NEW_BUILD=build/by-commit/NEW_BUILD_ID/release
+"$NEW_BUILD/runner/poe2_runner" eval \
+  --new-build "$NEW_BUILD" \
+  --base BASE_BUILD_ID \
   --new-engine poe2_greedy \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \

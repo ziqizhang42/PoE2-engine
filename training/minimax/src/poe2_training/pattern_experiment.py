@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import math
-import os
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,16 +11,14 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .baseline import (
+from .model_metrics import (
     DEFAULT_RIDGE_LAMBDAS,
-    _fit_ridge,
-    _git_provenance,
-    _metrics,
-    _model_comparison,
-    _runtime,
-    _source_digest,
+    fit_ridge,
+    model_comparison,
+    model_metrics,
 )
 from .dataset import MappedFeatureDataset, NumpyFeatureBatch
+from .pattern_suites import SUITE_NAMES, pattern_suite
 from .patterns import REVERSAL_ORBITS, line_pattern_counts, phase_basis
 from .quantization import (
     fold_pattern_model,
@@ -39,6 +34,14 @@ from .summaries import (
     phase_features,
     phase_interactions,
     phase_interpolation,
+)
+from .shared import (
+    complete_json_report,
+    git_provenance,
+    open_json_report,
+    reserve_report_directory,
+    runtime_provenance,
+    training_source_digest,
 )
 
 
@@ -160,71 +163,12 @@ def _require(condition: bool, message: str) -> None:
         raise PatternExperimentError(message)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as error:
-        raise PatternExperimentError(f"could not hash {path}: {error}") from error
-    return digest.hexdigest()
-
-
-def _reserve_output(directory: Path) -> None:
-    try:
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        directory.mkdir()
-        (directory / "INCOMPLETE").write_text(f"{SCHEMA}\n", encoding="utf-8")
-    except OSError as error:
-        raise PatternExperimentError(f"could not reserve {directory}: {error}") from error
-
-
-def _write_bytes(path: Path, contents: bytes) -> None:
-    with path.open("xb") as destination:
-        destination.write(contents)
-        destination.flush()
-        os.fsync(destination.fileno())
-
-
-def _complete_output(directory: Path, report: dict[str, Any]) -> None:
-    report_bytes = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
-    digest = hashlib.sha256(report_bytes).hexdigest()
-    try:
-        _write_bytes(directory / "report.json.tmp", report_bytes)
-        os.replace(directory / "report.json.tmp", directory / "report.json")
-        _write_bytes(
-            directory / "COMPLETE.tmp",
-            f"{COMPLETE_HEADER}\nreport_sha256={digest}\n".encode(),
-        )
-        os.replace(directory / "COMPLETE.tmp", directory / "COMPLETE")
-        (directory / "INCOMPLETE").unlink()
-    except OSError as error:
-        raise PatternExperimentError(f"could not complete {directory}: {error}") from error
-
-
 def open_pattern_report(directory: Path | str) -> dict[str, Any]:
     """Authenticate a completed pattern experiment report."""
-    root = Path(directory).resolve()
-    _require(root.is_dir(), f"pattern report directory does not exist: {root}")
-    _require(not (root / "INCOMPLETE").exists(), "pattern report is incomplete")
-    complete = root / "COMPLETE"
-    report_path = root / "report.json"
-    _require(complete.is_file() and report_path.is_file(), "pattern report is incomplete")
-    try:
-        lines = complete.read_text(encoding="utf-8").splitlines()
-        report = json.loads(report_path.read_bytes())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise PatternExperimentError(f"could not read pattern report: {error}") from error
-    _require(lines[:1] == [COMPLETE_HEADER] and len(lines) == 2,
-             "pattern COMPLETE marker is malformed")
-    name, separator, digest = lines[1].partition("=")
-    _require(name == "report_sha256" and bool(separator) and len(digest) == 64,
-             "pattern COMPLETE digest is malformed")
-    _require(_sha256(report_path) == digest, "pattern report digest differs from COMPLETE")
-    _require(isinstance(report, dict) and report.get("schema") == SCHEMA and
-             report.get("schema_version") == SCHEMA_VERSION,
-             "pattern report schema is unsupported")
+    report, _ = open_json_report(
+        directory, schema=SCHEMA, schema_version=SCHEMA_VERSION,
+        error_type=PatternExperimentError,
+    )
     return report
 
 
@@ -271,13 +215,14 @@ def _fit_gain_control(
     validation_design = np.ascontiguousarray(
         np.concatenate((validation_phase, validation_interactions), axis=1), dtype=np.float64
     )
-    fit = _fit_ridge(
+    fit = fit_ridge(
         train_design,
         np.asarray(train.residuals, dtype=np.float64),
         validation_design,
         np.asarray(validation.residuals, dtype=np.float64),
         ridge_lambdas,
         device,
+        error_type=PatternExperimentError,
     )
     model = {
         "name": "gain_summary_phase_5_control",
@@ -286,8 +231,10 @@ def _fit_gain_control(
         "selected_ridge_lambda": fit.selected_lambda,
         "ridge_path": list(fit.path),
         "weights": fit.weights.tolist(),
-        "train": _metrics(train, train_design @ fit.weights, 8),
-        "validation": _metrics(validation, validation_design @ fit.weights, 8),
+        "train": model_metrics(train, train_design @ fit.weights, 8,
+                               error_type=PatternExperimentError),
+        "validation": model_metrics(validation, validation_design @ fit.weights, 8,
+                                    error_type=PatternExperimentError),
     }
     return model, fit.weights.astype(np.float32)
 
@@ -457,7 +404,8 @@ def _quantization_report(
             path.append({"fractional_bits": fractional_bits, "status": "int16_overflow"})
             continue
         prediction = predict_quantized(validation, quantized)
-        metrics = _metrics(validation, prediction, 8)
+        metrics = model_metrics(validation, prediction, 8,
+                                error_type=PatternExperimentError)
         overall = metrics["overall"]
         entry = {
             "fractional_bits": fractional_bits,
@@ -513,7 +461,7 @@ def run_pattern_experiment(
 
     output = Path(output_directory).resolve()
     with MappedFeatureDataset(dataset_directory, verify_digest=True) as dataset:
-        _reserve_output(output)
+        reserve_report_directory(output, SCHEMA, error_type=PatternExperimentError)
         train = dataset.materialize("train")
         validation = dataset.materialize("validation")
         _require(train.records > 0 and validation.records > 0,
@@ -598,8 +546,10 @@ def run_pattern_experiment(
                 "line_weights": fit.line_weights.tolist(),
                 "gain_weights": fit.gain_weights.tolist() if fit.gain_weights is not None else None,
                 "trace": list(fit.trace),
-                "train": _metrics(train, fit.train_prediction, 8),
-                "validation": _metrics(validation, fit.validation_prediction, 8),
+                "train": model_metrics(train, fit.train_prediction, 8,
+                                       error_type=PatternExperimentError),
+                "validation": model_metrics(validation, fit.validation_prediction, 8,
+                                            error_type=PatternExperimentError),
             }
             model["quantization"] = _quantization_report(
                 validation, feature_metadata, model, fit.validation_prediction
@@ -648,9 +598,9 @@ def run_pattern_experiment(
             },
             "features": feature_metadata,
             "provenance": {
-                "training_source_sha256": _source_digest(),
-                "git": _git_provenance(),
-                "runtime": _runtime(torch, device),
+                "training_source_sha256": training_source_digest(),
+                "git": git_provenance(),
+                "runtime": runtime_provenance(torch, device),
             },
             "gain_control": gain_control,
             "models": models,
@@ -658,10 +608,10 @@ def run_pattern_experiment(
                 "best_model": best["name"],
                 "best_validation_mae": best["validation"]["overall"]["mae"],
                 "best_validation_rmse": best["validation"]["overall"]["rmse"],
-                "best_vs_gain_control": _model_comparison(gain_control, best),
+                "best_vs_gain_control": model_comparison(gain_control, best),
             },
         }
-        _complete_output(output, report)
+        complete_json_report(output, SCHEMA, report, error_type=PatternExperimentError)
         return report
 
 
@@ -674,15 +624,11 @@ def main() -> int:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--seed", type=int, default=20260818)
     parser.add_argument("--suite",
-                        choices=("default", "frozen-pattern-gain", "line-pattern-audit"),
+                        choices=SUITE_NAMES,
                         default="default",
                         help="model suite; frozen-pattern-gain is the selected architecture")
     arguments = parser.parse_args()
-    configs = {
-        "default": default_suite,
-        "frozen-pattern-gain": frozen_pattern_gain_suite,
-        "line-pattern-audit": line_pattern_audit_suite,
-    }[arguments.suite]()
+    configs = pattern_suite(arguments.suite)
     try:
         report = run_pattern_experiment(
             arguments.dataset,

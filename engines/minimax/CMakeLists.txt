@@ -8,9 +8,19 @@ add_library(poe2_minimax_engine STATIC
 
 add_library(poe2::minimax_engine ALIAS poe2_minimax_engine)
 
+configure_file(
+  src/model_header.hpp.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/model_header.hpp
+  @ONLY
+)
+
+target_sources(poe2_minimax_engine PRIVATE ${POE2_MINIMAX_MODEL_HEADER})
+
 target_include_directories(poe2_minimax_engine
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+  PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
 target_link_libraries(poe2_minimax_engine

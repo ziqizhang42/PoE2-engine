@@ -26,7 +26,10 @@ SEQUENTIAL_ALT ?= 20
 SEQUENTIAL_ALPHA ?= 0.05
 SEQUENTIAL_BETA ?= 0.05
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release release-package release-verify training-test wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
+.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release release-package release-verify training-test train-plan train-validate train-status train-run train-iteration wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
+
+TRAIN_CONFIG ?= training/minimax/recipes/pilot.toml
+TRAIN_ITERATION ?=
 
 configure:
 	cmake --preset $(PRESET)
@@ -93,6 +96,23 @@ release-verify:
 training-test:
 	cd training/minimax && uv lock --check
 	cd training/minimax && uv run --frozen python -m unittest discover -s tests -v
+
+train-plan:
+	cd training/minimax && uv run --frozen poe2-train plan --config $(abspath $(TRAIN_CONFIG))
+
+train-validate:
+	cd training/minimax && uv run --frozen poe2-train validate --config $(abspath $(TRAIN_CONFIG))
+
+train-status:
+	cd training/minimax && uv run --frozen poe2-train status --config $(abspath $(TRAIN_CONFIG))
+
+train-run:
+	cd training/minimax && uv run --frozen poe2-train run --config $(abspath $(TRAIN_CONFIG))
+
+train-iteration:
+	@test -n "$(TRAIN_ITERATION)" || \
+	  (echo "TRAIN_ITERATION=<name> is required" >&2; exit 1)
+	cd training/minimax && uv run --frozen poe2-train iteration --config $(abspath $(TRAIN_CONFIG)) $(TRAIN_ITERATION)
 
 wasm-configure:
 	cmake --preset wasm-release

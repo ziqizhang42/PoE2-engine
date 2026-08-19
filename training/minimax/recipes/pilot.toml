@@ -1,0 +1,93 @@
+schema_version = 1
+
+[run]
+name = "pattern-pilot-v1"
+output_dir = "build/training-runs/pattern-pilot-v1"
+build_preset = "release"
+
+[datasets.development]
+kind = "managed"
+
+[datasets.development.source]
+corpus_id = "poe2-pattern-pilot-development-v1"
+seed = 20260817
+trajectories = 1000
+samples_per_trajectory = 8
+shards = 4
+workers = 6
+search_nodes = 10000
+search_hash_mb = 16
+noise_percent = 15
+random_weight = 30
+greedy_weight = 20
+opponent_weight = 20
+search_weight = 30
+progress_every = 100
+
+[datasets.development.labels]
+mode = "teacher"
+nodes = 100000
+hash_mb = 16
+workers = 6
+progress_every = 100
+require_all = true
+
+[datasets.frozen]
+kind = "managed"
+
+[datasets.frozen.source]
+corpus_id = "poe2-pattern-pilot-frozen-v1"
+seed = 20260818
+trajectories = 2000
+samples_per_trajectory = 8
+shards = 8
+workers = 6
+search_nodes = 10000
+search_hash_mb = 16
+noise_percent = 15
+random_weight = 30
+greedy_weight = 20
+opponent_weight = 20
+search_weight = 30
+progress_every = 100
+
+[datasets.frozen.labels]
+mode = "teacher"
+nodes = 100000
+hash_mb = 16
+workers = 6
+progress_every = 100
+require_all = true
+
+[[iterations]]
+name = "development-ladder"
+dataset = "development"
+
+[iterations.training]
+type = "pattern"
+device = "cuda"
+seed = 20260818
+suite = "default"
+
+[[iterations]]
+name = "frozen-pattern-gain"
+dataset = "frozen"
+depends_on = ["development-ladder"]
+
+[iterations.training]
+type = "pattern"
+device = "cuda"
+seed = 20260818
+suite = "frozen-pattern-gain"
+
+[iterations.sealed_evaluation]
+exclude_datasets = ["development"]
+
+[iterations.candidate_validation]
+promotable = false
+samples = 4096
+symmetry_samples = 512
+benchmark_iterations = 100
+opening_book = "eval/openings/development.txt"
+search_positions = 32
+search_movetime_ms = 100

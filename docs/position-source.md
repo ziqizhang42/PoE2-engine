@@ -10,8 +10,8 @@ No source corpus is created by a build or test beyond small fixtures under the b
 cmake --build --preset release --target poe2_minimax_data
 
 build/release/runner/poe2_minimax_data source \
-  --output-dir artifacts/sources/pattern-pilot \
-  --corpus-id poe2-pattern-pilot \
+  --output-dir artifacts/sources/example-corpus \
+  --corpus-id poe2-example-corpus \
   --seed 20260817 \
   --trajectories 5000 \
   --samples-per-trajectory 8 \
@@ -26,7 +26,7 @@ build/release/runner/poe2_minimax_data source \
   --search-weight 30 \
   --progress-every 100
 
-python3 tools/inspect_position_source.py artifacts/sources/pattern-pilot
+python3 tools/inspect_position_source.py artifacts/sources/example-corpus
 ```
 
 The example values describe the planned policy mixture, not a requirement to launch that run. `--seed` is mandatory and may be zero. A trajectory owns an independent SplitMix64 stream with a specified rejection-based bounded sampler. Work scheduling therefore cannot affect its moves. Shards made with one worker and six workers contain identical bytes; the manifest records the requested worker count and therefore intentionally differs when that setting differs.
@@ -55,7 +55,7 @@ Exact duplicate records remain visible rather than being silently discarded. The
 The output directory is reserved before trajectory generation. Existing paths are refused. A failed or interrupted run remains visibly incomplete; readers reject it.
 
 ```text
-pattern-pilot/
+example-corpus/
   COMPLETE
   manifest.json
   shards/
@@ -74,9 +74,9 @@ Pass the completed source directory and a zero-based source shard. The corpus id
 
 ```bash
 build/release/runner/poe2_minimax_data labels \
-  --input artifacts/sources/pattern-pilot \
+  --input artifacts/sources/example-corpus \
   --source-shard 0 \
-  --output-dir artifacts/labels/pattern-pilot-000 \
+  --output-dir artifacts/labels/example-shard-000 \
   --mode teacher \
   --nodes 1000000 \
   --hash-mb 64 \

@@ -142,6 +142,17 @@ add_test(
           ${CMAKE_CURRENT_BINARY_DIR}/minimax-label-comparison-test
 )
 
+add_test(
+  NAME minimax_external_model_header_build
+  COMMAND ${CMAKE_COMMAND}
+          -DSOURCE_ROOT=${PROJECT_SOURCE_DIR}
+          -DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/minimax-external-model-header-test
+          -DGENERATOR=${CMAKE_GENERATOR}
+          -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+          -P ${PROJECT_SOURCE_DIR}/tests/minimax_external_model_header_test.cmake
+)
+set_tests_properties(minimax_external_model_header_build PROPERTIES TIMEOUT 120)
+
 add_custom_target(poe2_tests
   DEPENDS
     poe2_core_tests

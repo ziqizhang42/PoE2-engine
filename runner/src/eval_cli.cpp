@@ -1,11 +1,17 @@
 #include "eval_cli.hpp"
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -314,10 +320,55 @@ void create_parent_directories(const fs::path& path) {
   }
 }
 
+class LedgerFileLock {
+ public:
+  explicit LedgerFileLock(const fs::path& ledger_path) {
+    fs::path lock_path = ledger_path;
+    lock_path += ".lock";
+    descriptor_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+    if (descriptor_ < 0) {
+      throw std::runtime_error{"failed to open ledger lock " + lock_path.string() + ": " +
+                               std::strerror(errno)};
+    }
+    while (::flock(descriptor_, LOCK_EX) != 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      const int error = errno;
+      ::close(descriptor_);
+      descriptor_ = -1;
+      throw std::runtime_error{"failed to lock ledger " + ledger_path.string() + ": " +
+                               std::strerror(error)};
+    }
+  }
+
+  LedgerFileLock(const LedgerFileLock&) = delete;
+  LedgerFileLock& operator=(const LedgerFileLock&) = delete;
+
+  ~LedgerFileLock() {
+    if (descriptor_ >= 0) {
+      ::flock(descriptor_, LOCK_UN);
+      ::close(descriptor_);
+    }
+  }
+
+ private:
+  int descriptor_ = -1;
+};
+
 [[nodiscard]] std::string score_text(double value) {
   std::ostringstream output;
   output << std::fixed << std::setprecision(3) << value;
   return output.str();
+}
+
+[[nodiscard]] std::string round_trip_text(double value) {
+  std::array<char, 64> buffer{};
+  const auto [end, error] = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+  if (error != std::errc{}) {
+    throw std::runtime_error{"failed to serialize a floating-point evaluation setting"};
+  }
+  return std::string{buffer.data(), end};
 }
 
 [[nodiscard]] std::string fnv1a64_hex(std::string_view text) {
@@ -487,10 +538,10 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   if (options.series.sequential_stop) {
     output << " --sequential-stop";
   }
-  output << " --sequential-null " << options.series.sequential_null_nelo << " --sequential-alt "
-         << options.series.sequential_alt_nelo << " --sequential-alpha "
-         << options.series.sequential_alpha << " --sequential-beta "
-         << options.series.sequential_beta;
+  output << " --sequential-null " << round_trip_text(options.series.sequential_null_nelo)
+         << " --sequential-alt " << round_trip_text(options.series.sequential_alt_nelo)
+         << " --sequential-alpha " << round_trip_text(options.series.sequential_alpha)
+         << " --sequential-beta " << round_trip_text(options.series.sequential_beta);
   if (options.require_accept_alt) {
     output << " --require-accept-alt";
   }
@@ -569,10 +620,10 @@ void write_summary_json(const fs::path& path, const match_runner::SeriesResult& 
          << "  \"sequential_test_method\": \""
          << match_runner::sequential_test_method_name(result.statistical_unit) << "\",\n"
          << "  \"sequential_bound_unit\": \"normalized_elo\",\n"
-         << "  \"sequential_null\": " << result.sequential_null_nelo << ",\n"
-         << "  \"sequential_alt\": " << result.sequential_alt_nelo << ",\n"
-         << "  \"sequential_alpha\": " << result.sequential_alpha << ",\n"
-         << "  \"sequential_beta\": " << result.sequential_beta << ",\n"
+         << "  \"sequential_null\": " << round_trip_text(result.sequential_null_nelo) << ",\n"
+         << "  \"sequential_alt\": " << round_trip_text(result.sequential_alt_nelo) << ",\n"
+         << "  \"sequential_alpha\": " << round_trip_text(result.sequential_alpha) << ",\n"
+         << "  \"sequential_beta\": " << round_trip_text(result.sequential_beta) << ",\n"
          << "  \"sequential_llr\": " << score_text(result.sequential_llr) << ",\n"
          << "  \"sequential_lower_bound\": " << score_text(result.sequential_lower_bound) << ",\n"
          << "  \"sequential_upper_bound\": " << score_text(result.sequential_upper_bound) << ",\n"
@@ -689,10 +740,11 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
          << "  \"sequential_stop\": " << (options.series.sequential_stop ? "true" : "false")
          << ",\n"
          << "  \"sequential_bound_unit\": \"normalized_elo\",\n"
-         << "  \"sequential_null\": " << options.series.sequential_null_nelo << ",\n"
-         << "  \"sequential_alt\": " << options.series.sequential_alt_nelo << ",\n"
-         << "  \"sequential_alpha\": " << options.series.sequential_alpha << ",\n"
-         << "  \"sequential_beta\": " << options.series.sequential_beta << ",\n"
+         << "  \"sequential_null\": " << round_trip_text(options.series.sequential_null_nelo)
+         << ",\n"
+         << "  \"sequential_alt\": " << round_trip_text(options.series.sequential_alt_nelo) << ",\n"
+         << "  \"sequential_alpha\": " << round_trip_text(options.series.sequential_alpha) << ",\n"
+         << "  \"sequential_beta\": " << round_trip_text(options.series.sequential_beta) << ",\n"
          << "  \"sequential_llr\": " << score_text(result.sequential_llr) << ",\n"
          << "  \"sequential_lower_bound\": " << score_text(result.sequential_lower_bound) << ",\n"
          << "  \"sequential_upper_bound\": " << score_text(result.sequential_upper_bound) << ",\n"
@@ -847,8 +899,12 @@ void migrate_ledger_if_needed(const fs::path& path) {
 void append_ledger_row(const fs::path& path, const EvalOptions& options,
                        const match_runner::SeriesResult& result, std::string_view timestamp,
                        std::string_view run_id, std::string_view new_id, std::string_view base_id,
-                       const fs::path& run_dir) {
+                       const fs::path& run_dir, bool coordinate_writers = false) {
   create_parent_directories(path);
+  std::optional<LedgerFileLock> ledger_lock;
+  if (coordinate_writers) {
+    ledger_lock.emplace(path);
+  }
   migrate_ledger_if_needed(path);
   const bool needs_header = !is_file(path) || fs::file_size(path) == 0;
   if (!needs_header) {
@@ -890,8 +946,8 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
          << score_text(result.confidence_low * 100.0) << ','
          << score_text(result.confidence_high * 100.0) << ',';
   write_csv_field(output, match_runner::sequential_decision_name(result.sequential_decision));
-  output << ',' << options.series.sequential_null_nelo << ',' << options.series.sequential_alt_nelo
-         << ',';
+  output << ',' << round_trip_text(options.series.sequential_null_nelo) << ','
+         << round_trip_text(options.series.sequential_alt_nelo) << ',';
   write_csv_field(output, options.series.opening_book.path);
   output << ',';
   write_csv_field(output, options.opening_book_digest);
@@ -1295,9 +1351,11 @@ int run_eval(int argc, char** argv) {
   write_games_csv(run.path / "games.csv", result);
   write_manifest_json(run.path / "manifest.json", options, result, timestamp, run.run_id, new_id,
                       base_id, new_engine_path, base_engine_path);
+  append_ledger_row(run.path / "ledger-row.csv", options, result, timestamp, run.run_id, new_id,
+                    base_id, run.path);
   if (options.write_ledger) {
     append_ledger_row(options.ledger, options, result, timestamp, run.run_id, new_id, base_id,
-                      run.path);
+                      run.path, true);
   }
 
   std::cout << "eval_run"

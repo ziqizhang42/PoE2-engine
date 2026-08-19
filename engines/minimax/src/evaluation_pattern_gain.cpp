@@ -6,8 +6,8 @@
 #include <cstdint>
 #include <limits>
 
-#include "frozen_pattern_gain_model.hpp"
 #include "poe2/minimax/evaluation.hpp"
+#include "poe2/minimax/model_header.hpp"
 
 namespace poe2::minimax {
 

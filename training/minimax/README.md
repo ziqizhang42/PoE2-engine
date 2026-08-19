@@ -1,5 +1,7 @@
 # Minimax Training Environment
 
+For named datasets, resumable iterations, candidate-specific builds, and deliberate promotion, start with the [consolidated training workflow](../../docs/training-workflow.md). This document keeps the independently runnable lower-level experiment commands as references.
+
 This isolated uv project authenticates and memory-maps the deterministic minimax feature artifact. Python 3.14 is the primary interpreter, and PyTorch 2.12.1 is pinned to the ROCm 7.2 package index.
 
 ## Manual environment setup
@@ -32,8 +34,9 @@ uv run --frozen python -m unittest discover -s tests -v
 From `training/minimax`, verify the exact environment, run a deterministic forward/backward tensor operation, authenticate the complete feature binary, materialize its columns in bulk, and transfer the model inputs once to the ROCm device:
 
 ```bash
+FEATURE_DIR=../../path/to/completed/features
 uv run --frozen poe2-training-smoke \
-  --dataset ../../build/data/features/pattern-dev-80k-s20260817/b-primitives \
+  --dataset "$FEATURE_DIR" \
   --require-gpu
 ```
 
@@ -41,7 +44,7 @@ The output separates artifact authentication and mapping, bulk materialization, 
 
 ```bash
 uv run --frozen poe2-training-smoke \
-  --dataset ../../build/data/features/pattern-dev-80k-s20260817/b-primitives \
+  --dataset "$FEATURE_DIR" \
   --require-gpu \
   --skip-digest
 ```
@@ -57,9 +60,11 @@ The command materializes model batches only for the train and validation splits.
 From `training/minimax`, run the authenticated GPU experiment with:
 
 ```bash
+FEATURE_DIR=../../path/to/completed/features
+OUTPUT_DIR=../../path/to/new/baseline-report
 uv run --frozen poe2-train-baselines \
-  --dataset ../../build/data/features/pattern-dev-80k-s20260817/b-primitives \
-  --output-dir ../../build/data/training/pattern-dev-80k-s20260817/baseline-gain-v1 \
+  --dataset "$FEATURE_DIR" \
+  --output-dir "$OUTPUT_DIR" \
   --device cuda
 ```
 
@@ -74,9 +79,11 @@ Each trained model also folds the training standardization into raw lookup weigh
 From `training/minimax`, train the frozen model with:
 
 ```bash
+FEATURE_DIR=../../path/to/completed/features
+EXPERIMENT_DIR=../../path/to/new/pattern-experiment
 uv run --frozen poe2-train-patterns \
-  --dataset ../../build/data/features/pattern-scale-320k-s20260818/b-primitives \
-  --output-dir ../../build/data/training/pattern-scale-320k-s20260818/frozen-c-v1 \
+  --dataset "$FEATURE_DIR" \
+  --output-dir "$EXPERIMENT_DIR" \
   --device cuda \
   --seed 20260818 \
   --suite frozen-pattern-gain
@@ -85,11 +92,15 @@ uv run --frozen poe2-train-patterns \
 After the training report is complete and no further model choice remains, open the sealed test split once with:
 
 ```bash
+FEATURE_DIR=../../path/to/completed/features
+EXPERIMENT_DIR=../../path/to/completed/pattern-experiment
+DEVELOPMENT_FEATURE_DIR=../../path/to/completed/development-features
+EVALUATION_DIR=../../path/to/new/sealed-evaluation
 uv run --frozen poe2-evaluate-pattern \
-  --dataset ../../build/data/features/pattern-scale-320k-s20260818/b-primitives \
-  --experiment ../../build/data/training/pattern-scale-320k-s20260818/frozen-c-v1 \
-  --exclude-dataset ../../build/data/features/pattern-dev-80k-s20260817/b-primitives \
-  --output-dir ../../build/data/training/pattern-scale-320k-s20260818/frozen-c-v1-test
+  --dataset "$FEATURE_DIR" \
+  --experiment "$EXPERIMENT_DIR" \
+  --exclude-dataset "$DEVELOPMENT_FEATURE_DIR" \
+  --output-dir "$EVALUATION_DIR"
 ```
 
 The sealed-test report verifies that the experiment and feature digests match, removes canonical positions present in the development artifact, and evaluates two-ply closure, the gain-only control, and the float and validation-selected quantized pattern/gain models. It records phase, parity, exact-label, and teacher-label metrics. Reusing an output directory is rejected.
@@ -99,8 +110,9 @@ The sealed-test report verifies that the experiment and feature digests match, r
 Export the authenticated selected integer tables from the repository root, then build the release inference checker:
 
 ```bash
+EXPERIMENT_DIR=path/to/completed/pattern-experiment
 python3 tools/export_minimax_pattern_gain.py \
-  --experiment build/data/training/pattern-scale-320k-s20260818/frozen-c-v1 \
+  --experiment "$EXPERIMENT_DIR" \
   --output engines/minimax/src/frozen_pattern_gain_model.hpp
 cmake --build --preset release --target poe2_minimax_infer
 ```
@@ -121,9 +133,11 @@ engine.
 From `training/minimax`, compare the scaled C++ accumulator exactly with Python over deterministic corpus samples and their D4 transforms. The optional benchmark reports direct two-ply-closure and pattern/gain evaluator latency over the same position mix:
 
 ```bash
+FEATURE_DIR=../../path/to/completed/features
+EXPERIMENT_DIR=../../path/to/completed/pattern-experiment
 uv run --frozen poe2-verify-pattern-gain \
-  --dataset ../../build/data/features/pattern-scale-320k-s20260818/b-primitives \
-  --experiment ../../build/data/training/pattern-scale-320k-s20260818/frozen-c-v1 \
+  --dataset "$FEATURE_DIR" \
+  --experiment "$EXPERIMENT_DIR" \
   --inference-binary ../../build/release/engines/minimax/poe2_minimax_infer \
   --samples 4096 \
   --symmetry-samples 512 \

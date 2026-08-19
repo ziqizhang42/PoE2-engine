@@ -117,9 +117,10 @@ Choose the worker count with resource headroom. A run starts `2 * workers` engin
 Eval mode wraps series mode for saved engine comparisons:
 
 ```bash
+NEW_BUILD=build/by-commit/NEW_BUILD_ID/release
 build/release/runner/poe2_runner eval \
-  --new-build build/by-commit/000015-d74d255e5cfd/release \
-  --base 000014-abcd1234 \
+  --new-build "$NEW_BUILD" \
+  --base BASE_BUILD_ID \
   --new-engine poe2_greedy \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \

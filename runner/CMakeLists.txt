@@ -201,6 +201,16 @@ add_test(
 )
 
 add_test(
+  NAME runner_eval_serializes_concurrent_ledger_writers
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DBUILD_DIR=${CMAKE_BINARY_DIR}
+          -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -DTEST_ROOT=${CMAKE_BINARY_DIR}/eval-ledger-concurrency-test
+          -P ${PROJECT_SOURCE_DIR}/tests/eval_ledger_concurrency_test.cmake
+)
+
+add_test(
   NAME runner_eval_sampling_is_reproducible
   COMMAND ${CMAKE_COMMAND}
           -DRUNNER=$<TARGET_FILE:poe2_runner>

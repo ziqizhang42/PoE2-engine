@@ -8,9 +8,9 @@
 cmake --build --preset release --target poe2_minimax_data
 
 build/release/runner/poe2_minimax_data labels \
-  --input artifacts/sources/pattern-pilot \
+  --input artifacts/sources/example-corpus \
   --source-shard 0 \
-  --output-dir artifacts/labels/pilot-shard-000 \
+  --output-dir artifacts/labels/example-shard-000 \
   --mode teacher \
   --nodes 5000000 \
   --hash-mb 16 \
@@ -39,7 +39,7 @@ Progress is written to stderr only. Each record stores total nodes consumed plus
 The command parses the source and then atomically reserves `--output-dir` before starting any search. An existing path is always refused. While work is underway, the directory contains an `INCOMPLETE` marker. A successful commit contains:
 
 ```text
-pilot-shard-000/
+example-shard-000/
   COMPLETE
   labels.bin
   manifest.json
@@ -50,8 +50,8 @@ pilot-shard-000/
 Validate a finished shard before consuming it:
 
 ```bash
-python3 tools/inspect_minimax_labels.py artifacts/labels/pilot-shard-000 \
-  --source artifacts/sources/pattern-pilot/shards/shard-00000000-<sha256>.jsonl
+python3 tools/inspect_minimax_labels.py artifacts/labels/example-shard-000 \
+  --source artifacts/sources/example-corpus/shards/shard-00000000-<sha256>.jsonl
 ```
 
 The auditor is independent of the C++ writer. It verifies SHA-256 digests, framing, fixed sizes, legal bitboards and piece counts, D4 canonical keys, move legality, node/depth invariants, shard coordinates, manifest counts, and completion state.
@@ -60,10 +60,10 @@ Compare two or more independently audited label artifacts from the same source s
 
 ```bash
 python3 tools/compare_minimax_labels.py \
-  artifacts/labels/pilot-shard-000-1m \
-  artifacts/labels/pilot-shard-000-5m \
-  artifacts/labels/pilot-shard-000-10m \
-  --source artifacts/sources/pattern-pilot/shards/shard-00000000-<sha256>.jsonl \
+  artifacts/labels/example-shard-000-budget-a \
+  artifacts/labels/example-shard-000-budget-b \
+  artifacts/labels/example-shard-000-budget-c \
+  --source artifacts/sources/example-corpus/shards/shard-00000000-<sha256>.jsonl \
   --strata
 ```
 

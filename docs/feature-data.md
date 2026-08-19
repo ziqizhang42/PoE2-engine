@@ -8,8 +8,8 @@ Run the reusable read-only loader before exporting features:
 
 ```bash
 python3 -B tools/preflight_minimax_corpus.py \
-  build/data/labels/pattern-dev-80k-s20260817/teacher-parity-5m-h16 \
-  --source build/data/position-sources/pattern-dev-80k-s20260817 \
+  artifacts/labels/example-corpus \
+  --source artifacts/sources/example-corpus \
   --json
 ```
 
@@ -21,13 +21,13 @@ Export a single immutable feature artifact with the production C++ evaluator:
 
 ```bash
 build/release/runner/poe2_minimax_data features \
-  --source build/data/position-sources/pattern-dev-80k-s20260817 \
-  --labels build/data/labels/pattern-dev-80k-s20260817/teacher-parity-5m-h16 \
-  --output-dir build/data/features/pattern-dev-80k-s20260817/b-primitives
+  --source artifacts/sources/example-corpus \
+  --labels artifacts/labels/example-corpus \
+  --output-dir artifacts/features/example-corpus
 
 python3 -B tools/inspect_minimax_features.py \
-  build/data/features/pattern-dev-80k-s20260817/b-primitives \
-  --labels build/data/labels/pattern-dev-80k-s20260817/teacher-parity-5m-h16
+  artifacts/features/example-corpus \
+  --labels artifacts/labels/example-corpus
 ```
 
 Each selected board stores the selected, deepest, and previous search results. Occupied cells use signed 16-bit minimum as a sentinel. No learned feature, weight, phase interpolation, or quantization decision is embedded at this stage.

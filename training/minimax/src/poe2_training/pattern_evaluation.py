@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 
-from .baseline import _git_provenance, _metrics, _runtime, _source_digest
 from .dataset import MappedFeatureDataset, NumpyFeatureBatch, subset_batch
+from .model_metrics import model_metrics
 from .pattern_experiment import GAIN_KNOTS, open_pattern_report
 from .patterns import line_pattern_counts, phase_basis
 from .quantization import QuantizedPatternModel, predict_quantized
@@ -22,6 +19,15 @@ from .summaries import (
     phase_features,
     phase_interactions,
     phase_interpolation,
+)
+from .shared import (
+    complete_json_report,
+    git_provenance,
+    open_json_report,
+    reserve_report_directory,
+    runtime_provenance,
+    sha256_file,
+    training_source_digest,
 )
 
 
@@ -40,72 +46,12 @@ def _require(condition: bool, message: str) -> None:
         raise PatternEvaluationError(message)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as error:
-        raise PatternEvaluationError(f"could not hash {path}: {error}") from error
-    return digest.hexdigest()
-
-
-def _reserve_output(directory: Path) -> None:
-    try:
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        directory.mkdir()
-        (directory / "INCOMPLETE").write_text(f"{SCHEMA}\n", encoding="utf-8")
-    except OSError as error:
-        raise PatternEvaluationError(f"could not reserve {directory}: {error}") from error
-
-
-def _write_bytes(path: Path, contents: bytes) -> None:
-    with path.open("xb") as destination:
-        destination.write(contents)
-        destination.flush()
-        os.fsync(destination.fileno())
-
-
-def _complete_output(directory: Path, report: dict[str, Any]) -> None:
-    report_bytes = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
-    digest = hashlib.sha256(report_bytes).hexdigest()
-    try:
-        _write_bytes(directory / "report.json.tmp", report_bytes)
-        os.replace(directory / "report.json.tmp", directory / "report.json")
-        _write_bytes(
-            directory / "COMPLETE.tmp",
-            f"{COMPLETE_HEADER}\nreport_sha256={digest}\n".encode(),
-        )
-        os.replace(directory / "COMPLETE.tmp", directory / "COMPLETE")
-        (directory / "INCOMPLETE").unlink()
-    except OSError as error:
-        raise PatternEvaluationError(f"could not complete {directory}: {error}") from error
-
-
 def open_pattern_evaluation(directory: Path | str) -> dict[str, Any]:
     """Authenticate a completed sealed-test evaluation report."""
-    root = Path(directory).resolve()
-    _require(root.is_dir() and not (root / "INCOMPLETE").exists(),
-             "pattern evaluation is incomplete")
-    complete = root / "COMPLETE"
-    report_path = root / "report.json"
-    _require(complete.is_file() and report_path.is_file(), "pattern evaluation is incomplete")
-    try:
-        lines = complete.read_text(encoding="utf-8").splitlines()
-        report = json.loads(report_path.read_bytes())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise PatternEvaluationError(f"could not read pattern evaluation: {error}") from error
-    _require(lines[:1] == [COMPLETE_HEADER] and len(lines) == 2,
-             "pattern evaluation COMPLETE marker is malformed")
-    name, separator, digest = lines[1].partition("=")
-    _require(name == "report_sha256" and bool(separator) and len(digest) == 64,
-             "pattern evaluation COMPLETE digest is malformed")
-    _require(_sha256(report_path) == digest,
-             "pattern evaluation report digest differs from COMPLETE")
-    _require(isinstance(report, dict) and report.get("schema") == SCHEMA and
-             report.get("schema_version") == SCHEMA_VERSION,
-             "pattern evaluation schema is unsupported")
+    report, _ = open_json_report(
+        directory, schema=SCHEMA, schema_version=SCHEMA_VERSION,
+        error_type=PatternEvaluationError,
+    )
     return report
 
 
@@ -288,7 +234,7 @@ def run_pattern_evaluation(
                  dataset.artifact.split_counts[2],
                  "pattern experiment test count differs from the feature artifact")
 
-        _reserve_output(output)
+        reserve_report_directory(output, SCHEMA, error_type=PatternEvaluationError)
         test = dataset.materialize("test")
         unfiltered_test_records = test.records
         exclusions: list[dict[str, Any]] = []
@@ -309,15 +255,22 @@ def run_pattern_evaluation(
             excluded_records = int(overlap.sum())
             test = subset_batch(test, ~overlap)
         _require(test.records > 0, "sealed test split is empty after overlap exclusion")
-        closure_metrics = _metrics(test, np.zeros(test.records, dtype=np.float64), 8)
-        gain_metrics = _metrics(test, _predict_gain_control(test, experiment), 8)
-        model_metrics = _metrics(test, _predict_model(test, experiment, model), 8)
+        closure_metrics = model_metrics(
+            test, np.zeros(test.records, dtype=np.float64), 8,
+            error_type=PatternEvaluationError)
+        gain_metrics = model_metrics(
+            test, _predict_gain_control(test, experiment), 8,
+            error_type=PatternEvaluationError)
+        selected_metrics = model_metrics(
+            test, _predict_model(test, experiment, model), 8,
+            error_type=PatternEvaluationError)
         quantized_prediction = _predict_quantized_model(test, model)
-        quantized_metrics = (_metrics(test, quantized_prediction, 8)
+        quantized_metrics = (model_metrics(
+            test, quantized_prediction, 8, error_type=PatternEvaluationError)
                              if quantized_prediction is not None else None)
         closure_overall = closure_metrics["overall"]
         gain_overall = gain_metrics["overall"]
-        model_overall = model_metrics["overall"]
+        model_overall = selected_metrics["overall"]
         report = {
             "schema": SCHEMA,
             "schema_version": SCHEMA_VERSION,
@@ -325,7 +278,7 @@ def run_pattern_evaluation(
                 "corpus_id": dataset.artifact.manifest["corpus"]["id"],
                 "feature_binary_sha256": dataset.artifact.binary_digest,
                 "feature_manifest_sha256": dataset.artifact.manifest_digest,
-                "experiment_report_sha256": _sha256(experiment_root / "report.json"),
+                "experiment_report_sha256": sha256_file(experiment_root / "report.json"),
                 "test_records_before_exclusion": unfiltered_test_records,
                 "development_overlap_records_excluded": excluded_records,
                 "test_records": test.records,
@@ -337,7 +290,7 @@ def run_pattern_evaluation(
                 "model": model["name"],
                 "two_ply_closure": closure_metrics,
                 "gain_control": gain_metrics,
-                "model_metrics": model_metrics,
+                "model_metrics": selected_metrics,
                 "quantized_model_metrics": quantized_metrics,
                 "comparison": {
                     "model_vs_two_ply_closure_mae_reduction_percent": _reduction(
@@ -355,12 +308,12 @@ def run_pattern_evaluation(
                 },
             },
             "provenance": {
-                "evaluation_source_sha256": _source_digest(),
-                "git": _git_provenance(),
-                "runtime": _runtime(torch, torch.device("cpu")),
+                "evaluation_source_sha256": training_source_digest(),
+                "git": git_provenance(),
+                "runtime": runtime_provenance(torch, torch.device("cpu")),
             },
         }
-        _complete_output(output, report)
+        complete_json_report(output, SCHEMA, report, error_type=PatternEvaluationError)
         return report
 
 

@@ -31,6 +31,24 @@ option(POE2_ENABLE_IPO "Enable IPO/LTO for release builds when supported" ON)
 option(POE2_ENABLE_NATIVE_ARCH "Tune release builds for the current CPU" ON)
 option(POE2_BUILD_NATIVE_APPS "Build native stdio engines and the match runner" ON)
 option(POE2_BUILD_WASM "Build the browser WebAssembly package" OFF)
+set(
+  POE2_MINIMAX_MODEL_HEADER
+  "${CMAKE_SOURCE_DIR}/engines/minimax/src/frozen_pattern_gain_model.hpp"
+  CACHE FILEPATH
+  "Pattern/gain model header used by the minimax evaluator"
+)
+
+if(NOT IS_ABSOLUTE "${POE2_MINIMAX_MODEL_HEADER}")
+  get_filename_component(
+    POE2_MINIMAX_MODEL_HEADER
+    "${POE2_MINIMAX_MODEL_HEADER}"
+    ABSOLUTE
+    BASE_DIR "${CMAKE_SOURCE_DIR}"
+  )
+endif()
+if(NOT EXISTS "${POE2_MINIMAX_MODEL_HEADER}" OR IS_DIRECTORY "${POE2_MINIMAX_MODEL_HEADER}")
+  message(FATAL_ERROR "POE2_MINIMAX_MODEL_HEADER is not a file: ${POE2_MINIMAX_MODEL_HEADER}")
+endif()
 
 if(POE2_BUILD_WASM)
   if(NOT EMSCRIPTEN)
