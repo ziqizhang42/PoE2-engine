@@ -41,6 +41,12 @@ uv run --frozen poe2-train status --config "$CONFIG" --json
 
 `plan`, `validate`, and `status` are read-only; `validate` authenticates existing outputs. Mutating commands require a clean committed worktree and a tracked recipe. Repository-local run roots must be ignored; checked-in recipes use `build/`.
 
+## Console progress
+
+On an interactive terminal, mutating commands show one colored tqdm stage bar with elapsed time, estimated remaining time, and a compact postfix for the active source, label shard, build, or model. Completed stages and iterations each leave one short summary line; the full child-process output continues to be captured in the existing per-command log files instead of scrolling through the terminal.
+
+`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
+
 The candidate promotion sequence is:
 
 1. Run training and candidate validation.

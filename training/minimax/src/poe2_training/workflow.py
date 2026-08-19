@@ -67,6 +67,15 @@ from .workflow_config import (
     stage_fingerprints,
 )
 from .workflow_state import RunState, now_utc
+from .workflow_ui import (
+    WorkflowProgress,
+    format_duration,
+    human_bar,
+    iteration_pipeline,
+    paint,
+    recorded_seconds,
+    status_symbol,
+)
 
 
 class WorkflowError(ValueError):
@@ -118,7 +127,8 @@ class CommandRunner:
         return result
 
     def run(self, command: Sequence[str], *, log_path: Path, metrics_path: Path,
-            accepted_exit_codes: set[int] | None = None) -> CommandResult:
+            accepted_exit_codes: set[int] | None = None,
+            output_callback: Callable[[str, float], None] | None = None) -> CommandResult:
         accepted = accepted_exit_codes or {0}
         log_path.parent.mkdir(parents=True, exist_ok=True)
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +166,10 @@ class CommandRunner:
                     log.write(line)
                     log.flush()
                     with self._print_lock:
-                        print(line, end="", flush=True)
+                        if output_callback is None:
+                            print(line, end="", flush=True)
+                        else:
+                            output_callback(line, time.perf_counter() - started)
                 process.stdout.close()
                 exit_code = process.wait()
             except BaseException:
@@ -395,19 +408,46 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
     if json_output:
         print(json.dumps(snapshot, indent=2, sort_keys=True))
         return
-    print(f"run {config.name}: {snapshot['status']} ({config.output_directory})")
+    operational = state.stage_state()
+    for name, iteration in snapshot["iterations"].items():
+        statuses = [value["status"] for stage, value in operational.items()
+                    if stage.startswith(f"iteration:{name}:")]
+        if "failed" in statuses:
+            iteration["status"] = "failed"
+        elif "running" in statuses:
+            iteration["status"] = "running"
+    stage_statuses: list[str] = []
+    for dataset in snapshot["datasets"].values():
+        if dataset["kind"] == "managed":
+            stage_statuses.extend((dataset["source"], dataset["labels"]["status"]))
+        stage_statuses.append(dataset["features"])
+    for iteration in snapshot["iterations"].values():
+        stage_statuses.extend(value for key, value in iteration.items()
+                              if key not in {"dataset", "depends_on", "status"})
+    completed, total = stage_statuses.count("complete"), len(stage_statuses)
+    percent = 100.0 * completed / total if total else 100.0
+    iteration_statuses = [value["status"] for value in snapshot["iterations"].values()]
+    overall = ("failed" if "failed" in iteration_statuses else
+               "running" if "running" in iteration_statuses else str(snapshot["status"]))
+    style = {"complete": "green", "failed": "red", "running": "cyan"}.get(
+        overall, "yellow")
+    print(f"{paint('run', 'bold')} {config.name}  {paint(overall.upper(), 'bold', style)}")
+    print(f"{human_bar(completed, total)}  {completed}/{total} stages ({percent:.0f}%)  ·  "
+          f"recorded {format_duration(recorded_seconds(state))}")
+    print(iteration_pipeline(snapshot))
     for name, dataset in snapshot["datasets"].items():
         if dataset["kind"] == "managed":
             labels = dataset["labels"]
-            print(f"  dataset {name}: source={dataset['source']} "
-                  f"labels={labels['complete_shards']}/{labels['total_shards']} "
-                  f"features={dataset['features']}")
+            print(f"  {status_symbol(str(dataset['features']))} dataset {name}: "
+                  f"source={dataset['source']} labels={labels['complete_shards']}/"
+                  f"{labels['total_shards']} features={dataset['features']}")
         else:
-            print(f"  dataset {name}: imported features={dataset['features']}")
-    for name, iteration in snapshot["iterations"].items():
+            print(f"  {status_symbol(str(dataset['features']))} dataset {name}: "
+                  f"imported features={dataset['features']}")
+    for index, (name, iteration) in enumerate(snapshot["iterations"].items(), 1):
         stages = " ".join(f"{key}={value}" for key, value in iteration.items()
                           if key not in {"dataset", "depends_on", "status"})
-        print(f"  iteration {name}: {iteration['status']} {stages}")
+        print(f"  {status_symbol(str(iteration['status']))} iteration {index}. {name}: {stages}")
 
 
 def _format_command(command: Sequence[str]) -> str:
@@ -416,13 +456,13 @@ def _format_command(command: Sequence[str]) -> str:
 
 def print_plan(config: WorkflowConfig) -> None:
     """Print a read-only execution plan with derived paths and representative commands."""
-    print(f"run {config.name}")
+    print(paint(f"run {config.name}", "bold", "cyan"))
     print(f"  output: {config.output_directory}")
     print(f"  preset: {config.build_preset}")
     print(f"  logical CPUs: {os.cpu_count() or 1}")
     print(f"  default label concurrency: {resolved_label_concurrency(config)}")
     for dataset in config.datasets:
-        print(f"dataset {dataset.name} ({dataset.kind})")
+        print(paint(f"dataset {dataset.name} ({dataset.kind})", "bold", "blue"))
         if isinstance(dataset, ImportedDatasetConfig):
             print(f"  authenticate: {dataset.feature_directory}")
             continue
@@ -436,8 +476,8 @@ def print_plan(config: WorkflowConfig) -> None:
         print(f"    {_format_command(feature_command(config, dataset))}")
     for iteration in config.iterations:
         dataset = config.dataset(iteration.dataset)
-        print(f"iteration {iteration.name}: dataset={iteration.dataset} "
-              f"depends_on={','.join(iteration.depends_on) or '-'}")
+        print(paint(f"iteration {iteration.name}: dataset={iteration.dataset} "
+                    f"depends_on={','.join(iteration.depends_on) or '-'}", "bold", "magenta"))
         print(f"  training: {_format_command(training_command(sys.executable, dataset, iteration))}")
         if iteration.sealed_evaluation is not None:
             print(f"  sealed evaluation: "
@@ -551,11 +591,13 @@ def _parse_key_values(line: str) -> dict[str, Any]:
 
 
 class WorkflowRunner:
-    def __init__(self, config: WorkflowConfig, state: RunState, commit: str) -> None:
+    def __init__(self, config: WorkflowConfig, state: RunState, commit: str,
+                 progress: WorkflowProgress | None = None) -> None:
         self.config = config
         self.state = state
         self.commit = commit
         self.commands = CommandRunner(config.repository)
+        self.progress = progress
         self._data_ready = False
         self._data_commit: str | None = None
 
@@ -570,8 +612,16 @@ class WorkflowRunner:
                  accepted_exit_codes: set[int] | None = None) -> CommandResult:
         number = attempt or max(1, self.state.attempt_count(stage))
         log, metrics = self._paths(stage, operation, number)
-        return self.commands.run(command, log_path=log, metrics_path=metrics,
-                                 accepted_exit_codes=accepted_exit_codes)
+        if self.progress is not None:
+            self.progress.command_started(stage, operation)
+        return self.commands.run(
+            command, log_path=log, metrics_path=metrics,
+            accepted_exit_codes=accepted_exit_codes,
+            output_callback=(
+                (lambda line, elapsed: self.progress.command_output(
+                    stage, operation, line, elapsed))
+                if self.progress is not None else None),
+        )
 
     def _ensure_data_binary(self, stage: str, attempt: int, *,
                             required_commit: str | None = None) -> None:
@@ -650,6 +700,8 @@ class WorkflowRunner:
             resolved_label_concurrency=label_concurrency,
         )
         self.state.write_summary(workflow_snapshot(self.config))
+        if self.progress is not None:
+            self.progress.stage_started(stage, action)
         return attempt
 
     def _complete(self, stage: str, stats: dict[str, Any], *, creation: float,
@@ -661,11 +713,15 @@ class WorkflowRunner:
                     "import_seconds": import_seconds},
         )
         self.state.write_summary(workflow_snapshot(self.config))
+        if self.progress is not None:
+            self.progress.stage_completed(stage)
 
     def _fail(self, stage: str, error: BaseException, started: float) -> None:
         self.state.append("stage_failed", stage=stage,
                           wall_seconds=time.perf_counter() - started, error=str(error))
         self.state.write_summary(workflow_snapshot(self.config))
+        if self.progress is not None:
+            self.progress.stage_failed(stage, error)
 
     def _run_simple(self, stage: str, path: Path, kind: str, input_value: Any,
                     create: Callable[[int], None],
@@ -1192,17 +1248,21 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
                      command=("iteration" if iteration_name else "run"),
                      iteration=iteration_name)
         state.write_summary(workflow_snapshot(config))
-        runner = WorkflowRunner(config, state, commit)
+        progress = WorkflowProgress(config, state)
+        runner = WorkflowRunner(config, state, commit, progress)
+        success = False
         try:
             with _interruptions_as_keyboard():
                 for iteration in selected:
                     runner.run_iteration(iteration)
                     state.append("iteration_completed", iteration=iteration.name)
                     state.write_summary(workflow_snapshot(config))
+                    progress.iteration_completed(iteration.name)
                 state.append(
                     "run_completed", command=("iteration" if iteration_name else "run"),
                     iteration=iteration_name)
                 state.write_summary(workflow_snapshot(config))
+                success = True
         except KeyboardInterrupt as error:
             runner.commands.terminate_all()
             state.append("run_interrupted", error="keyboard interrupt")
@@ -1213,6 +1273,8 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
             state.append("run_failed", error=str(error))
             state.write_summary(workflow_snapshot(config))
             raise
+        finally:
+            progress.close(success=success)
 
 
 def handoff_candidate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:

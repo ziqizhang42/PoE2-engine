@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import fcntl
+import io
 import json
 import os
 import subprocess
@@ -26,6 +27,7 @@ from poe2_training.workflow import (
     WorkflowError,
     _dependency_order,
     handoff_candidate,
+    print_status,
     promote_gate,
     resolved_label_concurrency,
     run_lock,
@@ -51,6 +53,7 @@ from poe2_training.workflow_config import (
     stage_fingerprints,
 )
 from poe2_training.workflow_state import RunState, StateError
+from poe2_training.workflow_ui import format_duration, paint, progress_detail
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
@@ -373,6 +376,58 @@ class WorkflowStateTest(unittest.TestCase):
         metrics = json.loads(result.metrics_path.read_bytes())
         self.assertGreaterEqual(metrics["wall_seconds"], 0.0)
         self.assertIn("peak_rss_kb", metrics)
+
+    def test_progress_helpers_reduce_native_output_and_format_time(self) -> None:
+        self.assertEqual(format_duration(65), "1m 05s")
+        self.assertEqual(
+            progress_detail(
+                "create-shard-002",
+                "label_progress completed=500 total=2000 records=500 unsolved=0"),
+            "shard 3 500/2,000 (25%)",
+        )
+        self.assertEqual(
+            progress_detail(
+                "create", "source_progress completed_trajectories=100 "
+                "total_trajectories=1000"),
+            "create 100/1,000 (10%)",
+        )
+
+    def test_human_status_has_progress_time_and_iteration_order(self) -> None:
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            print_status(self.config)
+        value = output.getvalue()
+        self.assertIn("0/4 stages (0%)", value)
+        self.assertIn("recorded 0.0s", value)
+        self.assertIn("iterations  1 ○ one", value)
+        self.assertNotIn("\033[", value)
+
+    def test_color_is_terminal_aware_and_honors_no_color(self) -> None:
+        class Terminal(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        stream = Terminal()
+        with mock.patch.dict(os.environ, {"TERM": "xterm"}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            self.assertIn("\033[", paint("ok", "green", stream=stream))
+        with mock.patch.dict(os.environ, {"TERM": "xterm", "NO_COLOR": "1"}, clear=False):
+            self.assertEqual(paint("ok", "green", stream=stream), "ok")
+
+    def test_command_callback_keeps_child_lines_off_the_console(self) -> None:
+        runner = CommandRunner(REPOSITORY)
+        lines: list[str] = []
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            result = runner.run(
+                [sys.executable, "-c", "print('source_progress completed=1 total=2')"],
+                log_path=self.root / "compact.log",
+                metrics_path=self.root / "compact.json",
+                output_callback=lambda line, _elapsed: lines.append(line),
+            )
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(lines, ["source_progress completed=1 total=2\n"])
+        self.assertEqual(result.output, lines[0])
 
     def test_complete_artifact_is_authenticated_without_recreation(self) -> None:
         state = RunState(self.config)
