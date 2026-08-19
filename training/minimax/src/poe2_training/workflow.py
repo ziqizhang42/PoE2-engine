@@ -557,6 +557,7 @@ class WorkflowRunner:
         self.commit = commit
         self.commands = CommandRunner(config.repository)
         self._data_ready = False
+        self._data_commit: str | None = None
 
     def _paths(self, stage: str, operation: str, attempt: int) -> tuple[Path, Path]:
         safe = stage.replace(":", "-")
@@ -572,9 +573,41 @@ class WorkflowRunner:
         return self.commands.run(command, log_path=log, metrics_path=metrics,
                                  accepted_exit_codes=accepted_exit_codes)
 
-    def _ensure_data_binary(self, stage: str, attempt: int) -> None:
-        if self._data_ready and data_binary(self.config).is_file():
-            return
+    def _ensure_data_binary(self, stage: str, attempt: int, *,
+                            required_commit: str | None = None) -> None:
+        binary = data_binary(self.config)
+        if required_commit is not None and re.fullmatch(
+                r"[0-9a-f]{40}", required_commit) is None:
+            raise WorkflowError(
+                f"label shards have invalid build commit {required_commit!r}")
+        target_commit = required_commit or self.commit
+        if self._data_ready and binary.is_file():
+            if self._data_commit == target_commit:
+                return
+            if required_commit is not None:
+                raise WorkflowError(
+                    f"run-local data binary is from commit {self._data_commit}, but the "
+                    f"completed label shards require {required_commit}")
+
+        # A partially completed label corpus must continue with the exact
+        # run-local binary that created its earlier shards. Reconfiguring this
+        # tree at a later source commit would silently embed a different build
+        # identity, which the native feature reader correctly rejects.
+        if required_commit is not None and binary.is_file():
+            try:
+                contains_commit = required_commit.encode() in binary.read_bytes()
+            except OSError as error:
+                raise WorkflowError(
+                    f"could not authenticate data binary {binary}: {error}") from error
+            if contains_commit:
+                self._data_ready = True
+                self._data_commit = required_commit
+                return
+        if required_commit is not None and required_commit != self.commit:
+            raise WorkflowError(
+                f"cannot resume label artifacts created by commit {required_commit}: restore "
+                f"their run-local data binary at {binary}; the current commit is {self.commit}")
+
         build = self.config.output_directory / "build" / self.config.build_preset
         self._command(stage, "configure", [
             "cmake", "--preset", self.config.build_preset, "-B", str(build)],
@@ -582,9 +615,19 @@ class WorkflowRunner:
         self._command(stage, "build-data", [
             "cmake", "--build", str(build),
             "--target", "poe2_minimax_data"], attempt=attempt)
-        if not data_binary(self.config).is_file():
-            raise WorkflowError(f"data binary was not built: {data_binary(self.config)}")
+        if not binary.is_file():
+            raise WorkflowError(f"data binary was not built: {binary}")
+        try:
+            contains_commit = self.commit.encode() in binary.read_bytes()
+        except OSError as error:
+            raise WorkflowError(
+                f"could not authenticate data binary {binary}: {error}") from error
+        if not contains_commit:
+            raise WorkflowError(
+                f"data binary does not contain the configured build commit "
+                f"{self.commit}: {binary}")
         self._data_ready = True
+        self._data_commit = self.commit
 
     def _begin(self, stage: str, action: str, input_value: Any) -> int:
         input_fingerprint = fingerprint(input_value)
@@ -735,7 +778,14 @@ class WorkflowRunner:
                 authentication += time.perf_counter() - auth_started
 
             if missing:
-                self._ensure_data_binary(stage, attempt)
+                build_commits = {str(item["git_commit"]) for item in complete.values()}
+                if len(build_commits) > 1:
+                    raise WorkflowError(
+                        "completed label shards have inconsistent build commits: " +
+                        ", ".join(sorted(build_commits)))
+                required_commit = next(iter(build_commits), None)
+                self._ensure_data_binary(
+                    stage, attempt, required_commit=required_commit)
                 create_started = time.perf_counter()
 
                 def run_shard(index: int) -> tuple[int, dict[str, Any], float]:
@@ -799,8 +849,11 @@ class WorkflowRunner:
         stage = f"dataset:{dataset.name}:features"
 
         def create(attempt: int) -> None:
-            self._ensure_data_binary(stage, attempt)
-            self._command(stage, "create", feature_command(self.config, dataset), attempt=attempt)
+            label_commit = authenticate_label_shard(dataset, 0)["git_commit"]
+            self._ensure_data_binary(
+                stage, attempt, required_commit=str(label_commit))
+            self._command(
+                stage, "create", feature_command(self.config, dataset), attempt=attempt)
 
         def authenticate(attempt: int) -> dict[str, Any]:
             self._command(

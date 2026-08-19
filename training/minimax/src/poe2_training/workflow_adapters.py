@@ -357,10 +357,18 @@ def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[
              search.get("workers_requested") == expected.workers and
              search.get("require_all") == expected.require_all,
              f"label shard {index} search settings differ from configuration")
+    # Schema-v2 manifests written before the evaluator rename used the alias
+    # "b".  The authoritative producer now writes "two-ply-closure", and the
+    # native feature reader intentionally accepts both spellings.
     _require(search.get("target_selection") == "deepest_terminal_parity" and
-             search.get("evaluator") == "b" and search.get("two_ply_closure") is True,
+             search.get("evaluator") in {"two-ply-closure", "b"} and
+             search.get("symmetry") is True and
+             search.get("two_ply_closure") is True,
              f"label shard {index} search semantics are unsupported")
-    _require(build.get("git_dirty") is False, f"label shard {index} used a dirty build")
+    _require(build.get("git_dirty") is False and
+             isinstance(build.get("git_commit"), str) and
+             re.fullmatch(r"[0-9a-f]{40}", build["git_commit"]) is not None,
+             f"label shard {index} has invalid build provenance")
     return {
         "index": index, "manifest_sha256": sha256_file(manifest_path),
         "binary_sha256": str(manifest.get("binary_digest", "")).removeprefix("sha256:"),
@@ -369,6 +377,7 @@ def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[
         "previous_records": results.get("previous_records"), "unsolved": results.get("unsolved"),
         "workers_requested": search.get("workers_requested"),
         "workers_used": search.get("workers_used"),
+        "git_commit": build["git_commit"],
     }
 
 

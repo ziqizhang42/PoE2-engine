@@ -37,6 +37,7 @@ from poe2_training.workflow_adapters import (
     GATE_SCHEMA,
     authenticate_candidate,
     authenticate_gate,
+    authenticate_label_shard,
     authenticate_training,
     candidate_build_id,
     data_binary,
@@ -199,6 +200,64 @@ class WorkflowConfigTest(unittest.TestCase):
             data_binary(first),
             first.output_directory / "build/debug/runner/poe2_minimax_data")
         self.assertNotEqual(data_binary(first), data_binary(second))
+
+    def test_label_authentication_accepts_current_and_legacy_evaluator_names(self) -> None:
+        config = load_workflow_config(_write(self.root, _managed_config(self.root)))
+        dataset = config.dataset("main")
+        shard = label_shard_path(dataset, 0)
+        shard.mkdir(parents=True)
+        manifest = {
+            "schema": "poe2-minimax-labels",
+            "corpus": {
+                "id": dataset.source.corpus_id,
+                "shard_index": 0,
+                "shard_count": dataset.source.shards,
+            },
+            "search": {
+                "mode": dataset.labels.mode,
+                "node_limit": dataset.labels.nodes,
+                "hash_bytes_requested": dataset.labels.hash_mb * 1024 * 1024,
+                "workers_requested": dataset.labels.workers,
+                "workers_used": dataset.labels.workers,
+                "require_all": dataset.labels.require_all,
+                "target_selection": "deepest_terminal_parity",
+                "evaluator": "two-ply-closure",
+                "symmetry": True,
+                "two_ply_closure": True,
+            },
+            "build": {"git_commit": "1" * 40, "git_dirty": False},
+            "results": {"records": 1, "unsolved": 0},
+            "binary_digest": "sha256:" + "2" * 64,
+        }
+        manifest_path = shard / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        self.assertEqual(authenticate_label_shard(dataset, 0)["git_commit"], "1" * 40)
+
+        manifest["search"]["evaluator"] = "b"
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        self.assertEqual(authenticate_label_shard(dataset, 0)["records"], 1)
+
+        manifest["search"]["evaluator"] = "two-ply"
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "search semantics"):
+            authenticate_label_shard(dataset, 0)
+
+    def test_partial_label_resume_reuses_binary_with_original_commit(self) -> None:
+        config = load_workflow_config(_write(self.root, _managed_config(self.root)))
+        state = RunState(config)
+        state.accept_config()
+        original_commit = "1" * 40
+        binary = data_binary(config)
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"fixture\0" + original_commit.encode() + b"\0")
+        workflow = WorkflowRunner(config, state, "2" * 40)
+
+        with mock.patch.object(workflow, "_command") as command:
+            workflow._ensure_data_binary(
+                "dataset:main:labels", 2, required_commit=original_commit)
+
+        command.assert_not_called()
+        self.assertEqual(workflow._data_commit, original_commit)
 
     def test_pattern_suite_report_remains_authenticatable_after_shared_refactor(self) -> None:
         feature = write_feature_fixture(self.root / "suite-features")
