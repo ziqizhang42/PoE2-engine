@@ -45,6 +45,8 @@ uv run --frozen poe2-train status --config "$CONFIG" --json
 
 On an interactive terminal, mutating commands show one colored tqdm stage bar with elapsed time, estimated remaining time, and a compact postfix for the active source, label shard, build, or model. Completed stages and iterations each leave one short summary line; the full child-process output continues to be captured in the existing per-command log files instead of scrolling through the terminal.
 
+Stages that reuse an existing complete artifact are labeled `authenticated`, so repeated dependency or exclusion preparation is distinguishable from artifact creation.
+
 `status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
 
 The candidate promotion sequence is:
@@ -173,7 +175,7 @@ Every mutating command holds `<run>/.orchestrator.lock`. Accepted TOML revisions
 ├── logs/<stage>/attempt-...
 ├── build/<preset>/
 ├── datasets/<name>/{source,labels/shards,features}
-└── iterations/<name>/{training,sealed-evaluation,candidate,engine-gate}
+└── iterations/<name>/{training/{report.json,training-metrics.svg},sealed-evaluation,candidate,engine-gate}
 ```
 
 Build trees are private to each run or candidate. Once a stage starts, its configuration and input digests cannot change or be removed; unstarted stages and new iterations may be added in a later compatible recipe revision.

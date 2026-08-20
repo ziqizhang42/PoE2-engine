@@ -73,6 +73,15 @@ def iteration_pipeline(snapshot: Mapping[str, Any], stream: TextIO = sys.stdout)
     return paint("iterations", "bold", stream=stream) + "  " + "  ──  ".join(parts)
 
 
+def aggregate_status(statuses: list[str]) -> str:
+    """Reduce child statuses with failure and active work taking precedence."""
+    if "failed" in statuses:
+        return "failed"
+    if "running" in statuses:
+        return "running"
+    return "complete" if statuses and all(value == "complete" for value in statuses) else "pending"
+
+
 def recorded_seconds(state: RunState) -> float:
     total = 0.0
     for event in state.events:
@@ -135,11 +144,7 @@ class WorkflowProgress:
                       if stage.startswith(f"iteration:{item.name}:")]
             statuses = [stage_state.get(stage, {}).get("status", "pending")
                         for stage in stages]
-            status = ("failed" if "failed" in statuses else
-                      "running" if "running" in statuses else
-                      "complete" if all(value == "complete" for value in statuses) else
-                      "pending")
-            iteration_status[item.name] = {"status": status}
+            iteration_status[item.name] = {"status": aggregate_status(statuses)}
         print(iteration_pipeline({"iterations": iteration_status}, stream), file=stream)
         self._bar: Any | None = None
         if self.interactive:
@@ -162,8 +167,10 @@ class WorkflowProgress:
         self._bar.set_postfix_str(detail, refresh=True)
 
     def _write(self, message: str) -> None:
-        (tqdm.write(message, file=self.stream) if self._bar is not None
-         else print(message, file=self.stream, flush=True))
+        if self._bar is not None:
+            tqdm.write(message, file=self.stream)
+        else:
+            print(message, file=self.stream, flush=True)
 
     def stage_started(self, stage: str, action: str) -> None:
         with self._lock:
@@ -181,15 +188,16 @@ class WorkflowProgress:
             with self._lock:
                 self._render(stage, detail)
 
-    def stage_completed(self, stage: str) -> None:
+    def stage_completed(self, stage: str, *, created: bool) -> None:
         with self._lock:
             elapsed = time.perf_counter() - self._stage_started.pop(stage, self._started)
             if stage not in self._completed:
                 self._completed.add(stage)
                 if self._bar is not None:
                     self._bar.update(1)
+            reuse = "authenticated · " if not created else ""
             self._write(f"{paint('✓', 'green', stream=self.stream)} {pretty_stage(stage)}  "
-                        f"{format_duration(elapsed)}")
+                        f"{reuse}{format_duration(elapsed)}")
 
     def stage_failed(self, stage: str, error: BaseException) -> None:
         with self._lock:

@@ -18,7 +18,12 @@ from unittest import mock
 
 from fixture import write_feature_fixture
 from poe2_training.pattern_suites import pattern_suite
-from poe2_training.shared import complete_json_report, reserve_report_directory, sha256_file
+from poe2_training.shared import (
+    complete_json_report,
+    reserve_report_directory,
+    sha256_file,
+    write_report_attachment,
+)
 from poe2_training.workflow import (
     CommandExecutionError,
     CommandResult,
@@ -53,7 +58,12 @@ from poe2_training.workflow_config import (
     stage_fingerprints,
 )
 from poe2_training.workflow_state import RunState, StateError
-from poe2_training.workflow_ui import format_duration, paint, progress_detail
+from poe2_training.workflow_ui import (
+    WorkflowProgress,
+    format_duration,
+    paint,
+    progress_detail,
+)
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
@@ -287,8 +297,7 @@ class WorkflowConfigTest(unittest.TestCase):
         selected = model_configs[0]["name"]
         reserve_report_directory(
             iteration.training_directory, "poe2-minimax-pattern-experiment")
-        complete_json_report(
-            iteration.training_directory, "poe2-minimax-pattern-experiment", {
+        report = {
                 "schema": "poe2-minimax-pattern-experiment", "schema_version": 1,
                 "training": {"seed": 20260818, "configs": model_configs},
                 "input": {
@@ -303,9 +312,17 @@ class WorkflowConfigTest(unittest.TestCase):
                 "provenance": {
                     "git": {"dirty": False}, "runtime": {"device_type": "cpu"},
                 },
-            })
+            }
+        report["attachments"] = {
+            "training_metrics": write_report_attachment(
+                iteration.training_directory, "training-metrics.svg", b"<svg/>\n",
+                media_type="image/svg+xml")
+        }
+        complete_json_report(
+            iteration.training_directory, "poe2-minimax-pattern-experiment", report)
         authenticated = authenticate_training(config.dataset("ready"), iteration)
         self.assertEqual(authenticated["selected_model"], selected)
+        self.assertEqual(authenticated["attachments"], report["attachments"])
 
 
 class WorkflowStateTest(unittest.TestCase):
@@ -391,6 +408,15 @@ class WorkflowStateTest(unittest.TestCase):
                 "total_trajectories=1000"),
             "create 100/1,000 (10%)",
         )
+
+    def test_reused_stage_is_labeled_authenticated(self) -> None:
+        output = io.StringIO()
+        progress = WorkflowProgress(self.config, RunState(self.config), stream=output)
+        stage = "dataset:main:source"
+        progress.stage_started(stage, "authenticate")
+        progress.stage_completed(stage, created=False)
+        progress.close(success=True)
+        self.assertIn("dataset main · source  authenticated ·", output.getvalue())
 
     def test_human_status_has_progress_time_and_iteration_order(self) -> None:
         output = io.StringIO()

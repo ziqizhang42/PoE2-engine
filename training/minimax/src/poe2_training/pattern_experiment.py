@@ -35,6 +35,7 @@ from .summaries import (
     phase_interactions,
     phase_interpolation,
 )
+from .training_visualization import write_training_metrics
 from .shared import (
     complete_json_report,
     git_provenance,
@@ -305,6 +306,13 @@ def _train_model(
             result = result + ((gains @ gain_weights.T) * gain_phase).sum(dim=1)
         return result
 
+    def data_loss(prediction: Any, target: Any) -> Any:
+        if config.loss == "mse":
+            return (prediction - target).square().mean()
+        if config.loss == "huber":
+            return functional.huber_loss(prediction, target, delta=config.huber_delta)
+        raise PatternExperimentError(f"unknown pattern loss: {config.loss}")
+
     optimizer = torch.optim.Adam(parameters, lr=config.learning_rate)
     best_key = (math.inf, math.inf, math.inf)
     best_step = 0
@@ -316,35 +324,44 @@ def _train_model(
             prediction = predict(
                 train_lines, train_gain, train_plys, train_line_phase, train_gain_phase
             )
-            if config.loss == "mse":
-                data_loss = (prediction - train_target).square().mean()
-            elif config.loss == "huber":
-                data_loss = functional.huber_loss(
-                    prediction, train_target, delta=config.huber_delta
-                )
-            else:
-                raise PatternExperimentError(f"unknown pattern loss: {config.loss}")
+            measured_loss = data_loss(prediction, train_target)
             penalty = line_weights.square().sum()
             if gain_weights is not None:
                 penalty = penalty + gain_weights.square().sum()
-            loss = data_loss + config.l2 * penalty
+            loss = measured_loss + config.l2 * penalty
             loss.backward()
             optimizer.step()
 
         if step % config.evaluation_interval == 0:
             with torch.no_grad():
-                prediction = predict(
+                train_checkpoint = predict(
+                    train_lines,
+                    train_gain,
+                    train_plys,
+                    train_line_phase,
+                    train_gain_phase,
+                )
+                validation_checkpoint = predict(
                     validation_lines,
                     validation_gain,
                     validation_plys,
                     validation_line_phase,
                     validation_gain_phase,
                 )
-                error = prediction - validation_target
+                training_loss = float(data_loss(train_checkpoint, train_target).cpu())
+                validation_loss = float(
+                    data_loss(validation_checkpoint, validation_target).cpu())
+                error = validation_checkpoint - validation_target
                 mae = float(error.abs().mean().cpu())
                 rmse = float(error.square().mean().sqrt().cpu())
             key = (mae, rmse, float(step))
-            trace.append({"step": step, "validation_mae": mae, "validation_rmse": rmse})
+            trace.append({
+                "step": step,
+                "training_loss": training_loss,
+                "validation_loss": validation_loss,
+                "validation_mae": mae,
+                "validation_rmse": rmse,
+            })
             if key < best_key:
                 best_key = key
                 best_step = step
@@ -623,6 +640,10 @@ def run_pattern_experiment(
                 "best_validation_rmse": best["validation"]["overall"]["rmse"],
                 "best_vs_gain_control": model_comparison(gain_control, best),
             },
+        }
+        report["attachments"] = {
+            "training_metrics": write_training_metrics(
+                output, report, error_type=PatternExperimentError)
         }
         complete_json_report(output, SCHEMA, report, error_type=PatternExperimentError)
         return report

@@ -35,6 +35,7 @@ from .summaries import (
     phase_interactions,
     phase_interpolation,
 )
+from .training_visualization import write_training_metrics
 
 
 EXPERIMENT_SCHEMA = "poe2-minimax-baseline-experiment"
@@ -272,6 +273,10 @@ def run_baseline_experiment(
                     for model in phase_aware_models
                 },
             },
+        }
+        report["attachments"] = {
+            "training_metrics": write_training_metrics(
+                output, report, error_type=BaselineExperimentError)
         }
         complete_json_report(
             output, EXPERIMENT_SCHEMA, report, error_type=BaselineExperimentError)

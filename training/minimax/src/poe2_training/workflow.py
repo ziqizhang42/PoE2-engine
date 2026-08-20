@@ -69,6 +69,7 @@ from .workflow_config import (
 from .workflow_state import RunState, now_utc
 from .workflow_ui import (
     WorkflowProgress,
+    aggregate_status,
     format_duration,
     human_bar,
     iteration_pipeline,
@@ -412,10 +413,9 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
     for name, iteration in snapshot["iterations"].items():
         statuses = [value["status"] for stage, value in operational.items()
                     if stage.startswith(f"iteration:{name}:")]
-        if "failed" in statuses:
-            iteration["status"] = "failed"
-        elif "running" in statuses:
-            iteration["status"] = "running"
+        operational_status = aggregate_status(statuses)
+        if operational_status in {"failed", "running"}:
+            iteration["status"] = operational_status
     stage_statuses: list[str] = []
     for dataset in snapshot["datasets"].values():
         if dataset["kind"] == "managed":
@@ -427,8 +427,9 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
     completed, total = stage_statuses.count("complete"), len(stage_statuses)
     percent = 100.0 * completed / total if total else 100.0
     iteration_statuses = [value["status"] for value in snapshot["iterations"].values()]
-    overall = ("failed" if "failed" in iteration_statuses else
-               "running" if "running" in iteration_statuses else str(snapshot["status"]))
+    overall = aggregate_status(iteration_statuses)
+    if overall == "pending":
+        overall = str(snapshot["status"])
     style = {"complete": "green", "failed": "red", "running": "cyan"}.get(
         overall, "yellow")
     print(f"{paint('run', 'bold')} {config.name}  {paint(overall.upper(), 'bold', style)}")
@@ -714,7 +715,7 @@ class WorkflowRunner:
         )
         self.state.write_summary(workflow_snapshot(self.config))
         if self.progress is not None:
-            self.progress.stage_completed(stage)
+            self.progress.stage_completed(stage, created=creation > 0.0)
 
     def _fail(self, stage: str, error: BaseException, started: float) -> None:
         self.state.append("stage_failed", stage=stage,

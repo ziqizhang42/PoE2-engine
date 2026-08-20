@@ -70,6 +70,10 @@ class BaselineExperimentTest(unittest.TestCase):
 
             self.assertEqual((first / "report.json").read_bytes(),
                              (second / "report.json").read_bytes())
+            self.assertEqual((first / "training-metrics.svg").read_bytes(),
+                             (second / "training-metrics.svg").read_bytes())
+            self.assertIn("Selected-model ridge path",
+                          (first / "training-metrics.svg").read_text(encoding="utf-8"))
             self.assertEqual(open_baseline_report(first), report)
             self.assertEqual(report, repeated)
             models = {model["name"]: model for model in report["models"]}

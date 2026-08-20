@@ -52,12 +52,14 @@ def _require(condition: bool, message: str) -> None:
         raise AdapterError(message)
 
 
-def _require_report_layout(directory: Path, label: str) -> None:
+def _require_report_layout(directory: Path, label: str,
+                           attachments: set[str] | None = None) -> None:
     try:
         names = {path.name for path in directory.iterdir()}
     except OSError as error:
         raise AdapterError(f"could not inspect {directory}: {error}") from error
-    _require(names == {"COMPLETE", "report.json"},
+    expected = {"COMPLETE", "report.json"} | (attachments or set())
+    _require(names == expected,
              f"{label} has unexpected output files: {directory}")
 
 
@@ -413,7 +415,6 @@ def authenticate_features(dataset: DatasetConfig, *, require_clean: bool = True)
 
 def authenticate_training(dataset: DatasetConfig,
                           iteration: IterationConfig) -> dict[str, Any]:
-    _require_report_layout(iteration.training_directory, "training report")
     feature = authenticate_features(dataset)
     training = iteration.training
     if isinstance(training, BaselineTrainingConfig):
@@ -437,6 +438,10 @@ def authenticate_training(dataset: DatasetConfig,
         matches = [item for item in report.get("models", []) if item.get("name") == selected_name]
         _require(len(matches) == 1, "pattern report selected model is missing or duplicated")
         selected = matches[0]
+    attachments = {
+        metadata["path"] for metadata in report.get("attachments", {}).values()
+    }
+    _require_report_layout(iteration.training_directory, "training report", attachments)
     metadata = report.get("input", {})
     _require(metadata.get("feature_binary_sha256") == feature["binary_sha256"] and
              metadata.get("feature_manifest_sha256") == feature["manifest_sha256"],
@@ -463,7 +468,7 @@ def authenticate_training(dataset: DatasetConfig,
         "kind": training.type, "selected_model": selected.get("name"),
         "selected_validation": selected.get("validation", {}).get("overall"),
         "selected_quantized_validation": quantized_validation,
-        "input": metadata,
+        "input": metadata, "attachments": report.get("attachments", {}),
     }
 
 

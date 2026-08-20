@@ -17,6 +17,14 @@ class SharedArtifactError(ValueError):
     """Raised when a shared create-only artifact operation fails."""
 
 
+_REPORT_FILENAMES = {"COMPLETE", "INCOMPLETE", "report.json"}
+
+
+def _valid_attachment_name(filename: object) -> bool:
+    return (isinstance(filename, str) and bool(filename) and
+            Path(filename).name == filename and filename not in _REPORT_FILENAMES)
+
+
 def sha256_file(path: Path | str) -> str:
     """Return the lowercase SHA-256 digest of one file."""
     resolved = Path(path)
@@ -71,6 +79,65 @@ def reserve_report_directory(directory: Path | str, schema: str, *,
     except OSError as error:
         raise error_type(f"could not reserve {root}: {error}") from error
     return root
+
+
+def write_report_attachment(
+    directory: Path | str,
+    filename: str,
+    contents: bytes,
+    *,
+    media_type: str,
+    error_type: type[ValueError] = SharedArtifactError,
+) -> dict[str, Any]:
+    """Create one report-owned file and return its authentication metadata."""
+    if not _valid_attachment_name(filename):
+        raise error_type(f"unsafe report attachment name: {filename!r}")
+    root = Path(directory).resolve()
+    try:
+        atomic_write_bytes(root / filename, contents)
+    except OSError as error:
+        raise error_type(f"could not write report attachment {root / filename}: {error}") from error
+    return {
+        "path": filename,
+        "media_type": media_type,
+        "bytes": len(contents),
+        "sha256": hashlib.sha256(contents).hexdigest(),
+    }
+
+
+def authenticate_report_attachments(
+    directory: Path | str,
+    report: dict[str, Any],
+    *,
+    error_type: type[ValueError] = SharedArtifactError,
+) -> set[str]:
+    """Authenticate every report attachment and return its exact filenames."""
+    root = Path(directory).resolve()
+    attachments = report.get("attachments", {})
+    if not isinstance(attachments, dict):
+        raise error_type(f"report attachments are malformed: {root}")
+    paths: set[str] = set()
+    for name, metadata in attachments.items():
+        if (not isinstance(name, str) or not name or not isinstance(metadata, dict) or
+                set(metadata) != {"path", "media_type", "bytes", "sha256"}):
+            raise error_type(f"report attachment metadata is malformed: {root}")
+        path = metadata["path"]
+        digest = metadata["sha256"]
+        if (not _valid_attachment_name(path) or path in paths or
+                not isinstance(metadata["media_type"], str) or
+                not isinstance(metadata["bytes"], int) or metadata["bytes"] < 0 or
+                not isinstance(digest, str) or len(digest) != 64):
+            raise error_type(f"report attachment metadata is malformed: {root}")
+        try:
+            bytes.fromhex(digest)
+            size = (root / path).stat().st_size
+            actual = sha256_file(root / path)
+        except (OSError, ValueError, SharedArtifactError) as error:
+            raise error_type(f"could not authenticate report attachment {root / path}: {error}") from error
+        if size != metadata["bytes"] or actual != digest:
+            raise error_type(f"report attachment differs from metadata: {root / path}")
+        paths.add(path)
+    return paths
 
 
 def complete_json_report(directory: Path | str, schema: str,
@@ -136,6 +203,7 @@ def open_json_report(
     if (not isinstance(report, dict) or report.get("schema") != schema or
             report.get("schema_version") != schema_version):
         fail(f"report schema is unsupported: {root}")
+    authenticate_report_attachments(root, report, error_type=error_type)
     return report, actual_digest
 
 

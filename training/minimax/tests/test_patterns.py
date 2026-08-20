@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
+from pathlib import Path
+
+from fixture import FixtureRecord, write_feature_fixture
 
 
 @unittest.skipUnless(importlib.util.find_spec("numpy"), "NumPy is not installed")
@@ -53,6 +57,43 @@ class PatternRepresentationTest(unittest.TestCase):
         counts = line_pattern_counts(patterns)
         self.assertEqual(counts.shape, (2, 1716))
         self.assertEqual(counts.sum(axis=1).tolist(), [36.0, 36.0])
+
+    def test_training_records_loss_trace_and_authenticated_chart(self) -> None:
+        from poe2_training.pattern_experiment import (
+            ModelConfig,
+            open_pattern_report,
+            run_pattern_experiment,
+        )
+
+        rows = tuple(
+            FixtureRecord(
+                key=index,
+                split=1 if index <= 4 else 2,
+                ply=index % 2,
+                teacher_value=index + 2,
+                two_ply_closure_value=index // 2,
+            )
+            for index in range(1, 7)
+        )
+        config = ModelConfig(
+            name="tiny-loss-curve", line_knots=(0,), gain_knots=None,
+            loss="mse", huber_delta=0.0, l2=1.0e-5,
+            max_steps=2, evaluation_interval=1, patience_steps=2,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = write_feature_fixture(root / "features", rows=rows)
+            output = root / "training"
+            report = run_pattern_experiment(
+                dataset, output, requested_device="cpu", configs=(config,))
+            trace = report["models"][0]["trace"]
+            self.assertEqual([point["step"] for point in trace], [0, 1, 2])
+            self.assertTrue(all("training_loss" in point and "validation_loss" in point
+                                for point in trace))
+            opened = open_pattern_report(output)
+            self.assertEqual(opened["models"][0]["trace"], trace)
+            self.assertEqual(opened["attachments"], report["attachments"])
+            self.assertTrue((output / "training-metrics.svg").is_file())
 
 
 if __name__ == "__main__":
