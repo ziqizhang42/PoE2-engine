@@ -13,7 +13,7 @@ from typing import Any, Iterable, Sequence
 
 
 REPORT_SCHEMA = "poe2-minimax-pattern-experiment"
-# Immutable identifier in the authenticated report; new code uses descriptive names.
+# Model identifier required by the engine header contract.
 AUTHENTICATED_MODEL_ID = "frozen_c_line_0_28_49_gain_phase_5_huber8"
 LINE_KNOTS = (0, 28, 49)
 GAIN_KNOTS = (0, 12, 24, 36, 49)
@@ -125,12 +125,12 @@ def render_header(report: dict[str, Any], report_digest: str) -> str:
             "frozen model configuration or quantization is missing")
     require(tuple(config.get("line_knots", ())) == LINE_KNOTS and
             tuple(config.get("gain_knots", ())) == GAIN_KNOTS,
-            "frozen model phase knots differ from the selected architecture")
+            "frozen model phase knots differ from the deployment architecture")
     require(quantized.get("definition") ==
             "int16-tables-int32-intercept-power-of-two-v1" and
             quantized.get("fractional_bits") == FRACTIONAL_BITS and
             quantized.get("scale") == SCALE,
-            "frozen model quantization differs from the selected scale")
+            "frozen model quantization differs from the deployment scale")
 
     intercept = integer_vector(
         quantized.get("intercept"), "quantization.intercept", PLY_COUNT,

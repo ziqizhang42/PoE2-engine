@@ -10,7 +10,7 @@ from fixture import FixtureRecord, write_feature_fixture
 
 @unittest.skipUnless(importlib.util.find_spec("numpy"), "NumPy is not installed")
 class PatternRepresentationTest(unittest.TestCase):
-    def test_frozen_pattern_gain_suite_matches_the_development_selection(self) -> None:
+    def test_frozen_pattern_gain_suite_matches_the_deployment_contract(self) -> None:
         from poe2_training.pattern_experiment import (
             FROZEN_PATTERN_GAIN_FRACTIONAL_BITS,
             FROZEN_PATTERN_GAIN_MODEL_ID,

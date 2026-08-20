@@ -129,9 +129,8 @@ def default_suite() -> tuple[ModelConfig, ...]:
 
 
 def frozen_pattern_gain_suite() -> tuple[ModelConfig, ...]:
-    """Return the architecture selected on the development corpus."""
+    """Return the fixed model and quantization contract accepted by the engine."""
     return (ModelConfig(
-        # Immutable identifier embedded in the already-authenticated training report.
         name=FROZEN_PATTERN_GAIN_MODEL_ID,
         line_knots=(0, 28, 49),
         gain_knots=GAIN_KNOTS,
@@ -476,7 +475,7 @@ def run_pattern_experiment(
     seed: int = 20260818,
     configs: Sequence[ModelConfig] | None = None,
 ) -> dict[str, Any]:
-    """Train a fixed model ladder using train/validation only."""
+    """Train configured model candidates using train/validation only."""
     import torch
 
     if seed < 0:
@@ -660,7 +659,7 @@ def main() -> int:
     parser.add_argument("--suite",
                         choices=SUITE_NAMES,
                         default="default",
-                        help="model suite; frozen-pattern-gain is the selected architecture")
+                        help="model suite; frozen-pattern-gain is the fixed deployment contract")
     arguments = parser.parse_args()
     configs = pattern_suite(arguments.suite)
     try:

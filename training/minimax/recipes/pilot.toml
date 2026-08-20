@@ -33,7 +33,7 @@ workers = 6
 progress_every = 100
 require_all = true
 
-# Independent corpus used to train and evaluate the chosen shape.
+# Independent corpus used to train and evaluate the fixed deployment architecture.
 [datasets.final]
 kind = "managed"
 
@@ -61,7 +61,7 @@ workers = 6
 progress_every = 100
 require_all = true
 
-# Choose the model shape using only the selection corpus.
+# Compare the exploratory model ladder and report its validation winner.
 [[iterations]]
 name = "select-model"
 dataset = "selection"
@@ -72,7 +72,7 @@ device = "cuda"
 seed = 20260818
 suite = "default"
 
-# Train the chosen shape on the independent final corpus.
+# Train the fixed deployment architecture; the dependency does not inherit the ladder winner.
 [[iterations]]
 name = "train-final-model"
 dataset = "final"

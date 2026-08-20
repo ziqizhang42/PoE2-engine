@@ -70,7 +70,7 @@ uv run --frozen poe2-train-baselines \
 
 ## Pattern experiment
 
-The pattern experiment fits reversal-tied ternary scoring-line tables to the same two-ply-closure residual, optionally combined with exact marginal-gain summaries. The development ladder uses train and validation only. Once its architecture has been selected, `--suite frozen-pattern-gain` trains only the fixed three-knot line model `(0, 28, 49)` with five gain knots, Huber delta 8, and L2 strength `1e-4`; it does not reopen architecture selection on the new corpus.
+The pattern experiment fits reversal-tied ternary scoring-line tables to the same two-ply-closure residual, optionally combined with exact marginal-gain summaries. The exploratory `default` suite reports its validation winner but does not alter another iteration. The engine-compatible architecture was fixed by an earlier broad development ladder followed by a middle-knot refinement: `--suite frozen-pattern-gain` trains that fixed three-knot line model `(0, 28, 49)` with five gain knots, Huber delta 8, and L2 strength `1e-4`. Candidate export intentionally rejects other architectures.
 
 The integrated `pattern-gain` evaluator is closure plus one frozen learned residual. Its inputs are the 36 board scoring lines encoded as own/opponent/empty ternary patterns, and 19 cheap summaries of legal-move gains: each side's top four gains, four threshold counts per side, contested-best and unique-opponent-best flags, and denied opponent gain. Line weights interpolate across plies 0/28/49; gain-summary weights interpolate across plies 0/12/24/36/49; a per-ply intercept completes the model.
 
