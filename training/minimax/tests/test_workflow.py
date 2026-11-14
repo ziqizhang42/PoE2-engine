@@ -710,6 +710,60 @@ class WorkflowStateTest(unittest.TestCase):
                 {"upstream": "changed"}, mock.Mock(), authenticate)
         self.assertEqual(authenticate.call_count, 1)
 
+    def test_interruption_discards_only_unfinished_artifacts_this_run_started(self) -> None:
+        state = RunState(self.config)
+        state.accept_config()
+        runner = WorkflowRunner(self.config, state, "1" * 40)
+        interrupted = self.config.iteration("one").training_directory
+
+        def interrupt(_attempt: int) -> None:
+            reserve_report_directory(interrupted, "fixture-report")
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            runner._run_simple("iteration:one:training", interrupted, "training report",
+                               {}, interrupt, lambda _attempt: {})
+        finished = self.config.output_directory / "finished"
+        reserve_report_directory(finished, "fixture-report")
+        complete_json_report(finished, "fixture-report", {"schema": "fixture-report",
+                                                          "schema_version": 1})
+        runner._start_artifact(finished)
+        foreign = self.config.dataset("main").source_directory
+        foreign.mkdir(parents=True)
+        (foreign / "INCOMPLETE").write_text("fixture\n", encoding="utf-8")
+
+        self.assertEqual(runner.discard_interrupted_artifacts(), [interrupted])
+        self.assertFalse(interrupted.exists())
+        self.assertTrue((finished / "COMPLETE").is_file())
+        self.assertTrue((foreign / "INCOMPLETE").is_file())
+        removals = [event["path"] for event in RunState(self.config).events
+                    if event["type"] == "interrupted_artifact_removed"]
+        self.assertEqual(removals, [str(interrupted)])
+
+        runner._start_artifact(self.root / "outside")
+        (self.root / "outside").mkdir()
+        with self.assertRaisesRegex(WorkflowError, "outside the run"):
+            runner.discard_interrupted_artifacts()
+
+    def test_interrupted_label_shard_is_discarded(self) -> None:
+        state = RunState(self.config)
+        state.accept_config()
+        runner = WorkflowRunner(self.config, state, "1" * 40)
+        dataset = self.config.dataset("main")
+        shard = label_shard_path(dataset, 1)
+
+        def interrupted_command(*_arguments, **_options) -> None:
+            shard.mkdir(parents=True)
+            (shard / "INCOMPLETE").write_text("poe2-minimax-labels\n", encoding="utf-8")
+            raise KeyboardInterrupt
+
+        with mock.patch.object(runner, "_command", side_effect=interrupted_command):
+            with self.assertRaises(KeyboardInterrupt):
+                runner._create_label_shard("dataset:main:labels", dataset, 1, 1)
+        self.assertEqual(runner.discard_interrupted_artifacts(), [shard])
+        self.assertFalse(shard.exists())
+        self.assertTrue(shard.parent.is_dir())
+
     def test_command_failure_can_retry_with_new_create_only_logs(self) -> None:
         runner = CommandRunner(REPOSITORY)
         with self.assertRaises(CommandExecutionError):

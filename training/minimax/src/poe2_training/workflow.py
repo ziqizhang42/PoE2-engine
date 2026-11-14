@@ -11,6 +11,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -664,6 +665,31 @@ class WorkflowRunner:
         self.progress = progress
         # Commit each run-local data binary was built or authenticated at, keyed by binary path.
         self._data_commits: dict[Path, str] = {}
+        # Artifact paths this runner began creating; an interruption discards unfinished ones.
+        self._started_artifacts: set[Path] = set()
+        self._artifact_lock = threading.Lock()
+
+    def _start_artifact(self, path: Path) -> None:
+        with self._artifact_lock:
+            self._started_artifacts.add(path)
+
+    def discard_interrupted_artifacts(self) -> list[Path]:
+        """Remove artifacts this runner started but did not finish; call once its commands stop."""
+        with self._artifact_lock:
+            started = sorted(self._started_artifacts)
+        removed: list[Path] = []
+        for path in started:
+            if _path_state(path) in {"missing", "complete"}:
+                continue
+            if self.config.output_directory not in path.parents:
+                raise WorkflowError(f"refusing to discard a path outside the run: {path}")
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            self.state.append("interrupted_artifact_removed", path=str(path))
+            removed.append(path)
+        return removed
 
     def _paths(self, stage: str, operation: str, attempt: int) -> tuple[Path, Path]:
         safe = stage.replace(":", "-")
@@ -803,6 +829,7 @@ class WorkflowRunner:
         try:
             if path_state == "missing":
                 started = time.perf_counter()
+                self._start_artifact(path)
                 create(attempt)
                 creation = time.perf_counter() - started
             auth_started = time.perf_counter()
@@ -915,9 +942,7 @@ class WorkflowRunner:
                 create_started = time.perf_counter()
 
                 def run_shard(index: int) -> tuple[int, dict[str, Any], float]:
-                    command_result = self._command(
-                        stage, f"create-shard-{index:03d}",
-                        label_command(self.config, dataset, index), attempt=attempt)
+                    command_result = self._create_label_shard(stage, dataset, index, attempt)
                     auth_started = time.perf_counter()
                     self._command(
                         stage, f"audit-new-shard-{index:03d}",
@@ -968,6 +993,13 @@ class WorkflowRunner:
         except BaseException as error:
             self._fail(stage, error, stage_started)
             raise
+
+    def _create_label_shard(self, stage: str, dataset: ManagedDatasetConfig, index: int,
+                            attempt: int) -> CommandResult:
+        self._start_artifact(label_shard_path(dataset, index))
+        return self._command(
+            stage, f"create-shard-{index:03d}",
+            label_command(self.config, dataset, index), attempt=attempt)
 
     def _prepare_features(self, dataset: ManagedDatasetConfig,
                           source_stats: dict[str, Any],
@@ -1357,9 +1389,14 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
                 success = True
         except KeyboardInterrupt as error:
             runner.commands.terminate_all()
-            state.append("run_interrupted", error="keyboard interrupt")
+            removed = runner.discard_interrupted_artifacts()
+            state.append("run_interrupted", error="keyboard interrupt",
+                         removed=[str(path) for path in removed])
             state.write_summary(workflow_snapshot(config))
-            raise WorkflowError("workflow interrupted; complete shards were preserved") from error
+            discarded = "".join(f"\n  removed unfinished {path}" for path in removed)
+            raise WorkflowError(
+                "workflow interrupted; completed artifacts were preserved and the same command "
+                f"resumes{discarded}") from error
         except BaseException as error:
             runner.commands.terminate_all()
             state.append("run_failed", error=str(error))
