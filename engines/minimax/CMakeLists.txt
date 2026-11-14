@@ -73,6 +73,7 @@ if(POE2_BUILD_NATIVE_APPS)
   )
 
   add_library(poe2_minimax_labeling STATIC
+    src/durable_file.cpp
     src/feature_data.cpp
     src/labeling.cpp
     src/position_source.cpp

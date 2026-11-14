@@ -16,6 +16,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "poe2/minimax/durable_file.hpp"
 #include "poe2/minimax/labeling_build.hpp"
 #include "poe2/symmetry.hpp"
 
@@ -606,11 +607,13 @@ void write_dataset(DatasetOutput& output, const LabelDataset& dataset) {
 
   write_binary_file(binary_temporary, binary_bytes);
   write_text_file(manifest_temporary, manifest_text);
+  sync_path(binary_temporary);
+  sync_path(manifest_temporary);
   fs::rename(binary_temporary, binary);
   fs::rename(manifest_temporary, manifest);
-  write_text_file(incomplete, "poe2-minimax-labels\nbinary_sha256=" + sha256_text(binary_digest) +
-                                  "\nmanifest_sha256=" + sha256_text(manifest_digest) + "\n");
-  fs::rename(incomplete, complete);
+  commit_marker(incomplete, complete,
+                "poe2-minimax-labels\nbinary_sha256=" + sha256_text(binary_digest) +
+                    "\nmanifest_sha256=" + sha256_text(manifest_digest) + "\n");
   output.committed_ = true;
 }
 

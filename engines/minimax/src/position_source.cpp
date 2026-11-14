@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "poe2/minimax/durable_file.hpp"
 #include "poe2/minimax/labeling_build.hpp"
 #include "poe2/symmetry.hpp"
 
@@ -1329,13 +1330,16 @@ void write_position_source(SourceOutput& output, const PositionSourceCorpus& cor
     const fs::path final_path = shard_directory / shard_file_name(shard.shard_index, shard.digest);
     const fs::path temporary_path = final_path.string() + ".tmp";
     write_text_file(temporary_path, shard.bytes);
+    sync_path(temporary_path);
     fs::rename(temporary_path, final_path);
   }
+  sync_path(shard_directory);
   write_text_file(manifest_temporary, manifest_bytes);
+  sync_path(manifest_temporary);
   fs::rename(manifest_temporary, manifest);
-  write_text_file(incomplete, "poe2-position-source\nmanifest_sha256=" +
-                                  labeling::sha256_text(manifest_digest) + "\n");
-  fs::rename(incomplete, complete);
+  commit_marker(
+      incomplete, complete,
+      "poe2-position-source\nmanifest_sha256=" + labeling::sha256_text(manifest_digest) + "\n");
   output.committed_ = true;
 }
 
@@ -1580,9 +1584,9 @@ void write_position_source_chunk(const fs::path& directory, const PositionSource
   }
   const std::string bytes = serialize_source_chunk(chunk);
   write_text_file(temporary, bytes);
+  sync_path(temporary);
   fs::rename(temporary, file);
-  write_text_file(incomplete, chunk_complete_marker(labeling::sha256(bytes)));
-  fs::rename(incomplete, complete);
+  commit_marker(incomplete, complete, chunk_complete_marker(labeling::sha256(bytes)));
 }
 
 PositionSourceChunk read_position_source_chunk(const fs::path& directory) {

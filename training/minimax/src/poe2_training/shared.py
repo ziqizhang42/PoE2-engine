@@ -43,13 +43,32 @@ def canonical_json(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
 
 
+def sync_path(path: Path) -> None:
+    """Flush one file's contents, or one directory's entries, to the storage device."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def sync_tree(root: Path) -> None:
+    """Flush every regular file and directory under root, deepest first."""
+    for directory, _, files in os.walk(root, topdown=False):
+        for name in files:
+            path = Path(directory, name)
+            if path.is_file() and not path.is_symlink():
+                sync_path(path)
+        sync_path(Path(directory))
+
+
 def atomic_write_bytes(path: Path, contents: bytes, *, replace: bool = False) -> None:
     """Durably write bytes either create-only or through an atomic replacement."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    mode = "wb" if replace else "xb"
     try:
-        with temporary.open(mode) as destination:
+        # A crash can leave the temporary behind; only the final name is create-only.
+        with temporary.open("wb") as destination:
             destination.write(contents)
             destination.flush()
             os.fsync(destination.fileno())
@@ -59,6 +78,7 @@ def atomic_write_bytes(path: Path, contents: bytes, *, replace: bool = False) ->
             # link(2) installs the final name atomically and refuses an existing target.
             os.link(temporary, path)
             temporary.unlink()
+        sync_path(path.parent)
     except OSError:
         try:
             if temporary.exists():
@@ -149,11 +169,15 @@ def complete_json_report(directory: Path | str, schema: str,
     digest = hashlib.sha256(report_bytes).hexdigest()
     try:
         atomic_write_bytes(root / "report.json", report_bytes)
+        # COMPLETE vouches for every file below it, so all of them reach the disk first.
+        sync_tree(root)
         atomic_write_bytes(
             root / "COMPLETE",
             f"{schema}\nreport_sha256={digest}\n".encode(),
         )
         (root / "INCOMPLETE").unlink()
+        sync_path(root)
+        sync_path(root.parent)
     except OSError as error:
         raise error_type(f"could not complete {root}: {error}") from error
     return digest

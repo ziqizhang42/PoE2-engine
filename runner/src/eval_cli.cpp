@@ -320,6 +320,30 @@ void create_parent_directories(const fs::path& path) {
   }
 }
 
+void sync_path(const fs::path& path) {
+  const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (descriptor < 0) {
+    throw std::runtime_error{"failed to open " + path.string() + ": " + std::strerror(errno)};
+  }
+  const int result = ::fsync(descriptor);
+  const int error = errno;
+  ::close(descriptor);
+  if (result != 0) {
+    throw std::runtime_error{"failed to sync " + path.string() + ": " + std::strerror(error)};
+  }
+}
+
+// The workflow and the ledger treat a run directory as evidence, so its files must be on disk
+// before anything refers to them.
+void sync_run_directory(const fs::path& directory) {
+  for (const fs::directory_entry& entry : fs::directory_iterator{directory}) {
+    if (entry.is_regular_file()) {
+      sync_path(entry.path());
+    }
+  }
+  sync_path(directory);
+}
+
 class LedgerFileLock {
  public:
   explicit LedgerFileLock(const fs::path& ledger_path) {
@@ -921,7 +945,9 @@ void migrate_ledger_if_needed(const fs::path& path) {
   if (!output) {
     throw std::runtime_error{"failed to finish " + temporary.string()};
   }
+  sync_path(temporary);
   fs::rename(temporary, path);
+  sync_path(path.has_parent_path() ? path.parent_path() : fs::path{"."});
 }
 
 void append_ledger_row(const fs::path& path, const EvalOptions& options,
@@ -1029,6 +1055,11 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
          << score_text(result.betting_log_evidence_below_even) << ',' << result.workers_requested
          << ',' << result.workers_used << ',' << result.games_discarded;
   output << '\n';
+  output.close();
+  if (!output) {
+    throw std::runtime_error{"failed to append " + path.string()};
+  }
+  sync_path(path);
 }
 
 [[nodiscard]] EvalOptions parse_eval_options(int argc, char** argv) {
@@ -1381,6 +1412,7 @@ int run_eval(int argc, char** argv) {
                       base_id, new_engine_path, base_engine_path);
   append_ledger_row(run.path / "ledger-row.csv", options, result, timestamp, run.run_id, new_id,
                     base_id, run.path);
+  sync_run_directory(run.path);
   if (options.write_ledger) {
     append_ledger_row(options.ledger, options, result, timestamp, run.run_id, new_id, base_id,
                       run.path, true);

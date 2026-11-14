@@ -122,6 +122,8 @@ CHAIN = textwrap.dedent("""
 
 class ChainFixture(unittest.TestCase):
     def setUp(self) -> None:
+        # Private builds here are mocked; test_workflow_recovery covers the Catch2 reuse.
+        self.enterContext(mock.patch("poe2_training.workflow.catch2_pin", return_value=None))
         self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
 

@@ -20,7 +20,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Sequence
 
 from .shared import (
@@ -29,6 +29,8 @@ from .shared import (
     complete_json_report,
     reserve_report_directory,
     sha256_file,
+    sync_path,
+    sync_tree,
 )
 from .workflow_adapters import (
     CANDIDATE_SCHEMA,
@@ -49,6 +51,9 @@ from .workflow_adapters import (
     authenticate_training,
     candidate_build_id,
     candidate_training_datasets,
+    catch2_cache_directory,
+    catch2_candidates,
+    catch2_pin,
     comparison_command,
     comparison_side,
     data_binary,
@@ -75,6 +80,7 @@ from .workflow_adapters import (
     source_chunks_directory,
     source_audit_command,
     training_command,
+    verified_checkout,
 )
 from .workflow_config import (
     CANDIDATE_ENGINE,
@@ -148,6 +154,9 @@ class CommandRunner:
 
     def __init__(self, repository: Path) -> None:
         self.repository = repository
+        # Commands inherit the run lock, so a command that outlives a killed orchestrator keeps
+        # the next one from treating its unfinished artifact as a crash leftover.
+        self.lock_descriptors: tuple[int, ...] = ()
         self._active: dict[int, subprocess.Popen[str]] = {}
         self._lock = threading.Lock()
         self._print_lock = threading.Lock()
@@ -197,6 +206,7 @@ class CommandRunner:
                 process = subprocess.Popen(
                     wrapped, cwd=self.repository, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
+                    pass_fds=self.lock_descriptors,
                 )
             except OSError as error:
                 raise WorkflowError(f"could not start {shlex.join(command)}: {error}") from error
@@ -350,7 +360,8 @@ def _interruptions_as_keyboard() -> Iterator[None]:
 
 
 @contextmanager
-def run_lock(config: WorkflowConfig) -> Iterator[None]:
+def run_lock(config: WorkflowConfig) -> Iterator[int]:
+    """Hold the run lock, yielding its descriptor; commands that inherit it hold it too."""
     config.output_directory.mkdir(parents=True, exist_ok=True)
     path = config.output_directory / ".orchestrator.lock"
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -358,11 +369,13 @@ def run_lock(config: WorkflowConfig) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise WorkflowError(f"another orchestrator holds the run lock: {path}") from error
+            raise WorkflowError(
+                f"another orchestrator, or a command a stopped one started, holds the run "
+                f"lock; `fuser -v {path}` lists them") from error
         os.ftruncate(descriptor, 0)
         os.write(descriptor, f"pid={os.getpid()}\n".encode())
         os.fsync(descriptor)
-        yield
+        yield descriptor
     finally:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -386,6 +399,70 @@ def _blocked_path(path: Path, kind: str) -> WorkflowError:
     return WorkflowError(
         f"{kind} path exists but is not a complete authenticatable artifact; "
         f"move it aside or remove it explicitly, then retry: {path}")
+
+
+def _artifact_record(config: WorkflowConfig, path: Path) -> dict[str, str]:
+    """Return the event fields naming an artifact, by its path inside the run folder."""
+    if config.output_directory not in path.parents:
+        raise WorkflowError(f"refusing to track an artifact outside the run: {path}")
+    return {"path": str(path), "artifact": path.relative_to(config.output_directory).as_posix()}
+
+
+def _remove_artifact(config: WorkflowConfig, path: Path) -> None:
+    if config.output_directory not in path.parents:
+        raise WorkflowError(f"refusing to discard a path outside the run: {path}")
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _recorded_artifact(config: WorkflowConfig, artifact: str) -> Path | None:
+    relative = PurePosixPath(artifact)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        return None
+    return config.output_directory.joinpath(*relative.parts)
+
+
+def recover_after_crash(config: WorkflowConfig, state: RunState) -> list[Path]:
+    """Repair a torn event log and remove artifacts a stopped invocation left unfinished.
+
+    Call under the run lock. Only paths the log records starting, with no later outcome, are
+    touched; complete ones are kept for authentication, which reports any damage.
+    """
+    dropped = state.repair_torn_tail()
+    if dropped:
+        print(f"dropped an incomplete final record ({dropped} bytes) from {state.events_path}",
+              file=sys.stderr)
+    removed: list[Path] = []
+    for artifact in state.unfinished_artifacts():
+        path = _recorded_artifact(config, artifact)
+        if path is None:
+            state.append("crash_artifact_kept", artifact=artifact,
+                         reason="recorded path is not inside the run folder")
+            print(f"kept {artifact}: its recorded path is not inside the run folder",
+                  file=sys.stderr)
+            continue
+        fields = _artifact_record(config, path)
+        path_state = _path_state(path)
+        if path_state == "complete":
+            state.append("artifact_completed", **fields, recovered=True)
+        elif path_state == "missing" and not path.is_symlink():
+            state.append("artifact_abandoned", **fields)
+        else:
+            _remove_artifact(config, path)
+            state.append("crash_artifact_removed", **fields)
+            print(f"removed unfinished {path} left by a stopped run", file=sys.stderr)
+            removed.append(path)
+    return removed
+
+
+@contextmanager
+def _recovered_run_lock(config: WorkflowConfig) -> Iterator[tuple[int, RunState]]:
+    with run_lock(config) as descriptor:
+        state = RunState(config)
+        recover_after_crash(config, state)
+        yield descriptor, state
 
 
 def workflow_snapshot(config: WorkflowConfig) -> dict[str, Any]:
@@ -1002,26 +1079,83 @@ class WorkflowRunner:
         self._artifact_lock = threading.Lock()
 
     def _start_artifact(self, path: Path) -> None:
+        """Record durably that this invocation is about to create path."""
+        self.state.append("artifact_started", **_artifact_record(self.config, path))
         with self._artifact_lock:
             self._started_artifacts.add(path)
 
-    def discard_interrupted_artifacts(self) -> list[Path]:
-        """Remove artifacts this runner started but did not finish; call once its commands stop."""
+    def _finish_artifact(self, path: Path) -> None:
+        with self._artifact_lock:
+            self._started_artifacts.discard(path)
+        self.state.append("artifact_completed", **_artifact_record(self.config, path))
+
+    def _take_unfinished_artifacts(self) -> list[Path]:
         with self._artifact_lock:
             started = sorted(self._started_artifacts)
+            self._started_artifacts.clear()
+        return started
+
+    def discard_interrupted_artifacts(self) -> list[Path]:
+        """Remove artifacts this runner started but did not finish; call once its commands stop."""
         removed: list[Path] = []
-        for path in started:
-            if _path_state(path) in {"missing", "complete"}:
-                continue
-            if self.config.output_directory not in path.parents:
-                raise WorkflowError(f"refusing to discard a path outside the run: {path}")
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
+        for path in self._take_unfinished_artifacts():
+            fields = _artifact_record(self.config, path)
+            path_state = _path_state(path)
+            if path_state == "complete":
+                self.state.append("artifact_completed", **fields)
+            elif path_state == "missing" and not path.is_symlink():
+                self.state.append("artifact_abandoned", **fields)
             else:
-                path.unlink()
-            self.state.append("interrupted_artifact_removed", path=str(path))
-            removed.append(path)
+                _remove_artifact(self.config, path)
+                self.state.append("interrupted_artifact_removed", **fields)
+                removed.append(path)
         return removed
+
+    def keep_failed_artifacts(self) -> list[Path]:
+        """Record unfinished artifacts as failed, keeping them for inspection; return them."""
+        failed = self._take_unfinished_artifacts()
+        for path in failed:
+            self.state.append("artifact_failed", **_artifact_record(self.config, path))
+        return failed
+
+    def _catch2_arguments(self) -> list[str]:
+        """Point a private build at a verified Catch2 checkout on disk, copied into the run.
+
+        Without one the value is empty, which makes CMake fetch normally even in a build tree
+        configured with a checkout before.
+        """
+        pin = catch2_pin(self.config.repository)
+        if pin is None:
+            return []
+        cache = catch2_cache_directory(self.config, pin)
+        if not cache.exists() and not cache.is_symlink():
+            source = next((path for path in catch2_candidates(self.config)
+                           if verified_checkout(path, pin)), None)
+            if source is not None:
+                self._copy_checkout(source, cache)
+        checkout = str(cache) if verified_checkout(cache, pin) else ""
+        return [f"-DFETCHCONTENT_SOURCE_DIR_{pin.name.upper()}={checkout}"]
+
+    def _copy_checkout(self, source: Path, destination: Path) -> None:
+        self._start_artifact(destination)
+        try:
+            shutil.copytree(source, destination, symlinks=True)
+            sync_tree(destination)
+            sync_path(destination.parent)
+        except OSError:
+            with self._artifact_lock:
+                self._started_artifacts.discard(destination)
+            shutil.rmtree(destination, ignore_errors=True)
+            self.state.append("artifact_abandoned",
+                              **_artifact_record(self.config, destination))
+            return
+        self._finish_artifact(destination)
+
+    def _configure(self, stage: str, operation: str, build: Path, arguments: Sequence[str],
+                   attempt: int) -> CommandResult:
+        return self._command(stage, operation, [
+            "cmake", "--preset", self.config.build_preset, "-B", str(build), *arguments,
+            *self._catch2_arguments()], attempt=attempt)
 
     def _paths(self, stage: str, operation: str, attempt: int) -> tuple[Path, Path]:
         safe = stage.replace(":", "-")
@@ -1086,13 +1220,16 @@ class WorkflowRunner:
                 f"their run-local data binary at {binary}; the current commit is {self.commit}")
 
         build = data_build_directory(self.config, dataset)
-        configure = ["cmake", "--preset", self.config.build_preset, "-B", str(build)]
+        model_arguments: list[str] = []
         if teacher is not None:
             if not teacher.header.is_file() or sha256_file(teacher.header) != teacher.sha256:
                 raise WorkflowError(
                     f"teacher model {teacher.name} is missing or changed: {teacher.header}")
-            configure.append(f"-DPOE2_MINIMAX_MODEL_HEADER={teacher.header}")
-        self._command(stage, "configure", configure, attempt=attempt)
+            model_arguments.append(f"-DPOE2_MINIMAX_MODEL_HEADER={teacher.header}")
+        # A build stopped midway may leave truncated outputs with fresh timestamps, so an
+        # unfinished build tree is discarded whole and rebuilt rather than resumed.
+        self._start_artifact(build)
+        self._configure(stage, "configure", build, model_arguments, attempt)
         self._command(stage, "build-data", [
             "cmake", "--build", str(build),
             "--target", "poe2_minimax_data"], attempt=attempt)
@@ -1102,6 +1239,7 @@ class WorkflowRunner:
             raise WorkflowError(
                 f"data binary does not contain the configured build commit "
                 f"{self.commit}{' and teacher model' if teacher is not None else ''}: {binary}")
+        self._finish_artifact(build)
         self._data_commits[binary] = self.commit
 
     def _begin(self, stage: str, action: str, input_value: Any) -> int:
@@ -1166,6 +1304,7 @@ class WorkflowRunner:
                 started = time.perf_counter()
                 self._start_artifact(path)
                 create(attempt)
+                self._finish_artifact(path)
                 creation = time.perf_counter() - started
             auth_started = time.perf_counter()
             stats = authenticate(attempt)
@@ -1229,10 +1368,12 @@ class WorkflowRunner:
             self._ensure_data_binary(
                 stage, attempt, dataset, required_commit=next(iter(commits), None))
             for begin, end in pending:
-                self._start_artifact(source_chunk_path(dataset, begin, end))
+                chunk = source_chunk_path(dataset, begin, end)
+                self._start_artifact(chunk)
                 self._command(stage, f"create-chunk-{begin:09d}",
                               source_chunk_command(self.config, dataset, begin, end),
                               attempt=attempt)
+                self._finish_artifact(chunk)
             self._command(stage, "assemble", source_assemble_command(self.config, dataset),
                           attempt=attempt)
 
@@ -1356,10 +1497,13 @@ class WorkflowRunner:
 
     def _create_label_shard(self, stage: str, dataset: ManagedDatasetConfig, index: int,
                             attempt: int) -> CommandResult:
-        self._start_artifact(label_shard_path(dataset, index))
-        return self._command(
+        shard = label_shard_path(dataset, index)
+        self._start_artifact(shard)
+        result = self._command(
             stage, f"create-shard-{index:03d}",
             label_command(self.config, dataset, index), attempt=attempt)
+        self._finish_artifact(shard)
+        return result
 
     def _prepare_features(self, dataset: ManagedDatasetConfig,
                           source_stats: dict[str, Any],
@@ -1480,10 +1624,8 @@ class WorkflowRunner:
             command_results.append(export)
             header = root / "frozen_pattern_gain_model.hpp"
             build = root / "build"
-            configure = self._command(stage, "configure", [
-                "cmake", "--preset", self.config.build_preset, "-B", str(build),
-                f"-DPOE2_MINIMAX_MODEL_HEADER={header}",
-            ], attempt=attempt)
+            configure = self._configure(
+                stage, "configure", build, [f"-DPOE2_MINIMAX_MODEL_HEADER={header}"], attempt)
             command_results.append(configure)
             compile_result = self._command(stage, "build", [
                 "cmake", "--build", str(build), "--target",
@@ -1620,10 +1762,8 @@ class WorkflowRunner:
 
         def create(attempt: int) -> None:
             reserve_report_directory(root, GATE_SCHEMA)
-            self._command(stage, "configure", [
-                "cmake", "--preset", self.config.build_preset, "-B", str(build),
-                f"-DPOE2_MINIMAX_MODEL_HEADER={candidate_header}"],
-                attempt=attempt)
+            self._configure(stage, "configure", build,
+                            [f"-DPOE2_MINIMAX_MODEL_HEADER={candidate_header}"], attempt)
             self._command(stage, "build", ["cmake", "--build", str(build)], attempt=attempt)
             self._command(stage, "test", [
                 "ctest", "--test-dir", str(build), "--output-on-failure"], attempt=attempt)
@@ -1688,9 +1828,8 @@ class WorkflowRunner:
         if model.header is None or not model.header.is_file() or (
                 sha256_file(model.header) != model.sha256):
             raise WorkflowError(f"model {model.name} is missing or changed: {model.header}")
-        self._command(stage, f"configure-{role}", [
-            "cmake", "--preset", self.config.build_preset, "-B", str(build),
-            f"-DPOE2_MINIMAX_MODEL_HEADER={model.header}"], attempt=attempt)
+        self._configure(stage, f"configure-{role}", build,
+                        [f"-DPOE2_MINIMAX_MODEL_HEADER={model.header}"], attempt)
         targets = ["poe2_minimax", *(["poe2_runner"] if runner else [])]
         self._command(stage, f"build-{role}", ["cmake", "--build", str(build), "--target",
                                                 *targets], attempt=attempt)
@@ -1831,8 +1970,7 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
         config, iteration_name, comparison_name, with_dependencies)
     command = ("comparison" if comparison_name else "iteration" if iteration_name else "run")
     commit = require_clean_committed(config)
-    with run_lock(config):
-        state = RunState(config)
+    with _recovered_run_lock(config) as (lock_descriptor, state):
         state.validate_evolution()
         check_model_lineage(config)
         state.recover_running_stages()
@@ -1842,6 +1980,7 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
         state.write_summary(workflow_snapshot(config))
         progress = WorkflowProgress(config, state)
         runner = WorkflowRunner(config, state, commit, progress)
+        runner.commands.lock_descriptors = (lock_descriptor,)
         not_started: list[Blocked] = []
         pending = list(comparisons)
         success = False
@@ -1904,7 +2043,8 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
                 f"resumes{discarded}") from error
         except BaseException as error:
             runner.commands.terminate_all()
-            state.append("run_failed", error=str(error))
+            failed = runner.keep_failed_artifacts()
+            state.append("run_failed", error=str(error), kept=[str(path) for path in failed])
             state.write_summary(workflow_snapshot(config))
             raise
         finally:
@@ -1915,7 +2055,7 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
 def handoff_candidate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
     """Preview or deliberately install one authenticated generated header."""
     if apply:
-        with run_lock(config):
+        with _recovered_run_lock(config):
             return _handoff_candidate(config, iteration_name, apply=True)
     return _handoff_candidate(config, iteration_name, apply=False)
 
@@ -2390,7 +2530,7 @@ def _is_archived(config: WorkflowConfig, model: ModelReference) -> bool:
 def promote_gate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
     """Preview or append one authenticated local engine-gate row to the master ledger."""
     if apply:
-        with run_lock(config):
+        with _recovered_run_lock(config):
             return _promote_gate(config, iteration_name, apply=True)
     return _promote_gate(config, iteration_name, apply=False)
 
@@ -2450,7 +2590,7 @@ def record_comparison(config: WorkflowConfig, name: str, *,
                       apply: bool = False) -> dict[str, Any]:
     """Preview or append one finished comparison to the master ledger and comparison index."""
     if apply:
-        with run_lock(config):
+        with _recovered_run_lock(config):
             return _record_comparison(config, name, apply=True)
     return _record_comparison(config, name, apply=False)
 

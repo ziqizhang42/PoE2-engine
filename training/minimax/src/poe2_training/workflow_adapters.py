@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -93,6 +95,66 @@ def data_build_directory(config: WorkflowConfig,
 
 def data_binary(config: WorkflowConfig, dataset: ManagedDatasetConfig | None = None) -> Path:
     return data_build_directory(config, dataset) / "runner" / "poe2_minimax_data"
+
+
+@dataclass(frozen=True)
+class PinnedCheckout:
+    name: str
+    repository: str
+    tag: str
+
+
+def catch2_pin(repository: Path) -> PinnedCheckout | None:
+    """Return the Catch2 checkout the build fetches, as pinned in tests/CMakeLists.txt."""
+    try:
+        text = (repository / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"FetchContent_Declare\(\s*(Catch2)\s+GIT_REPOSITORY\s+(\S+)\s+"
+                      r"GIT_TAG\s+([\w.-]+)\s*\)", text)
+    return None if match is None else PinnedCheckout(*match.groups())
+
+
+def catch2_cache_directory(config: WorkflowConfig, pin: PinnedCheckout) -> Path:
+    return config.output_directory / "build" / f"{pin.name.lower()}-{pin.tag}"
+
+
+def catch2_candidates(config: WorkflowConfig) -> list[Path]:
+    """Return Catch2 checkouts already on disk, the run's private builds before the repository's."""
+    builds = [data_build_directory(config, dataset) for dataset in config.datasets
+              if isinstance(dataset, ManagedDatasetConfig)]
+    for iteration in config.iterations:
+        builds.append(iteration.candidate_directory / "build")
+        builds.extend(sorted(iteration.gate_directory.glob("builds/*/*")))
+    for comparison in config.comparisons:
+        builds.extend(sorted(comparison.root.glob("builds/*/*")))
+    builds.extend(sorted((config.repository / "build").glob("*")))
+    return list(dict.fromkeys(build / "_deps" / "catch2-src" for build in builds))
+
+
+def verified_checkout(path: Path, pin: PinnedCheckout) -> bool:
+    """Return whether path is a clean Git checkout of the pinned tag from the pinned remote."""
+    if path.is_symlink() or not (path / ".git").is_dir():
+        return False
+    environment = {name: value for name, value in os.environ.items()
+                   if not name.startswith("GIT_")}
+    environment.update(GIT_DIR=str(path / ".git"), GIT_WORK_TREE=str(path),
+                       GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_OPTIONAL_LOCKS="0")
+
+    def git(*arguments: str) -> str | None:
+        try:
+            result = subprocess.run(["git", *arguments], cwd=path, env=environment,
+                                    capture_output=True, text=True, check=False)
+        except OSError:
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    head = git("rev-parse", "--verify", "HEAD^{commit}")
+    return (head is not None and
+            head == git("rev-parse", "--verify", f"refs/tags/{pin.tag}^{{commit}}") and
+            git("config", "--get", "remote.origin.url") == pin.repository and
+            git("status", "--porcelain", "--untracked-files=all") == "")
 
 
 def _evaluator_arguments(dataset: ManagedDatasetConfig) -> list[str]:

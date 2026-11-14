@@ -47,7 +47,7 @@ example-shard-000/
   manifest.json
 ```
 
-`COMPLETE` is installed last, after both temporary files have been renamed into place, and contains the binary and manifest SHA-256 digests. A crash or failed exact run deliberately leaves its directory marked `INCOMPLETE`; readers must reject it. The command never deletes or reuses such a directory automatically. This makes failed jobs visible and prevents two processes from writing the same shard.
+`COMPLETE` is installed last, after both files have been synced to disk and renamed into place, and contains the binary and manifest SHA-256 digests. A crash or failed exact run deliberately leaves its directory marked `INCOMPLETE`; readers must reject it. The command never deletes or reuses such a directory automatically. This makes failed jobs visible and prevents two processes from writing the same shard.
 
 Validate a finished shard before consuming it:
 

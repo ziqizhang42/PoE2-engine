@@ -77,7 +77,7 @@ example-corpus/
     ...
 ```
 
-Each shard is canonical JSON Lines: one configuration header followed by position records. Its SHA-256 digest is embedded in its filename. The manifest lists the same digest, trajectory range, and record count. `COMPLETE` is installed last and authenticates the manifest, which in turn authenticates every shard. Shards are contiguous trajectory ranges, so a family is never split between files and an interrupted labeling campaign can restart shard by shard.
+Each shard is canonical JSON Lines: one configuration header followed by position records. Its SHA-256 digest is embedded in its filename. The manifest lists the same digest, trajectory range, and record count. `COMPLETE` is installed last, after every file has been synced to disk, and authenticates the manifest, which in turn authenticates every shard. Shards are contiguous trajectory ranges, so a family is never split between files and an interrupted labeling campaign can restart shard by shard.
 
 The independent Python auditor checks the transaction, SHA-256 chain, configuration agreement, bitboard legality, piece counts, source IDs, generated family/trajectory IDs, phase sampling, trajectory order, policy and split counts, D4 duplicates, and cross-split leakage.
 

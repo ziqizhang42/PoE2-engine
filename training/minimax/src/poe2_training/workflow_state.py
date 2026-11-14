@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,12 @@ from .workflow_config import WorkflowConfig, stage_fingerprints
 
 EVENT_SCHEMA = "poe2-training-event-v1"
 SUMMARY_SCHEMA = "poe2-training-summary"
+ARTIFACT_START = "artifact_started"
+# Events that settle a started artifact; one started later with none of these is unfinished.
+ARTIFACT_OUTCOMES = frozenset({
+    "artifact_completed", "artifact_failed", "artifact_abandoned",
+    "interrupted_artifact_removed", "crash_artifact_removed", "crash_artifact_kept",
+})
 
 
 class StateError(ValueError):
@@ -34,6 +41,9 @@ class RunState:
         self.events_path = self.state_directory / "events.jsonl"
         self.summary_path = self.root / "summary.json"
         self.snapshots_directory = self.state_directory / "configs"
+        self._lock = threading.Lock()
+        # A crash can cut the final record short; it is ignored here and dropped under the lock.
+        self.torn_tail = b""
         self.events = self._read_events()
 
     def _read_events(self) -> list[dict[str, Any]]:
@@ -42,41 +52,78 @@ class RunState:
         if not self.events_path.is_file():
             raise StateError(f"workflow event path is not a file: {self.events_path}")
         try:
-            lines = self.events_path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError) as error:
+            contents = self.events_path.read_bytes()
+        except OSError as error:
             raise StateError(f"could not read {self.events_path}: {error}") from error
+        lines = contents.split(b"\n")
+        partial = lines.pop()
         result: list[dict[str, Any]] = []
         for index, line in enumerate(lines, 1):
-            if not line:
-                raise StateError(
-                    f"blank event at {self.events_path}:{index}; move the state aside for recovery")
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError as error:
+                event = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                if index == len(lines) and not partial:
+                    partial = line + b"\n"
+                    break
                 raise StateError(
-                    f"malformed event at {self.events_path}:{index}; restore the append-only log") from error
+                    f"malformed event at {self.events_path}:{index}; restore the append-only log"
+                ) from error
             if (not isinstance(event, dict) or event.get("schema") != EVENT_SCHEMA or
                     event.get("sequence") != index or not isinstance(event.get("type"), str)):
                 raise StateError(f"invalid event at {self.events_path}:{index}")
             result.append(event)
+        self.torn_tail = partial
         return result
 
-    def append(self, event_type: str, **fields: Any) -> dict[str, Any]:
-        self.state_directory.mkdir(parents=True, exist_ok=True)
-        event = {
-            "schema": EVENT_SCHEMA, "sequence": len(self.events) + 1,
-            "time_utc": now_utc(), "type": event_type, **fields,
-        }
-        line = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    def repair_torn_tail(self) -> int:
+        """Drop an incomplete final record left by a crash; call only under the run lock."""
+        dropped = self.torn_tail
+        if not dropped:
+            return 0
         try:
-            with self.events_path.open("a", encoding="utf-8") as destination:
-                destination.write(line)
-                destination.flush()
-                os.fsync(destination.fileno())
+            with self.events_path.open("r+b") as events:
+                events.truncate(self.events_path.stat().st_size - len(dropped))
+                events.flush()
+                os.fsync(events.fileno())
         except OSError as error:
-            raise StateError(f"could not append {self.events_path}: {error}") from error
-        self.events.append(event)
-        return event
+            raise StateError(f"could not repair {self.events_path}: {error}") from error
+        self.torn_tail = b""
+        self.append("event_log_repaired", dropped_bytes=len(dropped),
+                    dropped_text=dropped[:200].decode("utf-8", "replace"))
+        return len(dropped)
+
+    def append(self, event_type: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            if self.torn_tail:
+                raise StateError(f"repair the torn final record of {self.events_path} first")
+            self.state_directory.mkdir(parents=True, exist_ok=True)
+            event = {
+                "schema": EVENT_SCHEMA, "sequence": len(self.events) + 1,
+                "time_utc": now_utc(), "type": event_type, **fields,
+            }
+            line = json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+            try:
+                with self.events_path.open("a", encoding="utf-8") as destination:
+                    destination.write(line)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+            except OSError as error:
+                raise StateError(f"could not append {self.events_path}: {error}") from error
+            self.events.append(event)
+            return event
+
+    def unfinished_artifacts(self) -> list[str]:
+        """Return run-relative artifacts started with no later outcome: work a stop cut short."""
+        unfinished: dict[str, None] = {}
+        for event in self.events:
+            artifact = event.get("artifact")
+            if not isinstance(artifact, str):
+                continue
+            if event["type"] == ARTIFACT_START:
+                unfinished[artifact] = None
+            elif event["type"] in ARTIFACT_OUTCOMES:
+                unfinished.pop(artifact, None)
+        return list(unfinished)
 
     def started_fingerprints(self) -> dict[str, str]:
         result: dict[str, str] = {}

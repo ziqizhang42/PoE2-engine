@@ -137,6 +137,8 @@ def _write(root: Path, contents: str, name: str = "run.toml") -> Path:
 
 class WorkflowConfigTest(unittest.TestCase):
     def setUp(self) -> None:
+        # Private builds here are mocked; test_workflow_recovery covers the Catch2 reuse.
+        self.enterContext(mock.patch("poe2_training.workflow.catch2_pin", return_value=None))
         self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
 
@@ -528,8 +530,12 @@ class WorkflowConfigTest(unittest.TestCase):
         self.assertEqual(binary.call_args.kwargs["required_commit"], "4" * 40)
         self.assertEqual(operations, [
             "create-chunk-000000000", "create-chunk-000004000", "assemble"])
-        self.assertIn(source_chunk_path(dataset, 0, 2000), workflow._started_artifacts)
-        self.assertNotIn(finished, workflow._started_artifacts)
+        relative = [path.relative_to(config.output_directory).as_posix() for path in (
+            dataset.source_directory, source_chunk_path(dataset, 0, 2000),
+            source_chunk_path(dataset, 4000, 4500))]
+        self.assertEqual([event["artifact"] for event in state.events
+                          if event["type"] == "artifact_started"], relative)
+        self.assertEqual(state.unfinished_artifacts(), relative[:1])
 
         (finished.parent / "stray").mkdir()
         with self.assertRaisesRegex(WorkflowError, "unexpected output"):
@@ -614,6 +620,8 @@ class WorkflowConfigTest(unittest.TestCase):
 
 class WorkflowStateTest(unittest.TestCase):
     def setUp(self) -> None:
+        # Private builds here are mocked; test_workflow_recovery covers the Catch2 reuse.
+        self.enterContext(mock.patch("poe2_training.workflow.catch2_pin", return_value=None))
         self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
         self.path = _write(self.root, _managed_config(self.root))
@@ -817,10 +825,8 @@ class WorkflowStateTest(unittest.TestCase):
                     if event["type"] == "interrupted_artifact_removed"]
         self.assertEqual(removals, [str(interrupted)])
 
-        runner._start_artifact(self.root / "outside")
-        (self.root / "outside").mkdir()
         with self.assertRaisesRegex(WorkflowError, "outside the run"):
-            runner.discard_interrupted_artifacts()
+            runner._start_artifact(self.root / "outside")
 
     def test_interrupted_label_shard_is_discarded(self) -> None:
         state = RunState(self.config)
@@ -952,6 +958,8 @@ class WorkflowStateTest(unittest.TestCase):
 
 class WorkflowPromotionTest(unittest.TestCase):
     def setUp(self) -> None:
+        # Private builds here are mocked; test_workflow_recovery covers the Catch2 reuse.
+        self.enterContext(mock.patch("poe2_training.workflow.catch2_pin", return_value=None))
         self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
         (self.root / "base-engine").write_text("base\n", encoding="utf-8")
