@@ -29,6 +29,8 @@ from .workflow_config import (
 
 CANDIDATE_SCHEMA = "poe2-training-candidate"
 GATE_SCHEMA = "poe2-training-engine-gate"
+# Version 2 gates build the candidate header privately instead of the tracked engine header.
+GATE_SCHEMA_VERSION = 2
 
 
 class AdapterError(ValueError):
@@ -290,8 +292,6 @@ def engine_gate_command(config: WorkflowConfig, iteration: IterationConfig,
         command.extend(("--opening-seed", str(gate.opening_seed)))
     if gate.sequential_stop:
         command.append("--sequential-stop")
-    if gate.require_accept_alt:
-        command.append("--require-accept-alt")
     return command
 
 
@@ -617,6 +617,11 @@ def authenticate_candidate(config: WorkflowConfig,
                  f"candidate command log {index} is missing, unsafe, or changed")
     return {
         "report_sha256": report_digest, "promotable": report["promotable"],
+        "git_commit": report["git_commit"], "created_at_utc": report.get("created_at_utc"),
+        "corpus_id": feature["corpus_id"],
+        "feature_binary_sha256": feature["binary_sha256"],
+        "training_report_sha256": report["training_report_sha256"],
+        "sealed_evaluation_report_sha256": report["sealed_evaluation_report_sha256"],
         "model": report.get("model"), "parity": report.get("parity"),
         "evaluator_benchmark": report.get("evaluator_benchmark"),
         "search_benchmark": report.get("search_benchmark"),
@@ -624,14 +629,17 @@ def authenticate_candidate(config: WorkflowConfig,
     }
 
 
-def authenticate_gate(config: WorkflowConfig,
-                      iteration: IterationConfig) -> dict[str, Any]:
+def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
+                      candidate: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Authenticate a completed gate; pass an already authenticated candidate to reuse it."""
     _require(iteration.engine_gate is not None, "iteration has no engine gate")
-    candidate = authenticate_candidate(config, iteration)
+    if candidate is None:
+        candidate = authenticate_candidate(config, iteration)
     build_id = candidate_build_id(candidate)
     build = gate_build_directory(config, iteration, candidate)
     report, digest = open_json_report(
-        iteration.gate_directory, schema=GATE_SCHEMA, error_type=AdapterError)
+        iteration.gate_directory, schema=GATE_SCHEMA,
+        schema_version=GATE_SCHEMA_VERSION, error_type=AdapterError)
     names = {path.name for path in iteration.gate_directory.iterdir()}
     _require(names == {"COMPLETE", "report.json", "builds", "runs"},
              f"engine gate has unexpected output files: {iteration.gate_directory}")
@@ -651,7 +659,7 @@ def authenticate_gate(config: WorkflowConfig,
              build.relative_to(iteration.gate_directory).as_posix(),
              "engine gate has the wrong candidate build identity or layout")
     candidate_header = candidate["artifacts"]["model_header"]
-    _require(report.get("tracked_model_header_sha256") == candidate_header["sha256"],
+    _require(report.get("model_header_sha256") == candidate_header["sha256"],
              "engine gate was not built from the candidate model header")
     _require(isinstance(report.get("git_commit"), str) and
              re.fullmatch(r"[0-9a-f]{40}", report["git_commit"]) is not None,
@@ -739,14 +747,14 @@ def authenticate_gate(config: WorkflowConfig,
     if gate.opening_seed is not None:
         _require(manifest.get("opening_seed") == gate.opening_seed,
                  "engine-gate opening seed differs from configuration")
-    if gate.require_accept_alt:
-        _require(manifest.get("sequential_decision") == "accept_alt",
-                 "engine gate did not accept the configured alternative")
+    decision = manifest.get("sequential_decision")
+    _require(isinstance(decision, str) and bool(decision),
+             "engine-gate manifest has no sequential decision")
     _require(summary.get("valid") is True,
              "engine-gate summary is invalid")
     return {
         "report_sha256": digest, "run_id": report.get("run_id"),
-        "candidate_build_id": build_id,
+        "candidate_build_id": build_id, "sequential_decision": decision,
         "run_directory": str(run_path), "manifest": manifest, "summary": summary,
         "ledger_row": str(run_path / "ledger-row.csv"),
     }

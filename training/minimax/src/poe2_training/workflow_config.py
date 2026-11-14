@@ -145,7 +145,6 @@ class EngineGateConfig:
     sequential_alt: float = 20.0
     sequential_alpha: float = 0.05
     sequential_beta: float = 0.05
-    require_accept_alt: bool = True
 
 
 @dataclass(frozen=True)
@@ -410,7 +409,7 @@ def _parse_gate(repository: Path, value: Any, field: str) -> EngineGateConfig:
     allowed = {"base", "new_engine", "base_engine", "new_engine_args", "base_engine_args",
                "opening_book", "games", "workers", "timeout_ms", "go_movetime_ms",
                "opening_seed", "sequential_stop", "sequential_null", "sequential_alt",
-               "sequential_alpha", "sequential_beta", "require_accept_alt"}
+               "sequential_alpha", "sequential_beta"}
     _unknown(table, allowed, field)
     seed = table.get("opening_seed")
     if seed is not None:
@@ -459,7 +458,6 @@ def _parse_gate(repository: Path, value: Any, field: str) -> EngineGateConfig:
         sequential_null=sequential_null,
         sequential_alt=sequential_alt,
         sequential_alpha=alpha, sequential_beta=beta,
-        require_accept_alt=_boolean(table, "require_accept_alt", field, True),
     )
 
 

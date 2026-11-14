@@ -42,12 +42,14 @@ from poe2_training.workflow import (
 from poe2_training.workflow_adapters import (
     CANDIDATE_SCHEMA,
     GATE_SCHEMA,
+    GATE_SCHEMA_VERSION,
     authenticate_candidate,
     authenticate_gate,
     authenticate_label_shard,
     authenticate_training,
     candidate_build_id,
     data_binary,
+    engine_gate_command,
     gate_build_directory,
     label_shard_path,
     resolve_eval_binary,
@@ -614,7 +616,7 @@ class WorkflowPromotionTest(unittest.TestCase):
                 base: str | None = None,
                 new_engine: str = "minimax/poe2_minimax",
                 new_engine_args: str = "--evaluator pattern-gain",
-                sequential_alpha: float = 0.05):
+                sequential_alpha: float = 0.05, gate_extra: str = ""):
         base = base or str(self.root / "base-engine")
         gate = textwrap.dedent(f"""
             [iterations.engine_gate]
@@ -623,6 +625,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             new_engine_args = "{new_engine_args}"
             games = 2
             sequential_alpha = {sequential_alpha!r}
+            {gate_extra}
         """) if include_gate else ""
         contents = textwrap.dedent(f"""
             schema_version = 1
@@ -714,8 +717,36 @@ class WorkflowPromotionTest(unittest.TestCase):
             }],
         })
 
+    def _isolated_repository(self, name: str, *, ledger_header: list[str] | None = None,
+                             tracked_header: bytes | None = None):
+        repository = self.root / name
+        repository.mkdir()
+        (repository / ".gitignore").write_text("eval/results.csv.lock\n", encoding="utf-8")
+        if ledger_header is not None:
+            (repository / "eval").mkdir()
+            with (repository / "eval" / "results.csv").open(
+                    "w", newline="", encoding="utf-8") as destination:
+                csv.writer(destination, lineterminator="\n").writerow(ledger_header)
+        if tracked_header is not None:
+            path = repository / "engines/minimax/src/frozen_pattern_gain_model.hpp"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(tracked_header)
+        config_path = repository / "promotion.toml"
+        config_path.write_bytes(self.config.contents)
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        self._commit_all(repository, "fixture")
+        return repository, replace(self.config, repository=repository, path=config_path)
+
+    @staticmethod
+    def _commit_all(repository: Path, message: str) -> None:
+        subprocess.run(["git", "add", "-A"], cwd=repository, check=True)
+        subprocess.run([
+            "git", "-c", "user.name=Workflow Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", message], cwd=repository, check=True)
+
     def _gate(self, *, manifest_base_path: str | None = None,
-              ledger_overrides: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
+              ledger_overrides: dict[str, str] | None = None,
+              decision: str = "accept_alt") -> tuple[list[str], list[str]]:
         master = REPOSITORY / "eval" / "results.csv"
         with master.open(newline="", encoding="utf-8") as source:
             header = next(csv.reader(source))
@@ -771,7 +802,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "sequential_upper_bound": 2.0, "normalized_elo": 20.0,
             "betting_log_evidence_above_even": 3.0,
             "betting_log_evidence_below_even": -3.0,
-            "sequential_decision": "accept_alt",
+            "sequential_decision": decision,
         }
         summary = {
             "analysis_version": 2, "valid": True, "invalid_reason": None,
@@ -833,7 +864,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             writer.writerow(header)
             writer.writerow(row)
         complete_json_report(root, GATE_SCHEMA, {
-            "schema": GATE_SCHEMA, "schema_version": 1,
+            "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
             "git_commit": "2" * 40,
             "settings": {
                 **asdict(gate),
@@ -845,7 +876,7 @@ class WorkflowPromotionTest(unittest.TestCase):
                 self.iteration.candidate_directory / "report.json"),
             "candidate_build_id": build_id,
             "build_directory": build.relative_to(root).as_posix(),
-            "tracked_model_header_sha256": header_digest,
+            "model_header_sha256": header_digest,
             "base_engine_artifact": {
                 "path": str(base_engine),
                 "sha256": sha256_file(base_engine),
@@ -944,50 +975,148 @@ class WorkflowPromotionTest(unittest.TestCase):
         candidate.assert_called_once()
         gate.assert_called_once()
 
-    def test_engine_gate_requires_the_committed_header_to_match_candidate(self) -> None:
-        self._candidate()
+    def _gate_command_log(self) -> list[list[str]]:
+        """Run the gate stage until its first command and return the commands it issued."""
+        candidate_stats = authenticate_candidate(self.config, self.iteration)
         workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
-        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
-        with self.assertRaisesRegex(WorkflowError, "handoff --apply"):
-            workflow._run_gate(self.iteration, {
-                "report_sha256": sha256_file(
-                    self.iteration.candidate_directory / "report.json"),
-                "artifacts": {"model_header": {"sha256": sha256_file(candidate_header)}},
-            })
+        commands: list[list[str]] = []
 
-    def test_promotable_handoff_applies_only_the_tracked_header(self) -> None:
-        self.config = self._config(promotable=True)
+        def stop_after_first(_stage: str, _operation: str, command, **_options) -> None:
+            commands.append(list(command))
+            raise WorkflowError("fixture stops the gate")
+
+        with mock.patch.object(workflow, "_command", side_effect=stop_after_first):
+            with self.assertRaisesRegex(WorkflowError, "fixture stops the gate"):
+                workflow._run_gate(self.iteration, candidate_stats)
+        return commands
+
+    def test_engine_gate_builds_the_candidate_header_privately(self) -> None:
+        self._candidate()
+        tracked = REPOSITORY / "engines/minimax/src/frozen_pattern_gain_model.hpp"
+        tracked_digest = sha256_file(tracked)
+        commands = self._gate_command_log()
+        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
+        self.assertEqual(commands[0][:2], ["cmake", "--preset"])
+        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={candidate_header}", commands[0])
+        self.assertEqual(sha256_file(tracked), tracked_digest)
+
+    def test_engine_gate_rejects_a_changed_candidate_header(self) -> None:
+        self._candidate()
+        candidate_stats = authenticate_candidate(self.config, self.iteration)
+        (self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp").write_text(
+            "changed\n", encoding="utf-8")
+        workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
+        with self.assertRaisesRegex(WorkflowError, "missing or changed"):
+            workflow._run_gate(self.iteration, candidate_stats)
+
+    def test_engine_gate_records_a_decision_that_is_not_a_win(self) -> None:
+        self._candidate()
+        self._gate(decision="accept_null")
+        authenticated = authenticate_gate(self.config, self.iteration)
+        self.assertEqual(authenticated["sequential_decision"], "accept_null")
+        command = engine_gate_command(
+            self.config, self.iteration, self.root / "build", self.root / "runner")
+        self.assertNotIn("--require-accept-alt", command)
+
+    def test_engine_gate_rejects_the_removed_require_accept_alt_field(self) -> None:
+        with self.assertRaisesRegex(WorkflowConfigError, "require_accept_alt"):
+            self._config(gate_extra="require_accept_alt = false")
+
+    def test_handoff_requires_an_engine_gate(self) -> None:
+        self.config = self._config(include_gate=False)
         self.iteration = self.config.iteration("candidate")
         self._candidate()
-        fake_repository = self.root / "handoff-repository"
-        header = fake_repository / "engines/minimax/src/frozen_pattern_gain_model.hpp"
-        header.parent.mkdir(parents=True)
-        header.write_text("tracked header\n", encoding="utf-8")
-        fake_config = fake_repository / "promotion.toml"
-        fake_config.write_bytes(self.config.contents)
-        subprocess.run(["git", "init", "-q"], cwd=fake_repository, check=True)
-        subprocess.run(
-            ["git", "add", "engines/minimax/src/frozen_pattern_gain_model.hpp",
-             "promotion.toml"], cwd=fake_repository, check=True)
-        subprocess.run([
-            "git", "-c", "user.name=Workflow Test", "-c",
-            "user.email=test@example.invalid", "commit", "-qm", "fixture"],
-            cwd=fake_repository, check=True)
-        isolated = replace(self.config, repository=fake_repository, path=fake_config)
+        with self.assertRaisesRegex(WorkflowError, "no engine gate"):
+            handoff_candidate(self.config, "candidate", apply=True)
+
+    def test_handoff_rejects_a_gate_that_was_not_won(self) -> None:
+        self._candidate()
+        self._gate(decision="accept_null")
+        preview = handoff_candidate(self.config, "candidate")
+        self.assertEqual(preview["gate_decision"], "accept_null")
+        with self.assertRaisesRegex(WorkflowError, "did not win"):
+            handoff_candidate(self.config, "candidate", apply=True)
+
+    def test_handoff_installs_only_a_recorded_gate_winner(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate()
+        repository, isolated = self._isolated_repository(
+            "handoff-repository", ledger_header=ledger_header,
+            tracked_header=b"tracked header\n")
+        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
+        tracked = repository / "engines/minimax/src/frozen_pattern_gain_model.hpp"
+
+        with self.assertRaisesRegex(WorkflowError, "record the gate first"):
+            handoff_candidate(isolated, "candidate", apply=True)
+        promote_gate(isolated, "candidate", apply=True)
+        with self.assertRaisesRegex(WorkflowError, "clean committed worktree"):
+            handoff_candidate(isolated, "candidate", apply=True)
+        self._commit_all(repository, "record gate")
 
         preview = handoff_candidate(isolated, "candidate")
         self.assertTrue(preview["different"])
+        self.assertTrue(preview["archived"])
         result = handoff_candidate(isolated, "candidate", apply=True)
         self.assertTrue(result["applied"])
-        self.assertEqual(
-            header.read_bytes(),
-            (self.iteration.candidate_directory /
-             "frozen_pattern_gain_model.hpp").read_bytes())
+        self.assertEqual(tracked.read_bytes(), candidate_header.read_bytes())
         status = subprocess.run(
-            ["git", "status", "--short"], cwd=fake_repository,
+            ["git", "status", "--short"], cwd=repository,
             check=True, capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(
             status, [" M engines/minimax/src/frozen_pattern_gain_model.hpp"])
+
+    def test_promotion_archives_the_model_and_its_metrics(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate(decision="accept_null")
+        repository, isolated = self._isolated_repository(
+            "archive-repository", ledger_header=ledger_header)
+        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
+        model_id = f"candidate-sha256-{sha256_file(candidate_header)}"
+
+        preview = promote_gate(isolated, "candidate")
+        self.assertFalse(preview["archived"])
+        self.assertEqual(preview["sequential_decision"], "accept_null")
+        self.assertFalse((repository / "models").exists())
+        applied = promote_gate(isolated, "candidate", apply=True)
+        self.assertTrue(applied["archived"])
+        self.assertEqual(
+            (repository / "models" / f"{model_id}.hpp").read_bytes(),
+            candidate_header.read_bytes())
+        metrics = json.loads((repository / "models" / f"{model_id}.json").read_bytes())
+        self.assertEqual(metrics["model_id"], model_id)
+        self.assertEqual(metrics["recipe"], {
+            "path": "promotion.toml", "run": "promotion-test", "iteration": "candidate"})
+        self.assertEqual(metrics["metrics"]["quantized"]["validation"]["mae"], 1.25)
+        self.assertEqual(metrics["corpus_id"], "training-loader-test")
+        status = subprocess.run(
+            ["git", "status", "--short", "--untracked-files=all"], cwd=repository,
+            check=True, capture_output=True, text=True).stdout.splitlines()
+        self.assertEqual(sorted(status), [
+            " M eval/results.csv", f"?? models/{model_id}.hpp", f"?? models/{model_id}.json"])
+
+    def test_promotion_reuses_an_identical_archive_after_an_interruption(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate()
+        repository, isolated = self._isolated_repository(
+            "retry-repository", ledger_header=ledger_header)
+        with mock.patch("poe2_training.workflow.csv.writer",
+                        side_effect=OSError("fixture interruption")):
+            with self.assertRaisesRegex(WorkflowError, "fixture interruption"):
+                promote_gate(isolated, "candidate", apply=True)
+        self._commit_all(repository, "keep interrupted archive")
+        self.assertTrue(promote_gate(isolated, "candidate")["archived"])
+        self.assertTrue(promote_gate(isolated, "candidate", apply=True)["applied"])
+
+    def test_promotion_rejects_a_conflicting_archive(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate()
+        repository, isolated = self._isolated_repository(
+            "conflict-repository", ledger_header=ledger_header)
+        model_id = candidate_build_id(authenticate_candidate(isolated, self.iteration))
+        (repository / "models").mkdir()
+        (repository / "models" / f"{model_id}.hpp").write_text("other\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "differs from the candidate"):
+            promote_gate(isolated, "candidate")
 
     def test_gate_preview_apply_and_duplicate_rejection(self) -> None:
         self._candidate()
@@ -995,23 +1124,8 @@ class WorkflowPromotionTest(unittest.TestCase):
         preview = promote_gate(self.config, "candidate")
         self.assertFalse(preview["duplicate"])
 
-        fake_repository = self.root / "repository"
-        (fake_repository / "eval").mkdir(parents=True)
-        with (fake_repository / "eval" / "results.csv").open(
-                "w", newline="", encoding="utf-8") as destination:
-            csv.writer(destination, lineterminator="\n").writerow(header)
-        (fake_repository / ".gitignore").write_text(
-            "eval/results.csv.lock\n", encoding="utf-8")
-        fake_config = fake_repository / "promotion.toml"
-        fake_config.write_bytes(self.config.contents)
-        subprocess.run(["git", "init", "-q"], cwd=fake_repository, check=True)
-        subprocess.run(
-            ["git", "add", ".gitignore", "eval/results.csv", "promotion.toml"],
-            cwd=fake_repository, check=True)
-        subprocess.run([
-            "git", "-c", "user.name=Workflow Test", "-c", "user.email=test@example.invalid",
-            "commit", "-qm", "fixture"], cwd=fake_repository, check=True)
-        isolated = replace(self.config, repository=fake_repository, path=fake_config)
+        fake_repository, isolated = self._isolated_repository(
+            "repository", ledger_header=header)
         lock_path = fake_repository / "eval/results.csv.lock"
         lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)

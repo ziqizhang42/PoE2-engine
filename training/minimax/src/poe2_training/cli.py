@@ -64,18 +64,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="execute incomplete earlier iteration dependencies first",
     )
 
-    handoff = subparsers.add_parser("handoff", help="preview or install a candidate header")
+    handoff = subparsers.add_parser(
+        "handoff", help="preview or install a recorded gate winner's header")
     _config_argument(handoff)
     _iteration_argument(handoff)
     handoff.add_argument("--apply", action="store_true",
                          help="atomically replace the tracked generated header")
 
     promote = subparsers.add_parser(
-        "promote-gate", help="preview or append a local gate to eval/results.csv")
+        "promote-gate",
+        help="preview or record a local gate in eval/results.csv and archive its model")
     _config_argument(promote)
     _iteration_argument(promote)
     promote.add_argument("--apply", action="store_true",
-                         help="append the authenticated saved ledger row")
+                         help="append the authenticated ledger row and archive the model")
     return parser
 
 

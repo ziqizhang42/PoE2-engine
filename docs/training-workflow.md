@@ -47,16 +47,15 @@ On an interactive terminal, mutating commands show one colored tqdm stage bar wi
 
 Stages that reuse an existing complete artifact are labeled `authenticated`, so repeated dependency or exclusion preparation is distinguishable from artifact creation.
 
-`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
+`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. A completed gate also shows its recorded `gate_decision`. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
 
 The candidate promotion sequence is:
 
-1. Run training and candidate validation.
-2. Preview and apply candidate handoff.
-3. Review and commit only the generated model header.
-4. Add and commit the `engine_gate` table in a compatible recipe revision.
-5. Run the iteration again to execute the gate.
-6. Preview and explicitly apply ledger promotion.
+1. Commit a recipe whose candidate iteration includes an `engine_gate` table. A gate can also be added later in a compatible recipe revision, as long as that stage has not started.
+2. Run the iteration: training, candidate validation, and the gate. The gate builds the candidate's model header privately, so nothing in the source tree changes.
+3. Preview and apply gate promotion. This appends the ledger row and archives the model under `models/`, whatever the decision.
+4. Review and commit the ledger row and archive.
+5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed model header.
 
 ## Configuration
 
@@ -138,7 +137,7 @@ search_movetime_ms = 100
 
 Candidate validation builds isolated inference, engine, and runner binaries; checks Python/C++ and D4 parity; and records benchmarks, digests, logs, resources, and separate float and exported-quantized metrics. The deployable frozen suite fixes its quantization at the engine's scale-32 contract before sealed evaluation.
 
-Add the gate only after the candidate header has been reviewed, installed, and committed:
+A promotable candidate can be gated against an existing engine build:
 
 ```toml
 [iterations.engine_gate]
@@ -155,10 +154,11 @@ sequential_null = 0
 sequential_alt = 20
 sequential_alpha = 0.05
 sequential_beta = 0.05
-require_accept_alt = true
 ```
 
-The candidate side is fixed to `minimax/poe2_minimax --evaluator pattern-gain`. The gate requires a promotable candidate and an exact tracked-header digest match. Its build identity is derived from the model-header digest; the base engine and arguments remain configurable.
+The candidate side is fixed to `minimax/poe2_minimax --evaluator pattern-gain`. The gate requires a promotable candidate. It configures a private build with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the candidate's authenticated header, runs the full test suite, and plays the match. The tracked engine header is never read or changed. Its build identity, `candidate-sha256-<header digest>`, is derived from the model header; the base engine and arguments remain configurable.
+
+Every valid gate completes and records its sequential decision, including `accept_null` and `continue`, so a gate that does not show a win can still be promoted to the ledger and archived. Only handoff requires a win.
 
 When `label_concurrency` is omitted, label processes are sized as:
 
@@ -184,31 +184,43 @@ Build trees are private to each run or candidate. Once a stage starts, its confi
 
 Artifacts are create-only and authenticated before reuse. On interruption, subprocess groups are terminated and completed label shards remain reusable. If an artifact is incomplete or malformed, the workflow reports its exact path and stops. Inspect it, then manually move aside or remove only that path before retrying.
 
-## Candidate handoff
+## Gate promotion
 
-Handoff previews the difference by default:
+Gates run with `--no-ledger` and retain a self-contained `ledger-row.csv`. Preview and apply its publication explicitly:
 
 ```bash
 cd training/minimax
 CONFIG=recipes/RECIPE_NAME.toml
 ITERATION=ITERATION_NAME
 
-uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION"
-uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION" --apply
-```
-
-Apply requires a promotable candidate, a clean worktree, and the run lock. It atomically replaces only `engines/minimax/src/frozen_pattern_gain_model.hpp`. Review and commit that file before adding the gate.
-
-## Gate promotion
-
-Gates run with `--no-ledger` and retain a self-contained `ledger-row.csv`. Preview and apply its publication explicitly:
-
-```bash
 uv run --frozen poe2-train promote-gate --config "$CONFIG" "$ITERATION"
 uv run --frozen poe2-train promote-gate --config "$CONFIG" "$ITERATION" --apply
 ```
 
 Promotion requires a clean tree and the run lock. It authenticates the saved row against the gate manifest and summary, validates the master schema, coordinates with native ledger writers, and rejects duplicate run IDs before appending to `eval/results.csv`.
+
+Promotion also archives the gated model, whether it won or not, in two files named by its build identity:
+
+```text
+models/
+├── candidate-sha256-<header digest>.hpp    the exact gated model header
+└── candidate-sha256-<header digest>.json   offline metrics and provenance
+```
+
+The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so every gated row leads to its model. The JSON records the architecture, recipe and iteration, Git commit, corpus, report digests, float and quantized validation and sealed-test metrics, parity, and benchmarks. It contains only fields fixed by the authenticated candidate, so it is byte-identical on every promotion attempt. An archive is written before the ledger row, so an interrupted promotion can be retried. Existing archive files are reused only if they match exactly; otherwise promotion stops.
+
+An archived model can be rebuilt for analysis or a later re-gate by configuring a build with `-DPOE2_MINIMAX_MODEL_HEADER=models/candidate-sha256-<header digest>.hpp`.
+
+## Candidate handoff
+
+Handoff installs a gate winner as the shipped model. It previews the difference by default:
+
+```bash
+uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION"
+uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION" --apply
+```
+
+Apply requires a promotable candidate, a completed engine gate whose decision is `accept_alt`, a committed ledger row and archive from gate promotion, a clean worktree, and the run lock. It copies the archived header over `engines/minimax/src/frozen_pattern_gain_model.hpp`, atomically and touching nothing else. Review and commit that file.
 
 ## Lower-level references
 

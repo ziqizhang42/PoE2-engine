@@ -31,6 +31,7 @@ from .shared import (
 from .workflow_adapters import (
     CANDIDATE_SCHEMA,
     GATE_SCHEMA,
+    GATE_SCHEMA_VERSION,
     aggregate_label_stats,
     authenticate_candidate,
     authenticate_evaluation,
@@ -77,6 +78,9 @@ from .workflow_ui import (
     recorded_seconds,
     status_symbol,
 )
+
+MODEL_ARCHIVE_DIRECTORY = Path("models")
+MODEL_ARCHIVE_SCHEMA = "poe2-archived-model"
 
 
 class WorkflowError(ValueError):
@@ -448,7 +452,24 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
     for index, (name, iteration) in enumerate(snapshot["iterations"].items(), 1):
         stages = " ".join(f"{key}={value}" for key, value in iteration.items()
                           if key not in {"dataset", "depends_on", "status"})
+        decision = _recorded_gate_decision(config.iteration(name))
+        if decision is not None:
+            stages += f" gate_decision={decision}"
         print(f"  {status_symbol(str(iteration['status']))} iteration {index}. {name}: {stages}")
+
+
+def _recorded_gate_decision(iteration: IterationConfig) -> str | None:
+    """Return a completed gate's recorded decision for display, without authenticating it."""
+    if iteration.engine_gate is None or _path_state(iteration.gate_directory) != "complete":
+        return None
+    try:
+        report = json.loads((iteration.gate_directory / "report.json").read_bytes())
+        manifest = json.loads(
+            (iteration.gate_directory / report["run_directory"] / "manifest.json").read_bytes())
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    decision = manifest.get("sequential_decision") if isinstance(manifest, dict) else None
+    return decision if isinstance(decision, str) else None
 
 
 def _format_command(command: Sequence[str]) -> str:
@@ -1124,28 +1145,31 @@ class WorkflowRunner:
             raise WorkflowError("engine gate requires authenticated candidate statistics")
         header_metadata = candidate_stats.get("artifacts", {}).get("model_header")
         if not isinstance(header_metadata, dict) or not isinstance(
-                header_metadata.get("sha256"), str):
+                header_metadata.get("sha256"), str) or not isinstance(
+                header_metadata.get("path"), str):
             raise WorkflowError("candidate report has no authenticated model header")
         build_id = candidate_build_id(candidate_stats)
         build = gate_build_directory(self.config, iteration, candidate_stats)
-        tracked_header = (self.config.repository / "engines" / "minimax" / "src" /
-                          "frozen_pattern_gain_model.hpp")
-        if sha256_file(tracked_header) != header_metadata["sha256"]:
-            raise WorkflowError(
-                "engine gate requires the candidate header to be installed and committed; "
-                f"run handoff --apply for {iteration.name}: {tracked_header}")
+        candidate_header = iteration.candidate_directory / header_metadata["path"]
+
+        def require_candidate_header() -> None:
+            if (not candidate_header.is_file() or
+                    sha256_file(candidate_header) != header_metadata["sha256"]):
+                raise WorkflowError(
+                    f"candidate model header is missing or changed: {candidate_header}")
+
+        require_candidate_header()
 
         def create(attempt: int) -> None:
             reserve_report_directory(root, GATE_SCHEMA)
             self._command(stage, "configure", [
-                "cmake", "--preset", self.config.build_preset, "-B", str(build)],
+                "cmake", "--preset", self.config.build_preset, "-B", str(build),
+                f"-DPOE2_MINIMAX_MODEL_HEADER={candidate_header}"],
                 attempt=attempt)
             self._command(stage, "build", ["cmake", "--build", str(build)], attempt=attempt)
             self._command(stage, "test", [
                 "ctest", "--test-dir", str(build), "--output-on-failure"], attempt=attempt)
-            if sha256_file(tracked_header) != header_metadata["sha256"]:
-                raise WorkflowError(
-                    f"tracked model header changed while building the engine gate: {tracked_header}")
+            require_candidate_header()
             runner = build / "runner" / "poe2_runner"
             command = engine_gate_command(self.config, iteration, build, runner)
             result = self._command(stage, "evaluate", command, attempt=attempt)
@@ -1167,7 +1191,7 @@ class WorkflowRunner:
                 if not path.is_file():
                     raise WorkflowError(f"engine gate did not produce {name}: {path}")
             report = {
-                "schema": GATE_SCHEMA, "schema_version": 1,
+                "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
                 "created_at_utc": now_utc(), "git_commit": self.commit,
                 "settings": {
                     **asdict(gate), "opening_book": str(gate.opening_book),
@@ -1178,7 +1202,7 @@ class WorkflowRunner:
                 "candidate_report_sha256": candidate_stats["report_sha256"],
                 "candidate_build_id": build_id,
                 "build_directory": build.relative_to(root).as_posix(),
-                "tracked_model_header_sha256": header_metadata["sha256"],
+                "model_header_sha256": header_metadata["sha256"],
                 "base_engine_artifact": {
                     "path": str(base_engine_binary),
                     "sha256": sha256_file(base_engine_binary),
@@ -1200,7 +1224,6 @@ class WorkflowRunner:
             "candidate": candidate_stats,
             "opening_book_sha256": sha256_file(gate.opening_book),
             "base_engine_sha256": sha256_file(base_engine_binary),
-            "tracked_model_header_sha256": sha256_file(tracked_header),
         }, create, authenticate)
 
     @staticmethod
@@ -1296,10 +1319,17 @@ def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
     source = iteration.candidate_directory / header_metadata["path"]
     target = config.repository / "engines" / "minimax" / "src" / "frozen_pattern_gain_model.hpp"
     tracked_digest = sha256_file(target)
+    archive = _archive_entry(config, iteration, candidate)
+    gate = (authenticate_gate(config, iteration, candidate=candidate)
+            if iteration.engine_gate is not None and
+            _path_state(iteration.gate_directory) == "complete" else None)
     preview = {
         "iteration": iteration_name, "promotable": candidate["promotable"],
         "candidate_header": str(source), "candidate_sha256": header_metadata["sha256"],
         "tracked_header": str(target), "tracked_sha256": tracked_digest,
+        "gate_decision": gate["sequential_decision"] if gate is not None else None,
+        "archived_header": str(archive.header_path),
+        "archived": _archived_model_state(archive),
         "different": tracked_digest != header_metadata["sha256"], "applied": False,
     }
     if not apply:
@@ -1307,17 +1337,132 @@ def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
     if not candidate["promotable"]:
         raise WorkflowError(
             f"candidate {iteration_name} is explicitly non-promotable")
+    if iteration.engine_gate is None:
+        raise WorkflowError(
+            f"candidate {iteration_name} has no engine gate; only gate winners can be installed")
+    if gate is None:
+        raise WorkflowError(f"engine gate for {iteration_name} is not complete")
+    if gate["sequential_decision"] != "accept_alt":
+        raise WorkflowError(
+            f"candidate {iteration_name} did not win its engine gate "
+            f"(decision={gate['sequential_decision']}); only gate winners can be installed")
+    if not preview["archived"] or not _master_ledger_has_run(config, gate["run_id"]):
+        raise WorkflowError(
+            f"record the gate first: run promote-gate --apply for {iteration_name}, then "
+            "commit its ledger row and archived model")
     require_clean_committed(config)
     if preview["different"]:
         try:
-            contents = source.read_bytes()
+            contents = archive.header_path.read_bytes()
             if hashlib.sha256(contents).hexdigest() != header_metadata["sha256"]:
-                raise WorkflowError(f"candidate header changed during handoff: {source}")
+                raise WorkflowError(
+                    f"archived header changed during handoff: {archive.header_path}")
             atomic_write_bytes(target, contents, replace=True)
         except OSError as error:
             raise WorkflowError(f"could not install candidate header at {target}: {error}") from error
         preview["applied"] = True
     return preview
+
+
+@dataclass(frozen=True)
+class ArchiveEntry:
+    """One gated model's content-addressed files under the repository's models/ folder."""
+
+    header_source: Path
+    header_sha256: str
+    header_path: Path
+    metrics_path: Path
+    metrics: bytes
+
+
+def _repository_relative(config: WorkflowConfig, path: Path) -> str:
+    try:
+        return path.relative_to(config.repository).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _archive_entry(config: WorkflowConfig, iteration: IterationConfig,
+                   candidate: dict[str, Any]) -> ArchiveEntry:
+    header_metadata = candidate["artifacts"]["model_header"]
+    model_id = candidate_build_id(candidate)
+    directory = config.repository / MODEL_ARCHIVE_DIRECTORY
+    model = candidate["model"]
+    # Only fields fixed by the authenticated candidate belong here, so a retried promotion
+    # regenerates byte-identical metrics and the archive stays idempotent.
+    record = {
+        "schema": MODEL_ARCHIVE_SCHEMA, "schema_version": 1,
+        "model_id": model_id, "model_header_sha256": header_metadata["sha256"],
+        "architecture": model["name"],
+        "recipe": {"path": _repository_relative(config, config.path),
+                   "run": config.name, "iteration": iteration.name},
+        "git_commit": candidate["git_commit"],
+        "validated_at_utc": candidate["created_at_utc"],
+        "corpus_id": candidate["corpus_id"],
+        "provenance": {
+            "feature_binary_sha256": candidate["feature_binary_sha256"],
+            "training_report_sha256": candidate["training_report_sha256"],
+            "sealed_evaluation_report_sha256": candidate["sealed_evaluation_report_sha256"],
+            "candidate_report_sha256": candidate["report_sha256"],
+        },
+        "metrics": {"float": model["float"], "quantized": model["quantized"]},
+        "parity": candidate["parity"],
+        "benchmarks": {"evaluator": candidate["evaluator_benchmark"],
+                       "search": candidate["search_benchmark"]},
+    }
+    return ArchiveEntry(
+        header_source=iteration.candidate_directory / header_metadata["path"],
+        header_sha256=header_metadata["sha256"],
+        header_path=directory / f"{model_id}.hpp",
+        metrics_path=directory / f"{model_id}.json",
+        metrics=(json.dumps(record, indent=2, sort_keys=True) + "\n").encode(),
+    )
+
+
+def _archived_model_state(entry: ArchiveEntry) -> bool:
+    """Return whether both archive files exist; reject files that disagree with the candidate."""
+    if entry.header_path.exists() and sha256_file(entry.header_path) != entry.header_sha256:
+        raise WorkflowError(
+            f"archived model header differs from the candidate: {entry.header_path}")
+    if entry.metrics_path.exists() and entry.metrics_path.read_bytes() != entry.metrics:
+        raise WorkflowError(
+            f"archived model metrics differ from the candidate: {entry.metrics_path}")
+    return entry.header_path.is_file() and entry.metrics_path.is_file()
+
+
+def _write_archived_model(entry: ArchiveEntry) -> None:
+    if _archived_model_state(entry):
+        return
+    try:
+        contents = entry.header_source.read_bytes()
+        if hashlib.sha256(contents).hexdigest() != entry.header_sha256:
+            raise WorkflowError(
+                f"candidate header changed before archiving: {entry.header_source}")
+        for path, data in ((entry.header_path, contents), (entry.metrics_path, entry.metrics)):
+            if not path.exists():
+                atomic_write_bytes(path, data)
+    except OSError as error:
+        raise WorkflowError(f"could not archive model {entry.header_path.stem}: {error}") from error
+
+
+def _master_ledger_path(config: WorkflowConfig) -> Path:
+    return config.repository / "eval" / "results.csv"
+
+
+def _read_master_ledger(master: Path) -> list[list[str]]:
+    try:
+        with master.open(newline="", encoding="utf-8") as source:
+            return list(csv.reader(source))
+    except (OSError, UnicodeDecodeError, csv.Error) as error:
+        raise WorkflowError(f"could not read master ledger {master}: {error}") from error
+
+
+def _master_ledger_has_run(config: WorkflowConfig, run_id: str) -> bool:
+    rows = _read_master_ledger(_master_ledger_path(config))
+    if not rows or "run_id" not in rows[0]:
+        raise WorkflowError("master ledger has no run_id column")
+    index = rows[0].index("run_id")
+    return any(len(row) > index and row[index] == run_id for row in rows[1:])
 
 
 def _read_ledger_row(path: Path) -> tuple[list[str], list[str]]:
@@ -1387,7 +1532,8 @@ def promote_gate(config: WorkflowConfig, iteration_name: str, *, apply: bool = F
 def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
                   apply: bool) -> dict[str, Any]:
     iteration = config.iteration(iteration_name)
-    gate = authenticate_gate(config, iteration)
+    candidate = authenticate_candidate(config, iteration)
+    gate = authenticate_gate(config, iteration, candidate=candidate)
     saved_path = Path(gate["ledger_row"])
     header, row = _read_ledger_row(saved_path)
     try:
@@ -1495,14 +1641,11 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
         raise WorkflowError(
             "saved ledger row differs from the authenticated gate in: " +
             ", ".join(sorted(set(mismatches))))
-    master = config.repository / "eval" / "results.csv"
+    master = _master_ledger_path(config)
+    archive = _archive_entry(config, iteration, candidate)
 
     def inspect_master() -> bool:
-        try:
-            with master.open(newline="", encoding="utf-8") as source:
-                existing = list(csv.reader(source))
-        except (OSError, UnicodeDecodeError, csv.Error) as error:
-            raise WorkflowError(f"could not read master ledger {master}: {error}") from error
+        existing = _read_master_ledger(master)
         if not existing or existing[0] != header:
             raise WorkflowError(f"master and saved ledger schemas differ: {master}")
         if any(len(item) != len(header) for item in existing[1:]):
@@ -1510,7 +1653,12 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
         return any(item[run_index] == run_id for item in existing[1:])
 
     preview = {"iteration": iteration_name, "run_id": run_id,
+               "model_id": gate["candidate_build_id"],
+               "sequential_decision": gate["sequential_decision"],
                "saved_row": str(saved_path), "ledger": str(master),
+               "archived_header": str(archive.header_path),
+               "archived_metrics": str(archive.metrics_path),
+               "archived": _archived_model_state(archive),
                "duplicate": False, "applied": False}
     if not apply:
         preview["duplicate"] = inspect_master()
@@ -1524,6 +1672,10 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
             preview["duplicate"] = inspect_master()
             if preview["duplicate"]:
                 raise WorkflowError(f"master ledger already contains run ID {run_id}")
+            # Archive before appending so an interrupted promotion retries cleanly: the
+            # archive is content-addressed and idempotent, while the ledger rejects duplicates.
+            _write_archived_model(archive)
+            preview["archived"] = True
             with master.open("a", newline="", encoding="utf-8") as destination:
                 writer = csv.writer(destination, lineterminator="\n")
                 writer.writerow(row)
