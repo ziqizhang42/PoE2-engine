@@ -33,6 +33,7 @@ from poe2_training.workflow import (
     WorkflowRunner,
     WorkflowError,
     _dependency_order,
+    check_model_lineage,
     handoff_candidate,
     print_status,
     promote_gate,
@@ -54,6 +55,8 @@ from poe2_training.workflow_adapters import (
     data_binary,
     data_build_directory,
     engine_gate_command,
+    gate_base_binary,
+    gate_base_build_directory,
     gate_build_directory,
     label_command,
     label_shard_path,
@@ -61,6 +64,7 @@ from poe2_training.workflow_adapters import (
     source_command,
 )
 from poe2_training.workflow_config import (
+    ModelReference,
     WorkflowConfigError,
     fingerprint,
     load_workflow_config,
@@ -270,6 +274,10 @@ class WorkflowConfigTest(unittest.TestCase):
         (repository / ".git").mkdir(parents=True)
         (repository / "CMakePresets.json").write_bytes(
             (REPOSITORY / "CMakePresets.json").read_bytes())
+        (repository / "eval/openings").mkdir(parents=True)
+        for book in ("development.txt", "holdout.txt"):
+            (repository / "eval/openings" / book).write_bytes(
+                (REPOSITORY / "eval/openings" / book).read_bytes())
         header = b"// teacher model fixture\n"
         model_id = f"candidate-sha256-{hashlib.sha256(header).hexdigest()}"
         (repository / "models").mkdir()
@@ -333,6 +341,60 @@ class WorkflowConfigTest(unittest.TestCase):
         for command in (source_command(plain, plain_dataset),
                         label_command(plain, plain_dataset, 0)):
             self.assertNotIn("--evaluator", command)
+
+    @staticmethod
+    def _generation_text(repository: Path, model_id: str, gate: str,
+                         *, iteration: str = "g001", candidate: bool = True) -> str:
+        validation = ("[iterations.candidate_validation]\npromotable = true\n"
+                      if candidate else "")
+        return textwrap.dedent(f"""
+            schema_version = 1
+            [run]
+            name = "generation-test"
+            output_dir = "{repository / 'run'}"
+            build_preset = "debug"
+            [models]
+            g000 = "{model_id}"
+            [datasets.g001]
+            kind = "managed"
+            teacher = "g000"
+            [datasets.g001.source]
+            corpus_id = "generation-test"
+            seed = 7
+            trajectories = 4
+            [datasets.g001.labels]
+            mode = "teacher"
+            nodes = 100
+            [[iterations]]
+            name = "{iteration}"
+            dataset = "g001"
+            [iterations.training]
+            type = "pattern"
+            device = "cpu"
+            suite = "frozen-pattern-gain"
+        """) + validation + gate
+
+    def test_gate_base_model_names_an_archived_model(self) -> None:
+        repository, model_id = self._teacher_repository()
+        config = load_workflow_config(_write(repository, self._generation_text(
+            repository, model_id, '[iterations.engine_gate]\nbase_model = "g000"\n'),
+            "generation.toml"))
+        gate = config.iteration("g001").engine_gate
+        self.assertIsNone(gate.base)
+        self.assertEqual(gate.base_model, model_id)
+        self.assertEqual(
+            stage_definitions(config)["iteration:g001:engine-gate"]["settings"].base_model,
+            model_id)
+        for lines, message in (
+                ('base = "000074-aa1f911c27b6"\nbase_model = "g000"\n', "exactly one"),
+                ('games = 2\n', "exactly one"),
+                ('base_model = "g009"\n', "must name an entry")):
+            with self.subTest(lines=lines), self.assertRaisesRegex(WorkflowConfigError, message):
+                load_workflow_config(_write(repository, self._generation_text(
+                    repository, model_id, "[iterations.engine_gate]\n" + lines), "bad.toml"))
+        with self.assertRaisesRegex(WorkflowConfigError, "validates no candidate"):
+            load_workflow_config(_write(repository, self._generation_text(
+                repository, model_id, "", iteration="g000", candidate=False), "shadow.toml"))
 
     def test_teacher_must_name_an_intact_archived_model(self) -> None:
         repository, model_id = self._teacher_repository()
@@ -926,7 +988,10 @@ class WorkflowPromotionTest(unittest.TestCase):
         run.mkdir(parents=True)
         gate = self.iteration.engine_gate
         assert gate is not None
-        base_engine = resolve_eval_binary(self.config, gate.base, gate.base_engine)
+        base_engine = gate_base_binary(self.config, self.iteration)
+        if gate.base_model is not None:
+            base_engine.parent.mkdir(parents=True, exist_ok=True)
+            base_engine.write_text("base model engine\n", encoding="utf-8")
         manifest = {
             "run_id": row[header.index("run_id")],
             "created_at_utc": "20260819T000000Z", "valid": True,
@@ -936,7 +1001,8 @@ class WorkflowPromotionTest(unittest.TestCase):
             "new_engine_args": gate.new_engine_args, "base_engine": gate.base_engine,
             "base_engine_args": gate.base_engine_args,
             "base_engine_path": manifest_base_path or str(base_engine),
-            "base_id": "fixture-base", "opening_book": str(gate.opening_book),
+            "base_id": gate.base_model or "fixture-base",
+            "opening_book": str(gate.opening_book),
             "opening_book_digest": "fnv1a64:fixture", "opening_count": 1,
             "opening_seed": 123, "opening_seed_source": "derived",
             "opening_sampling": "deterministic_shuffle_without_replacement",
@@ -1165,6 +1231,72 @@ class WorkflowPromotionTest(unittest.TestCase):
         workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
         with self.assertRaisesRegex(WorkflowError, "missing or changed"):
             workflow._run_gate(self.iteration, candidate_stats)
+
+    def _with_base_model(self, contents: bytes = b"// base model fixture\n") -> ModelReference:
+        header = self.root / "base-model.hpp"
+        header.write_bytes(contents)
+        model = ModelReference(
+            name="g000", model_id=f"candidate-sha256-{sha256_file(header)}", header=header)
+        gate = self.iteration.engine_gate
+        assert gate is not None
+        self.iteration = replace(
+            self.iteration, engine_gate=replace(gate, base=None, base_model=model.model_id))
+        self.config = replace(self.config, iterations=(self.iteration,), models=(model,))
+        return model
+
+    def test_engine_gate_builds_its_base_model_from_the_same_commit(self) -> None:
+        self._candidate()
+        model = self._with_base_model()
+        candidate_stats = authenticate_candidate(self.config, self.iteration)
+        workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
+        commands: dict[str, list[str]] = {}
+
+        def record(_stage: str, operation: str, command, **_options) -> None:
+            commands[operation] = list(command)
+            if operation == "configure-base":
+                raise WorkflowError("fixture stops the gate")
+
+        with mock.patch.object(workflow, "_command", side_effect=record):
+            with self.assertRaisesRegex(WorkflowError, "fixture stops the gate"):
+                workflow._run_gate(self.iteration, candidate_stats)
+        base_build = gate_base_build_directory(self.config, self.iteration)
+        self.assertEqual(base_build.parent.name, model.model_id)
+        self.assertIn(str(base_build), commands["configure-base"])
+        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={model.header}", commands["configure-base"])
+        self.assertIn("ctest", commands["test"])
+        gate_command = engine_gate_command(
+            self.config, self.iteration, self.root / "build", self.root / "runner")
+        self.assertEqual(gate_command[gate_command.index("--base") + 1], str(base_build))
+
+    def test_engine_gate_rejects_a_base_model_equal_to_its_candidate(self) -> None:
+        self._candidate()
+        candidate_stats = authenticate_candidate(self.config, self.iteration)
+        self._with_base_model(
+            (self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp").read_bytes())
+        workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
+        with self.assertRaisesRegex(WorkflowError, "against itself"):
+            workflow._run_gate(self.iteration, candidate_stats)
+
+    def test_gate_against_a_base_model_authenticates_and_indexes_its_short_id(self) -> None:
+        self._candidate()
+        model = self._with_base_model()
+        ledger_header, _ = self._gate(ledger_overrides={"base_id": model.model_id})
+        authenticated = authenticate_gate(self.config, self.iteration)
+        self.assertEqual(authenticated["manifest"]["base_id"], model.model_id)
+        _, isolated = self._isolated_repository("base-model-repository", ledger_header=ledger_header)
+        preview = promote_gate(isolated, "candidate")
+        self.assertEqual(preview["index_row"]["base"], model.sha256[:12])
+
+    def test_model_lineage_requires_entries_to_match_their_iteration(self) -> None:
+        named = ModelReference(name="candidate", model_id="candidate-sha256-" + "a" * 64,
+                               header=self.root / "unused.hpp")
+        config = replace(self.config, models=(named,))
+        check_model_lineage(config)
+        self._candidate()
+        with self.assertRaisesRegex(WorkflowError, "but iteration candidate produced"):
+            check_model_lineage(config)
+        produced = candidate_build_id(authenticate_candidate(self.config, self.iteration))
+        check_model_lineage(replace(self.config, models=(replace(named, model_id=produced),)))
 
     def test_engine_gate_records_a_decision_that_is_not_a_win(self) -> None:
         self._candidate()

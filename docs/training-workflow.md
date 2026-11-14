@@ -124,7 +124,24 @@ teacher = "g000"
 
 Each `[models]` entry gives a recipe-local name to a model archived under `models/`. Loading the recipe requires the archived `.hpp` and `.json` to exist and the header to match its digest. The workflow builds a private data tool for each teacher under `<run>/build/teacher-<digest prefix>/`, with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the archived header, and passes `--evaluator pattern-gain` to position generation and labeling. Source, label, and feature authentication require the recorded evaluator and model digest to match the recipe. A teacher is part of the source and label stage fingerprints, so it cannot change once those stages start. Datasets without a teacher keep the fingerprints they had before teachers existed.
 
-A run trains one architecture over successive generations named `g000`, `g001`, …. `g000` is the run's starting model, either imported or trained inside the run. Each later generation `gNNN` has a dataset taught by the generation before it, and its gate plays that generation. To start the next generation, promote the current one's gate so its model is archived, add it to `[models]`, and append the new dataset and iteration in a compatible recipe revision. A new run starts only when the architecture or a major setting changes. Offline metrics compare models only within one generation, because each generation's labels come from a different teacher; games compare generations.
+A run trains one architecture over successive generations named `g000`, `g001`, …. `g000` is the run's starting model, either imported or trained inside the run. Each later generation `gNNN` has a dataset taught by the generation before it, and its gate plays that generation with `base_model`. To start the next generation, promote the current one's gate so its model is archived, add it to `[models]` under the generation's own name, and append the new dataset and iteration in a compatible recipe revision. A `[models]` entry that shares an iteration's name must be the model that iteration produced. The workflow checks this once the iteration's candidate exists: when a run or `validate` starts, and before the entry is used as a teacher or gate base.
+
+```toml
+[models]
+g000 = "candidate-sha256-<v0.2 digest>"
+g001 = "candidate-sha256-<g001 digest>"
+
+[datasets.g002]
+kind = "managed"
+teacher = "g001"
+
+[[iterations]]
+name = "g002"
+dataset = "g002"
+
+[iterations.engine_gate]
+base_model = "g001"
+``` A new run starts only when the architecture or a major setting changes. Offline metrics compare models only within one generation, because each generation's labels come from a different teacher; games compare generations.
 
 Baseline training uses `type = "baseline"` and accepts `device`, `seed`, `close_margin`, and `ridge_lambdas`. Pattern suites are `default`, `frozen-pattern-gain`, and `line-pattern-audit`.
 
@@ -174,6 +191,8 @@ sequential_beta = 0.05
 ```
 
 The candidate side is fixed to `minimax/poe2_minimax --evaluator pattern-gain`. The gate requires a promotable candidate. It configures a private build with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the candidate's authenticated header, runs the full test suite, and plays the match. The tracked engine header is never read or changed. Its build identity, `candidate-sha256-<header digest>`, is derived from the model header; the base engine and arguments remain configurable.
+
+A gate sets exactly one base. `base` names an existing build ID, build directory, or engine binary. `base_model` names a `[models]` entry; the gate then builds that archived header privately under `engine-gate/builds/<model ID>/` from the same commit as the candidate, so both sides differ only in their weights. The ledger records the base's `base_id` as that model ID. A gate cannot use its own candidate as its base.
 
 Every valid gate completes and records its sequential decision, including `accept_null` and `continue`, so a gate that does not show a win can still be promoted to the ledger and archived. Only handoff requires a win.
 
@@ -233,7 +252,7 @@ The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so eve
 | `recorded_utc` | When the gate started, from its manifest |
 | `run`, `iteration` | The recipe run and iteration that produced the model |
 | `model` | The first 12 hex digits of the model header digest; the archive files and the ledger's `new_id` carry the full digest |
-| `base` | The build the candidate played against |
+| `base` | The build the candidate played against, or the first 12 hex digits of a base model's digest |
 | `decision` | The gate's sequential decision, such as `accept_alt` or `accept_null` |
 | `games`, `score_pct` | Games played and the candidate's score, counting a no-winner game as half |
 | `sealed_mae` | Exported quantized sealed-test MAE, empty without a sealed evaluation |

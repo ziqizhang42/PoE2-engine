@@ -99,6 +99,34 @@ def gate_build_directory(config: WorkflowConfig, iteration: IterationConfig,
             config.build_preset)
 
 
+def gate_base_build_directory(config: WorkflowConfig, iteration: IterationConfig) -> Path:
+    """Return the private build of a gate's base model, in the layout the build-ID reader names."""
+    gate = iteration.engine_gate
+    _require(gate is not None and gate.base_model is not None, "gate has no base model")
+    return iteration.gate_directory / "builds" / gate.base_model / config.build_preset
+
+
+def gate_base_input(config: WorkflowConfig, iteration: IterationConfig) -> str:
+    """Return the evaluator --base argument: an existing build or the base model's private build."""
+    gate = iteration.engine_gate
+    _require(gate is not None, "iteration has no engine gate")
+    if gate.base_model is not None:
+        return str(gate_base_build_directory(config, iteration))
+    assert gate.base is not None
+    return gate.base
+
+
+def gate_base_binary(config: WorkflowConfig, iteration: IterationConfig) -> Path:
+    """Return the base engine a gate plays; a base model's build exists only once the gate ran."""
+    gate = iteration.engine_gate
+    _require(gate is not None, "iteration has no engine gate")
+    if gate.base_model is not None:
+        return (gate_base_build_directory(config, iteration) / "engines" /
+                gate.base_engine).resolve()
+    assert gate.base is not None
+    return resolve_eval_binary(config, gate.base, gate.base_engine)
+
+
 def resolve_eval_binary(config: WorkflowConfig, value: str, engine: str) -> Path:
     """Resolve an evaluator input exactly like the native evaluation CLI."""
     raw = Path(value)
@@ -287,7 +315,8 @@ def engine_gate_command(config: WorkflowConfig, iteration: IterationConfig,
     gate = iteration.engine_gate
     _require(gate is not None, "iteration has no engine gate")
     command = [
-        str(runner), "eval", "--new-build", str(build), "--base", gate.base,
+        str(runner), "eval", "--new-build", str(build),
+        "--base", gate_base_input(config, iteration),
         "--new-engine", gate.new_engine, "--base-engine", gate.base_engine,
         "--preset", config.build_preset, "--kind", "training-gate",
         "--run-root", str(iteration.gate_directory / "runs"), "--no-ledger",
@@ -754,7 +783,12 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
         authenticated_build_paths[name] = path
     manifest = _manifest(run_path / "manifest.json")
     summary = _manifest(run_path / "summary.json")
-    base_engine_path = resolve_eval_binary(config, gate.base, gate.base_engine)
+    base_engine_path = gate_base_binary(config, iteration)
+    if gate.base_model is not None:
+        _require(iteration.gate_directory in base_engine_path.parents,
+                 "engine-gate base model build escapes the gate directory")
+        _require(manifest.get("base_id") == gate.base_model,
+                 "engine-gate base build is not the configured base model")
     base_metadata = report.get("base_engine_artifact")
     _require(isinstance(base_metadata, dict) and
              base_metadata.get("path") == str(base_engine_path) and

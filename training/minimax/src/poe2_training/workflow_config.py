@@ -146,7 +146,8 @@ class CandidateValidationConfig:
 
 @dataclass(frozen=True)
 class EngineGateConfig:
-    base: str
+    # Exactly one of base (an existing build) and base_model (an archived model ID) is set.
+    base: str | None
     new_engine: str = CANDIDATE_ENGINE
     base_engine: str = "minimax/poe2_minimax"
     new_engine_args: str = CANDIDATE_ENGINE_ARGS
@@ -162,6 +163,7 @@ class EngineGateConfig:
     sequential_alt: float = 20.0
     sequential_alpha: float = 0.05
     sequential_beta: float = 0.05
+    base_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -440,13 +442,22 @@ def _parse_candidate(repository: Path, value: Any, field: str) -> CandidateValid
     )
 
 
-def _parse_gate(repository: Path, value: Any, field: str) -> EngineGateConfig:
+def _parse_gate(repository: Path, value: Any, field: str,
+                models: dict[str, ModelReference]) -> EngineGateConfig:
     table = _table(value, field)
-    allowed = {"base", "new_engine", "base_engine", "new_engine_args", "base_engine_args",
-               "opening_book", "games", "workers", "timeout_ms", "go_movetime_ms",
-               "opening_seed", "sequential_stop", "sequential_null", "sequential_alt",
-               "sequential_alpha", "sequential_beta"}
+    allowed = {"base", "base_model", "new_engine", "base_engine", "new_engine_args",
+               "base_engine_args", "opening_book", "games", "workers", "timeout_ms",
+               "go_movetime_ms", "opening_seed", "sequential_stop", "sequential_null",
+               "sequential_alt", "sequential_alpha", "sequential_beta"}
     _unknown(table, allowed, field)
+    _require(("base" in table) != ("base_model" in table),
+             f"{field} must set exactly one of base and base_model")
+    base_model = None
+    if "base_model" in table:
+        model_name = _string(table, "base_model", field)
+        _require(model_name in models,
+                 f"{field}.base_model must name an entry in config.models: {model_name}")
+        base_model = models[model_name].model_id
     seed = table.get("opening_seed")
     if seed is not None:
         _require(isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0,
@@ -476,7 +487,8 @@ def _parse_gate(repository: Path, value: Any, field: str) -> EngineGateConfig:
              f"{field}.new_engine_args must be {CANDIDATE_ENGINE_ARGS!r} so the gate "
              "runs the candidate evaluator")
     return EngineGateConfig(
-        base=_string(table, "base", field),
+        base=_string(table, "base", field) if base_model is None else None,
+        base_model=base_model,
         new_engine=new_engine,
         base_engine=_binary_name(
             _string(table, "base_engine", field, "minimax/poe2_minimax"),
@@ -600,7 +612,8 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         candidate = (_parse_candidate(repository, table["candidate_validation"],
                                       f"{field}.candidate_validation")
                      if "candidate_validation" in table else None)
-        gate = (_parse_gate(repository, table["engine_gate"], f"{field}.engine_gate")
+        gate = (_parse_gate(repository, table["engine_gate"], f"{field}.engine_gate",
+                            models_by_name)
                 if "engine_gate" in table else None)
         if sealed is not None:
             _require(isinstance(training, PatternTrainingConfig),
@@ -630,6 +643,12 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
             sealed_evaluation=sealed, candidate_validation=candidate, engine_gate=gate,
         ))
         seen.add(name)
+
+    for model in models:
+        named = next((item for item in iterations if item.name == model.name), None)
+        _require(named is None or named.candidate_validation is not None,
+                 f"config.models.{model.name} shares its name with iteration {model.name}, "
+                 "which validates no candidate")
 
     referenced_datasets = {iteration.dataset for iteration in iterations}
     referenced_datasets.update(

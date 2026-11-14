@@ -49,13 +49,14 @@ from .workflow_adapters import (
     export_command,
     feature_command,
     feature_audit_command,
+    gate_base_binary,
+    gate_base_build_directory,
     gate_build_directory,
     label_command,
     label_audit_command,
     label_preflight_command,
     label_shard_path,
     parity_command,
-    resolve_eval_binary,
     search_benchmark_command,
     source_command,
     source_audit_command,
@@ -66,6 +67,7 @@ from .workflow_config import (
     ImportedDatasetConfig,
     IterationConfig,
     ManagedDatasetConfig,
+    ModelReference,
     WorkflowConfig,
     fingerprint,
     stage_fingerprints,
@@ -515,7 +517,10 @@ def print_plan(config: WorkflowConfig) -> None:
             print(f"  candidate validation: {iteration.candidate_directory} "
                   f"promotable={str(iteration.candidate_validation.promotable).lower()}")
         if iteration.engine_gate is not None:
-            print(f"  engine gate: {iteration.gate_directory} base={iteration.engine_gate.base}")
+            gate = iteration.engine_gate
+            base = (gate.base if gate.base_model is None else
+                    f"{gate.base_model} (built privately)")
+            print(f"  engine gate: {iteration.gate_directory} base={base}")
 
 
 def _direct_audit(command: Sequence[str], repository: Path) -> str:
@@ -528,10 +533,38 @@ def _direct_audit(command: Sequence[str], repository: Path) -> str:
     return completed.stdout
 
 
+def _model_by_id(config: WorkflowConfig, model_id: str, label: str) -> ModelReference:
+    """Return the intact archived model that the recipe's [models] table names by this ID."""
+    for model in config.models:
+        if model.model_id == model_id:
+            if not model.header.is_file() or sha256_file(model.header) != model.sha256:
+                raise WorkflowError(f"{label} {model.name} is missing or changed: {model.header}")
+            return model
+    raise WorkflowError(f"{label} is not named in config.models: {model_id}")
+
+
+def check_model_lineage(config: WorkflowConfig, model: ModelReference | None = None) -> None:
+    """Require each [models] entry named after an iteration to be that iteration's candidate.
+
+    An entry is compared once its iteration's candidate exists; before then nothing disagrees.
+    """
+    iterations = {iteration.name: iteration for iteration in config.iterations}
+    for entry in config.models if model is None else (model,):
+        iteration = iterations.get(entry.name)
+        if iteration is None or _path_state(iteration.candidate_directory) != "complete":
+            continue
+        produced = candidate_build_id(authenticate_candidate(config, iteration))
+        if produced != entry.model_id:
+            raise WorkflowError(
+                f"config.models.{entry.name} is {entry.model_id}, but iteration "
+                f"{entry.name} produced {produced}")
+
+
 def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
     """Read-only validation of config evolution and every artifact currently present."""
     state = RunState(config)
     state.validate_evolution()
+    check_model_lineage(config)
     authenticated: dict[str, Any] = {}
     for dataset in config.datasets:
         feature_state = _path_state(dataset.feature_directory)
@@ -783,6 +816,9 @@ class WorkflowRunner:
         dataset = self.config.dataset(name)
         if isinstance(dataset, ImportedDatasetConfig):
             return self._prepare_import(dataset)
+        if dataset.teacher is not None:
+            # The teacher's iteration may have finished earlier in this same invocation.
+            check_model_lineage(self.config, dataset.teacher)
         source_stats = self._prepare_source(dataset)
         label_stats = self._prepare_labels(dataset, source_stats)
         return self._prepare_features(dataset, source_stats, label_stats)
@@ -1149,8 +1185,11 @@ class WorkflowRunner:
         if not gate.opening_book.is_file():
             raise WorkflowError(f"engine-gate opening book is missing: {gate.opening_book}")
         root = iteration.gate_directory
-        base_engine_binary = resolve_eval_binary(
-            self.config, gate.base, gate.base_engine)
+        base_model = (None if gate.base_model is None else
+                      _model_by_id(self.config, gate.base_model, "engine-gate base model"))
+        if base_model is not None:
+            check_model_lineage(self.config, base_model)
+        base_engine_binary = gate_base_binary(self.config, iteration)
         if candidate_stats is None:
             raise WorkflowError("engine gate requires authenticated candidate statistics")
         header_metadata = candidate_stats.get("artifacts", {}).get("model_header")
@@ -1159,6 +1198,9 @@ class WorkflowRunner:
                 header_metadata.get("path"), str):
             raise WorkflowError("candidate report has no authenticated model header")
         build_id = candidate_build_id(candidate_stats)
+        if base_model is not None and base_model.model_id == build_id:
+            raise WorkflowError(
+                f"engine gate for {iteration.name} would play its candidate against itself")
         build = gate_build_directory(self.config, iteration, candidate_stats)
         candidate_header = iteration.candidate_directory / header_metadata["path"]
 
@@ -1180,6 +1222,18 @@ class WorkflowRunner:
             self._command(stage, "test", [
                 "ctest", "--test-dir", str(build), "--output-on-failure"], attempt=attempt)
             require_candidate_header()
+            if base_model is not None:
+                # Both sides build from this commit, so the gate measures only the weights.
+                base_build = gate_base_build_directory(self.config, iteration)
+                self._command(stage, "configure-base", [
+                    "cmake", "--preset", self.config.build_preset, "-B", str(base_build),
+                    f"-DPOE2_MINIMAX_MODEL_HEADER={base_model.header}"], attempt=attempt)
+                self._command(stage, "build-base", [
+                    "cmake", "--build", str(base_build), "--target", "poe2_minimax"],
+                    attempt=attempt)
+                if not base_engine_binary.is_file():
+                    raise WorkflowError(
+                        f"engine gate did not build its base model: {base_engine_binary}")
             runner = build / "runner" / "poe2_runner"
             command = engine_gate_command(self.config, iteration, build, runner)
             result = self._command(stage, "evaluate", command, attempt=attempt)
@@ -1233,7 +1287,8 @@ class WorkflowRunner:
         return self._run_simple(stage, root, "engine gate", {
             "candidate": candidate_stats,
             "opening_book_sha256": sha256_file(gate.opening_book),
-            "base_engine_sha256": sha256_file(base_engine_binary),
+            **({"base_engine_sha256": sha256_file(base_engine_binary)} if base_model is None
+               else {"base_model": base_model.model_id}),
         }, create, authenticate)
 
     @staticmethod
@@ -1276,6 +1331,7 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
     with run_lock(config):
         state = RunState(config)
         state.validate_evolution()
+        check_model_lineage(config)
         state.recover_running_stages()
         state.accept_config()
         state.append("run_started", git_commit=commit, config_digest=config.digest,
@@ -1468,9 +1524,12 @@ def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
     sealed = candidate["model"]["quantized"].get("sealed_test")
     sealed_mae = f"{sealed['mae']:.3f}" if isinstance(sealed, dict) else ""
     model_digest = candidate["artifacts"]["model_header"]["sha256"]
+    base = saved["base_id"]
+    if base.startswith("candidate-sha256-"):
+        base = base.removeprefix("candidate-sha256-")[:12]
     return [
         saved["created_at_utc"], config.name, iteration.name, model_digest[:12],
-        saved["base_id"], gate["sequential_decision"], str(games), f"{score:.1f}",
+        base, gate["sequential_decision"], str(games), f"{score:.1f}",
         sealed_mae, gate["run_id"],
     ]
 
