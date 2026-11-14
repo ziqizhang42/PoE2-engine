@@ -468,6 +468,34 @@ class LedgerFileLock {
   return component.empty() ? "unknown" : component;
 }
 
+// Builds of archived models are named candidate-sha256-<64 hex>. Two such IDs overflow a
+// 255-byte directory name, so run IDs keep 12 hex digits, as the training model index does;
+// manifests and ledger rows keep the full IDs.
+[[nodiscard]] std::string run_id_build_component(std::string_view id) {
+  constexpr std::string_view kModelPrefix = "candidate-sha256-";
+  constexpr std::size_t kDigestLength = 64;
+  constexpr std::size_t kShortDigestLength = 12;
+  const std::string_view digest =
+      id.starts_with(kModelPrefix) ? id.substr(kModelPrefix.size()) : std::string_view{};
+  const bool model_id = digest.size() == kDigestLength && std::ranges::all_of(digest, [](char ch) {
+                          return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+                        });
+  return run_id_component(model_id ? id.substr(0, kModelPrefix.size() + kShortDigestLength) : id);
+}
+
+// A run ID is a directory name, and file systems cap a name at 255 bytes. Keep 55 bytes of
+// headroom for the collision suffix; a longer ID keeps its readable start and ends with a
+// digest of the full ID, so it stays unique while the manifest records the full identities.
+[[nodiscard]] std::string bounded_run_id(std::string run_id) {
+  constexpr std::size_t kMaximumRunIdBytes = 200;
+  if (run_id.size() <= kMaximumRunIdBytes) {
+    return run_id;
+  }
+  const std::string digest = fnv1a64_hex(run_id);
+  run_id.resize(kMaximumRunIdBytes - digest.size() - 2);
+  return run_id + "__" + digest;
+}
+
 [[nodiscard]] ReservedRunDirectory reserve_run_directory(const fs::path& run_root,
                                                          const std::string& base_run_id) {
   for (int attempt = 0; attempt < 1000; ++attempt) {
@@ -1272,10 +1300,10 @@ int run_eval(int argc, char** argv) {
   }
   options.resolved_opening_seed = options.series.opening_seed.value_or(0);
   const std::string timestamp = utc_timestamp();
-  const std::string base_run_id =
-      timestamp + "__" + run_id_component(new_id) + "__" + run_id_component(options.new_engine) +
-      "__vs__" + run_id_component(base_id) + "__" + run_id_component(options.base_engine) +
-      engine_args_run_id_suffix(options);
+  const std::string base_run_id = bounded_run_id(
+      timestamp + "__" + run_id_build_component(new_id) + "__" +
+      run_id_component(options.new_engine) + "__vs__" + run_id_build_component(base_id) + "__" +
+      run_id_component(options.base_engine) + engine_args_run_id_suffix(options));
   const ReservedRunDirectory run = reserve_run_directory(options.run_root, base_run_id);
 
   options.series.engine_one_command = engine_command(new_engine_path, options.new_engine_args);

@@ -129,3 +129,106 @@ endif()
 if(first_seed STREQUAL book_seed)
   message(FATAL_ERROR "opening-book digest did not affect the derived opening seed")
 endif()
+
+# Builds of archived models carry full SHA-256 IDs on both sides of a generation gate. Their run
+# directory must still fit a 255-byte file name, while the manifest keeps both full IDs.
+string(REPEAT "a" 64 new_digest)
+string(REPEAT "b" 64 base_digest)
+set(model_new_id "candidate-sha256-${new_digest}")
+set(model_base_id "candidate-sha256-${base_digest}")
+foreach(model_id IN ITEMS "${model_new_id}" "${model_base_id}")
+  file(MAKE_DIRECTORY "${TEST_ROOT}/${model_id}/engines")
+  file(COPY "${BUILD_DIR}/engines/poe2_greedy" DESTINATION "${TEST_ROOT}/${model_id}/engines")
+endforeach()
+set(model_run_root "${TEST_ROOT}/model-builds")
+execute_process(
+  COMMAND "${RUNNER}" eval
+          --new-build "${TEST_ROOT}/${model_new_id}"
+          --base "${TEST_ROOT}/${model_base_id}"
+          --new-engine poe2_greedy
+          --base-engine poe2_greedy
+          --new-engine-args "--seed 1"
+          --base-engine-args "--seed 2"
+          --games 2
+          --timeout-ms 1000
+          --go-depth 1
+          --opening-book "${SOURCE_DIR}/eval/openings/development.txt"
+          --shuffle-openings
+          --run-root "${model_run_root}"
+          --kind training-gate
+          --no-ledger
+  RESULT_VARIABLE model_result
+  OUTPUT_VARIABLE model_output
+  ERROR_VARIABLE model_error
+)
+if(NOT model_result EQUAL 0)
+  message(FATAL_ERROR "model-build eval returned ${model_result}\n${model_output}\n${model_error}")
+endif()
+file(GLOB model_manifests "${model_run_root}/*/manifest.json")
+list(LENGTH model_manifests model_manifest_count)
+if(NOT model_manifest_count EQUAL 1)
+  message(FATAL_ERROR "model-build eval did not write one run")
+endif()
+list(GET model_manifests 0 model_manifest)
+get_filename_component(model_run_dir "${model_manifest}" DIRECTORY)
+get_filename_component(model_run_name "${model_run_dir}" NAME)
+string(LENGTH "${model_run_name}" model_run_name_length)
+string(FIND "${model_run_name}" "candidate-sha256-aaaaaaaaaaaa__" short_new)
+string(FIND "${model_run_name}" "__vs__candidate-sha256-bbbbbbbbbbbb__" short_base)
+if(model_run_name_length GREATER 255 OR short_new EQUAL -1 OR short_base EQUAL -1)
+  message(FATAL_ERROR "model-build run name is not abbreviated: ${model_run_name}")
+endif()
+file(READ "${model_manifest}" model_manifest_text)
+string(FIND "${model_manifest_text}" "\"new_id\": \"${model_new_id}\"" full_new)
+string(FIND "${model_manifest_text}" "\"base_id\": \"${model_base_id}\"" full_base)
+string(FIND "${model_manifest_text}" "\"run_id\": \"${model_run_name}\"" run_id_matches)
+if(full_new EQUAL -1 OR full_base EQUAL -1 OR run_id_matches EQUAL -1)
+  message(FATAL_ERROR "model-build manifest lost its full build IDs or run ID")
+endif()
+
+# Any other over-long run name keeps its readable start and ends with a digest of the full name.
+string(REPEAT "e" 120 long_engine_dir)
+set(long_engine "${long_engine_dir}/poe2_greedy")
+file(MAKE_DIRECTORY "${TEST_ROOT}/long-engine-build/engines/${long_engine_dir}")
+file(COPY "${BUILD_DIR}/engines/poe2_greedy"
+     DESTINATION "${TEST_ROOT}/long-engine-build/engines/${long_engine_dir}")
+set(long_run_root "${TEST_ROOT}/long-engine")
+execute_process(
+  COMMAND "${RUNNER}" eval
+          --new-build "${TEST_ROOT}/long-engine-build"
+          --base "${TEST_ROOT}/long-engine-build"
+          --new-engine "${long_engine}"
+          --base-engine "${long_engine}"
+          --games 2
+          --timeout-ms 1000
+          --go-depth 1
+          --opening-book "${SOURCE_DIR}/eval/openings/development.txt"
+          --shuffle-openings
+          --run-root "${long_run_root}"
+          --kind smoke
+          --no-ledger
+  RESULT_VARIABLE long_result
+  OUTPUT_VARIABLE long_output
+  ERROR_VARIABLE long_error
+)
+if(NOT long_result EQUAL 0)
+  message(FATAL_ERROR "long-engine eval returned ${long_result}\n${long_output}\n${long_error}")
+endif()
+file(GLOB long_manifests "${long_run_root}/*/manifest.json")
+list(LENGTH long_manifests long_manifest_count)
+if(NOT long_manifest_count EQUAL 1)
+  message(FATAL_ERROR "long-engine eval did not write one run")
+endif()
+list(GET long_manifests 0 long_manifest)
+get_filename_component(long_run_dir "${long_manifest}" DIRECTORY)
+get_filename_component(long_run_name "${long_run_dir}" NAME)
+string(LENGTH "${long_run_name}" long_run_name_length)
+if(NOT long_run_name_length EQUAL 200 OR NOT long_run_name MATCHES "__[0-9a-f]+$")
+  message(FATAL_ERROR "over-long run name was not bounded with a digest: ${long_run_name}")
+endif()
+file(READ "${long_manifest}" long_manifest_text)
+string(FIND "${long_manifest_text}" "\"new_engine\": \"${long_engine}\"" full_engine)
+string(FIND "${long_manifest_text}" "\"run_id\": \"${long_run_name}\"" long_run_id_matches)
+if(full_engine EQUAL -1 OR long_run_id_matches EQUAL -1)
+  message(FATAL_ERROR "bounded run lost its full engine name or run ID")
+endif()
