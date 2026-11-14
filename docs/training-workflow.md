@@ -212,13 +212,13 @@ Every mutating command holds `<run>/.orchestrator.lock`. Accepted TOML revisions
 ├── summary.json
 ├── logs/<stage>/attempt-...
 ├── build/<preset>/
-├── datasets/<name>/{source,labels/shards,features}
+├── datasets/<name>/{source-chunks,source,labels/shards,features}
 └── iterations/<name>/{training/{report.json,training-metrics.svg},sealed-evaluation,candidate,engine-gate}
 ```
 
 Build trees are private to each run or candidate. Once a stage starts, its configuration and input digests cannot change or be removed; unstarted stages and new iterations may be added in a later compatible recipe revision.
 
-Artifacts are create-only and authenticated before reuse. To pause a run, interrupt it with Ctrl-C, `SIGTERM`, or `SIGHUP` (closing its tmux session sends this). The workflow terminates its subprocess groups and waits for them to exit, then removes every artifact it had started in that invocation but not completed, such as an in-progress stage or label shard. It records each removal as an `interrupted_artifact_removed` event and prints it. Completed artifacts, including finished label shards, are kept, and paths it did not start are never touched, so rerunning the same command resumes. A failure that is not an interruption leaves its incomplete artifact for inspection: the workflow reports its exact path and stops. Inspect it, then manually move aside or remove only that path before retrying.
+Artifacts are create-only and authenticated before reuse. To pause a run, interrupt it with Ctrl-C, `SIGTERM`, or `SIGHUP` (closing its tmux session sends this). The workflow terminates its subprocess groups and waits for them to exit, then removes every artifact it had started in that invocation but not completed, such as an in-progress stage or label shard. It records each removal as an `interrupted_artifact_removed` event and prints it. Completed artifacts, including finished label shards, are kept, and paths it did not start are never touched, so rerunning the same command resumes. The position source is generated in chunks of 2,000 trajectories under `datasets/<name>/source-chunks/` and then assembled, so a pause during generation loses at most one chunk. Finished chunks are reused on resume, and must come from the same build commit as the rest, like label shards. The chunk size is not part of any fingerprint, because assembly is byte-identical for any chunk size. A failure that is not an interruption leaves its incomplete artifact for inspection: the workflow reports its exact path and stops. Inspect it, then manually move aside or remove only that path before retrying.
 
 ## Gate promotion
 

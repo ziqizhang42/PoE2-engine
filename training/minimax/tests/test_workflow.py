@@ -61,7 +61,10 @@ from poe2_training.workflow_adapters import (
     label_command,
     label_shard_path,
     resolve_eval_binary,
-    source_command,
+    source_assemble_command,
+    source_chunk_command,
+    source_chunk_path,
+    source_chunk_ranges,
 )
 from poe2_training.workflow_config import (
     ModelReference,
@@ -335,10 +338,13 @@ class WorkflowConfigTest(unittest.TestCase):
             data_binary(taught, dataset),
             taught.output_directory / f"build/teacher-{digest[:12]}/debug/runner/poe2_minimax_data")
         self.assertEqual(data_binary(plain, plain_dataset), data_binary(plain))
-        for command in (source_command(taught, dataset), label_command(taught, dataset, 0)):
+        for command in (source_chunk_command(taught, dataset, 0, 4),
+                        source_assemble_command(taught, dataset),
+                        label_command(taught, dataset, 0)):
             self.assertEqual(command[0], str(data_binary(taught, dataset)))
             self.assertEqual(command[command.index("--evaluator") + 1], "pattern-gain")
-        for command in (source_command(plain, plain_dataset),
+        for command in (source_chunk_command(plain, plain_dataset, 0, 4),
+                        source_assemble_command(plain, plain_dataset),
                         label_command(plain, plain_dataset, 0)):
             self.assertNotIn("--evaluator", command)
 
@@ -474,6 +480,54 @@ class WorkflowConfigTest(unittest.TestCase):
                                side_effect=build(b"fixture\0" + commit.encode())):
             with self.assertRaisesRegex(WorkflowError, "teacher model"):
                 other._ensure_data_binary("dataset:main:source", 1, dataset)
+
+    def test_source_chunks_have_a_fixed_size_and_a_short_last_chunk(self) -> None:
+        config = load_workflow_config(_write(self.root, _managed_config(
+            self.root, trajectories=4500)))
+        self.assertEqual(source_chunk_ranges(config.dataset("main")),
+                         [(0, 2000), (2000, 4000), (4000, 4500)])
+        small = load_workflow_config(_write(self.root, _managed_config(self.root), "small.toml"))
+        self.assertEqual(source_chunk_ranges(small.dataset("main")), [(0, 4)])
+
+    def test_source_resume_generates_only_missing_chunks_with_their_build(self) -> None:
+        config = load_workflow_config(_write(self.root, _managed_config(
+            self.root, trajectories=4500)))
+        dataset = config.dataset("main")
+        state = RunState(config)
+        state.accept_config()
+        finished = source_chunk_path(dataset, 2000, 4000)
+        finished.mkdir(parents=True)
+        (finished / "COMPLETE").write_text("fixture\n", encoding="utf-8")
+        (finished / "chunk.jsonl").write_text(json.dumps({
+            "type": "poe2-position-source-chunk", "git_commit": "4" * 40}) + "\n",
+            encoding="utf-8")
+        workflow = WorkflowRunner(config, state, "5" * 40)
+        operations: list[str] = []
+
+        def record(_stage: str, operation: str, *_arguments, **_options) -> None:
+            operations.append(operation)
+            if operation == "assemble":
+                raise KeyboardInterrupt
+
+        with mock.patch.object(workflow, "_ensure_data_binary") as binary, \
+                mock.patch.object(workflow, "_command", side_effect=record):
+            with self.assertRaises(KeyboardInterrupt):
+                workflow._prepare_source(dataset)
+        self.assertEqual(binary.call_args.kwargs["required_commit"], "4" * 40)
+        self.assertEqual(operations, [
+            "create-chunk-000000000", "create-chunk-000004000", "assemble"])
+        self.assertIn(source_chunk_path(dataset, 0, 2000), workflow._started_artifacts)
+        self.assertNotIn(finished, workflow._started_artifacts)
+
+        (finished.parent / "stray").mkdir()
+        with self.assertRaisesRegex(WorkflowError, "unexpected output"):
+            WorkflowRunner(config, state, "5" * 40)._prepare_source(dataset)
+        (finished.parent / "stray").rmdir()
+        unfinished = source_chunk_path(dataset, 0, 2000)
+        unfinished.mkdir()
+        (unfinished / "INCOMPLETE").write_text("fixture\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "source chunk path exists"):
+            WorkflowRunner(config, state, "5" * 40)._prepare_source(dataset)
 
     def test_partial_label_resume_reuses_binary_with_original_commit(self) -> None:
         config = load_workflow_config(_write(self.root, _managed_config(self.root)))
@@ -638,6 +692,17 @@ class WorkflowStateTest(unittest.TestCase):
         progress.stage_completed(stage, created=False)
         progress.close(success=True)
         self.assertIn("dataset main · source  authenticated ·", output.getvalue())
+
+    def test_paused_stage_is_labeled_paused_not_failed(self) -> None:
+        output = io.StringIO()
+        progress = WorkflowProgress(self.config, RunState(self.config), stream=output)
+        progress.stage_started("dataset:main:source", "create")
+        progress.stage_failed("dataset:main:source", KeyboardInterrupt())
+        progress.stage_started("dataset:main:labels", "create")
+        progress.stage_failed("dataset:main:labels", WorkflowError("broken"))
+        progress.close(success=False)
+        self.assertIn("dataset main · source  paused after", output.getvalue())
+        self.assertIn("dataset main · labels  failed after", output.getvalue())
 
     def test_human_status_has_progress_time_and_iteration_order(self) -> None:
         output = io.StringIO()

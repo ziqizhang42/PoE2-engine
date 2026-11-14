@@ -202,6 +202,10 @@ class WorkflowProgress:
     def stage_failed(self, stage: str, error: BaseException) -> None:
         with self._lock:
             elapsed = time.perf_counter() - self._stage_started.pop(stage, self._started)
+            if isinstance(error, KeyboardInterrupt):
+                self._write(f"{paint('■', 'yellow', stream=self.stream)} {pretty_stage(stage)}  "
+                            f"paused after {format_duration(elapsed)}")
+                return
             self._write(f"{paint('✗', 'red', stream=self.stream)} {pretty_stage(stage)}  "
                         f"failed after {format_duration(elapsed)}: {error}")
 

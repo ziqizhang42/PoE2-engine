@@ -151,3 +151,75 @@ execute_process(
 if(corrupt_audit_result EQUAL 0)
   message(FATAL_ERROR "position source auditor accepted a corrupted shard")
 endif()
+
+# The same source generated in chunks and assembled must be byte-identical to one pass.
+set(chunk_root "${OUTPUT_ROOT}/chunks")
+set(assembled_source "${OUTPUT_ROOT}/assembled-source")
+set(source_options
+    --corpus-id "position-source-integration-test"
+    --seed 20260817
+    --trajectories 8
+    --samples-per-trajectory 2
+    --shards 2
+    --workers 6
+    --search-nodes 50
+    --search-hash-mb 1
+    --random-weight 1
+    --greedy-weight 0
+    --opponent-weight 0
+    --search-weight 0
+    --progress-every 2)
+foreach(range IN ITEMS "0;3" "3;8")
+  list(GET range 0 chunk_begin)
+  list(GET range 1 chunk_end)
+  execute_process(
+    COMMAND "${MINIMAX_DATA}" source-chunk ${source_options}
+            --output-dir "${chunk_root}/chunk-${chunk_begin}"
+            --trajectory-begin ${chunk_begin} --trajectory-end ${chunk_end}
+    RESULT_VARIABLE chunk_result
+    OUTPUT_VARIABLE chunk_output
+    ERROR_VARIABLE chunk_error
+  )
+  if(NOT chunk_result EQUAL 0)
+    message(FATAL_ERROR "source chunk ${chunk_begin} failed\n${chunk_output}\n${chunk_error}")
+  endif()
+endforeach()
+execute_process(
+  COMMAND "${MINIMAX_DATA}" source-assemble ${source_options}
+          --chunks "${chunk_root}" --output-dir "${assembled_source}"
+  RESULT_VARIABLE assemble_result
+  OUTPUT_VARIABLE assemble_output
+  ERROR_VARIABLE assemble_error
+)
+if(NOT assemble_result EQUAL 0)
+  message(FATAL_ERROR "source assembly failed\n${assemble_output}\n${assemble_error}")
+endif()
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E compare_files
+          "${first_source}/manifest.json" "${assembled_source}/manifest.json"
+  RESULT_VARIABLE assembled_manifest_comparison
+)
+file(GLOB assembled_shards "${assembled_source}/shards/shard-*.jsonl")
+set(assembled_names "")
+foreach(path IN LISTS assembled_shards)
+  get_filename_component(name "${path}" NAME)
+  list(APPEND assembled_names "${name}")
+endforeach()
+set(first_names "")
+foreach(path IN LISTS first_shards)
+  get_filename_component(name "${path}" NAME)
+  list(APPEND first_names "${name}")
+endforeach()
+if(NOT assembled_manifest_comparison EQUAL 0 OR NOT assembled_names STREQUAL first_names)
+  message(FATAL_ERROR "chunked source assembly differs from one-pass generation")
+endif()
+execute_process(
+  COMMAND "${MINIMAX_DATA}" source-assemble ${source_options} --seed 7
+          --chunks "${chunk_root}" --output-dir "${OUTPUT_ROOT}/mismatched-source"
+  RESULT_VARIABLE mismatched_result
+  OUTPUT_QUIET
+  ERROR_QUIET
+)
+if(mismatched_result EQUAL 0)
+  message(FATAL_ERROR "source assembly accepted chunks with different settings")
+endif()

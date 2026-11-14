@@ -34,6 +34,7 @@ from .workflow_adapters import (
     CANDIDATE_SCHEMA,
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
+    SOURCE_CHUNK_TRAJECTORIES,
     aggregate_label_stats,
     authenticate_candidate,
     authenticate_evaluation,
@@ -59,7 +60,12 @@ from .workflow_adapters import (
     label_shard_path,
     parity_command,
     search_benchmark_command,
-    source_command,
+    source_assemble_command,
+    source_chunk_command,
+    source_chunk_commit,
+    source_chunk_path,
+    source_chunk_ranges,
+    source_chunks_directory,
     source_audit_command,
     training_command,
 )
@@ -498,8 +504,11 @@ def print_plan(config: WorkflowConfig) -> None:
         if isinstance(dataset, ImportedDatasetConfig):
             print(f"  authenticate: {dataset.feature_directory}")
             continue
-        print(f"  source: {dataset.source_directory}")
-        print(f"    {_format_command(source_command(config, dataset))}")
+        chunks = source_chunk_ranges(dataset)
+        print(f"  source: {dataset.source_directory} ({len(chunks)} chunks of up to "
+              f"{SOURCE_CHUNK_TRAJECTORIES} trajectories)")
+        print(f"    {_format_command(source_chunk_command(config, dataset, *chunks[0]))}")
+        print(f"    {_format_command(source_assemble_command(config, dataset))}")
         print(f"  labels: {dataset.labels_directory} "
               f"({dataset.source.shards} shards, concurrency "
               f"{resolved_label_concurrency(config, dataset)})")
@@ -563,6 +572,26 @@ def check_model_lineage(config: WorkflowConfig, model: ModelReference | None = N
                 f"{entry.name} produced {produced}")
 
 
+def _pending_source_chunks(dataset: ManagedDatasetConfig) -> list[tuple[int, int]]:
+    """Return chunk ranges still to generate; reject unfinished or unexpected chunk paths."""
+    expected = {source_chunk_path(dataset, *item): item for item in source_chunk_ranges(dataset)}
+    directory = source_chunks_directory(dataset)
+    if directory.exists():
+        unexpected = [item for item in directory.iterdir() if item not in expected]
+        if unexpected:
+            raise WorkflowError(
+                f"source chunks have unexpected output; move it aside explicitly: "
+                f"{unexpected[0]}")
+    pending: list[tuple[int, int]] = []
+    for path, item in expected.items():
+        state = _path_state(path)
+        if state in {"incomplete", "unexpected"}:
+            raise _blocked_path(path, "source chunk")
+        if state == "missing":
+            pending.append(item)
+    return pending
+
+
 def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
     """Read-only validation of config evolution and every artifact currently present."""
     state = RunState(config)
@@ -585,6 +614,8 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
         source_state = _path_state(dataset.source_directory)
         if source_state in {"incomplete", "unexpected"}:
             raise _blocked_path(dataset.source_directory, "position source")
+        if source_state == "missing":
+            _pending_source_chunks(dataset)
         if source_state == "complete":
             _direct_audit(
                 source_audit_command(sys.executable, config, dataset), config.repository)
@@ -810,8 +841,11 @@ class WorkflowRunner:
             self.progress.stage_completed(stage, created=creation > 0.0)
 
     def _fail(self, stage: str, error: BaseException, started: float) -> None:
+        message = str(error)
+        if isinstance(error, KeyboardInterrupt):
+            message = f"interrupted{': ' + message if message else ''}"
         self.state.append("stage_failed", stage=stage,
-                          wall_seconds=time.perf_counter() - started, error=str(error))
+                          wall_seconds=time.perf_counter() - started, error=message)
         self.state.write_summary(workflow_snapshot(self.config))
         if self.progress is not None:
             self.progress.stage_failed(stage, error)
@@ -882,8 +916,23 @@ class WorkflowRunner:
         stage = f"dataset:{dataset.name}:source"
 
         def create(attempt: int) -> None:
-            self._ensure_data_binary(stage, attempt, dataset)
-            self._command(stage, "create", source_command(self.config, dataset), attempt=attempt)
+            pending = _pending_source_chunks(dataset)
+            commits = {source_chunk_commit(source_chunk_path(dataset, *item))
+                       for item in source_chunk_ranges(dataset) if item not in pending}
+            if len(commits) > 1:
+                raise WorkflowError(
+                    "completed source chunks have inconsistent build commits: " +
+                    ", ".join(sorted(commits)))
+            # Like label shards, earlier chunks can only be assembled by the build that made them.
+            self._ensure_data_binary(
+                stage, attempt, dataset, required_commit=next(iter(commits), None))
+            for begin, end in pending:
+                self._start_artifact(source_chunk_path(dataset, begin, end))
+                self._command(stage, f"create-chunk-{begin:09d}",
+                              source_chunk_command(self.config, dataset, begin, end),
+                              attempt=attempt)
+            self._command(stage, "assemble", source_assemble_command(self.config, dataset),
+                          attempt=attempt)
 
         def authenticate(attempt: int) -> dict[str, Any]:
             self._command(

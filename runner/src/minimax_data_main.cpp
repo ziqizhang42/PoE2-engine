@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <exception>
@@ -49,6 +50,9 @@ struct SourceCommandOptions {
   position_source::PositionSourceOptions source;
   std::uint64_t progress_interval = 100;
   bool has_seed = false;
+  std::optional<std::uint64_t> trajectory_begin;
+  std::optional<std::uint64_t> trajectory_end;
+  fs::path chunk_directory;
 };
 
 struct FeatureCommandOptions {
@@ -69,6 +73,11 @@ void print_usage(std::ostream& output) {
          << "                            [--opponent-weight <n>] [--search-weight <n>]\n"
          << "                            [--progress-every <n>]\n"
          << "                            [--evaluator two-ply-closure|pattern-gain]\n"
+         << "\n"
+         << "  poe2_minimax_data source-chunk <source options> --output-dir <chunk-directory>\n"
+         << "                            --trajectory-begin <n> --trajectory-end <n>\n"
+         << "  poe2_minimax_data source-assemble <source options> --output-dir <directory>\n"
+         << "                            --chunks <directory-of-chunks>\n"
          << "\n"
          << "  poe2_minimax_data features --source <position-source-directory>\n"
          << "                              --labels <label-corpus-directory>\n"
@@ -291,6 +300,12 @@ template <typename Integer>
       options.progress_interval = require_positive_u64(value, argument);
     } else if (argument == "--evaluator") {
       options.source.evaluator = parse_data_evaluator(value);
+    } else if (argument == "--trajectory-begin") {
+      options.trajectory_begin = require_u64(value, argument);
+    } else if (argument == "--trajectory-end") {
+      options.trajectory_end = require_positive_u64(value, argument);
+    } else if (argument == "--chunks") {
+      options.chunk_directory = value;
     } else {
       throw std::invalid_argument{"unknown argument: " + std::string{argument}};
     }
@@ -421,7 +436,64 @@ int run_labels(const LabelCommandOptions& options) {
   return 0;
 }
 
+void require_source_mode(const SourceCommandOptions& options, bool chunk, bool assemble) {
+  if (options.trajectory_begin.has_value() != chunk ||
+      options.trajectory_end.has_value() != chunk) {
+    throw std::invalid_argument{
+        chunk ? "source-chunk requires --trajectory-begin and --trajectory-end"
+              : "--trajectory-begin and --trajectory-end need source-chunk"};
+  }
+  if (options.chunk_directory.empty() == assemble) {
+    throw std::invalid_argument{assemble ? "source-assemble requires --chunks"
+                                         : "--chunks needs source-assemble"};
+  }
+}
+
+int run_source_chunk(const SourceCommandOptions& options) {
+  require_source_mode(options, true, false);
+  const std::optional<std::uint64_t> begin = options.trajectory_begin;
+  const std::optional<std::uint64_t> end = options.trajectory_end;
+  if (!begin.has_value() || !end.has_value()) {
+    throw std::invalid_argument{"source-chunk requires --trajectory-begin and --trajectory-end"};
+  }
+  position_source::reserve_source_chunk_output(options.output_directory);
+  const position_source::PositionSourceChunk chunk =
+      position_source::generate_position_source_chunk(
+          options.source, *begin, *end,
+          [](const position_source::PositionSourceProgress& progress) {
+            std::cerr << "source_progress completed_trajectories="
+                      << progress.completed_trajectories
+                      << " total_trajectories=" << progress.total_trajectories << '\n';
+          },
+          options.progress_interval);
+  position_source::write_position_source_chunk(options.output_directory, chunk);
+  std::cout << "source_chunk trajectories=" << chunk.trajectory_begin << '-' << chunk.trajectory_end
+            << " records=" << chunk.records.size()
+            << " output_dir=" << options.output_directory.string() << '\n';
+  return 0;
+}
+
+int run_source_assemble(const SourceCommandOptions& options) {
+  require_source_mode(options, false, true);
+  std::vector<position_source::PositionSourceChunk> chunks;
+  for (const fs::directory_entry& entry : fs::directory_iterator(options.chunk_directory)) {
+    chunks.push_back(position_source::read_position_source_chunk(entry.path()));
+  }
+  std::ranges::sort(chunks, {}, &position_source::PositionSourceChunk::trajectory_begin);
+  const position_source::PositionSourceCorpus corpus =
+      position_source::assemble_position_source(options.source, chunks);
+  position_source::SourceOutput output =
+      position_source::reserve_source_output(options.output_directory);
+  position_source::write_position_source(output, corpus);
+  std::cout << "position_source trajectories=" << options.source.trajectory_count
+            << " records=" << corpus.records.size() << " shards=" << options.source.shard_count
+            << " duplicates=" << corpus.duplicate_positions << " chunks=" << chunks.size()
+            << " output_dir=" << output.directory().string() << '\n';
+  return 0;
+}
+
 int run_source(const SourceCommandOptions& options) {
+  require_source_mode(options, false, false);
   position_source::SourceOutput output =
       position_source::reserve_source_output(options.output_directory);
   const position_source::PositionSourceCorpus corpus = position_source::generate_position_source(
@@ -468,6 +540,12 @@ int run(int argc, char* argv[]) {
   }
   if (command == "source") {
     return run_source(parse_source_options(argc, argv));
+  }
+  if (command == "source-chunk") {
+    return run_source_chunk(parse_source_options(argc, argv));
+  }
+  if (command == "source-assemble") {
+    return run_source_assemble(parse_source_options(argc, argv));
   }
   if (command == "features") {
     return run_features(parse_feature_options(argc, argv));

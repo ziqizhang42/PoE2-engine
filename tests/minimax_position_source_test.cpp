@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -304,4 +305,63 @@ TEST_CASE("noisy-search sources can use the compiled pattern-gain model",
 
   options.evaluator = poe2::minimax::Evaluator::kStatic;
   REQUIRE_THROWS_AS(position_source::generate_position_source(options), std::invalid_argument);
+}
+
+TEST_CASE("chunked position sources assemble to the same bytes as one pass",
+          "[minimax][position-source][chunks]") {
+  namespace fs = std::filesystem;
+  position_source::PositionSourceOptions options = random_options(2);
+  options.trajectory_count = 11;
+  options.samples_per_trajectory = 3;
+  options.shard_count = 3;
+  options.search_nodes = 25;
+  options.policy_weights = {};
+  options.evaluator = poe2::minimax::Evaluator::kPatternGain;
+  const position_source::PositionSourceCorpus one_pass =
+      position_source::generate_position_source(options);
+  const auto one_pass_shards = position_source::serialize_source_shards(one_pass);
+  const std::string one_pass_manifest =
+      position_source::serialize_source_manifest(one_pass, one_pass_shards);
+
+  const fs::path root = unique_temporary_root("poe2-source-chunks");
+  std::vector<position_source::PositionSourceChunk> chunks;
+  std::uint64_t begin = 0;
+  std::size_t workers = 1;
+  for (const std::uint64_t size : {UINT64_C(4), UINT64_C(1), UINT64_C(6)}) {
+    position_source::PositionSourceOptions chunk_options = options;
+    chunk_options.workers = workers++;
+    const fs::path directory = root / ("chunk-" + std::to_string(begin));
+    position_source::reserve_source_chunk_output(directory);
+    REQUIRE_THROWS_AS(position_source::reserve_source_chunk_output(directory),
+                      std::invalid_argument);
+    position_source::write_position_source_chunk(
+        directory,
+        position_source::generate_position_source_chunk(chunk_options, begin, begin + size));
+    chunks.push_back(position_source::read_position_source_chunk(directory));
+    begin += size;
+  }
+  const position_source::PositionSourceCorpus assembled =
+      position_source::assemble_position_source(options, chunks);
+  REQUIRE(assembled.records == one_pass.records);
+  REQUIRE(assembled.duplicate_positions == one_pass.duplicate_positions);
+  const auto assembled_shards = position_source::serialize_source_shards(assembled);
+  REQUIRE(assembled_shards.size() == one_pass_shards.size());
+  for (std::size_t index = 0; index < one_pass_shards.size(); ++index) {
+    REQUIRE(assembled_shards[index].bytes == one_pass_shards[index].bytes);
+  }
+  REQUIRE(position_source::serialize_source_manifest(assembled, assembled_shards) ==
+          one_pass_manifest);
+
+  const std::vector<position_source::PositionSourceChunk> gap{chunks[0], chunks[2]};
+  REQUIRE_THROWS_AS(position_source::assemble_position_source(options, gap), std::invalid_argument);
+  position_source::PositionSourceOptions other = options;
+  other.seed += 1;
+  REQUIRE_THROWS_AS(position_source::assemble_position_source(other, chunks),
+                    std::invalid_argument);
+
+  const fs::path tampered = root / "chunk-4" / std::string{position_source::kSourceChunkFileName};
+  std::ofstream{tampered, std::ios::app} << "\n";
+  REQUIRE_THROWS_AS(position_source::read_position_source_chunk(root / "chunk-4"),
+                    std::runtime_error);
+  fs::remove_all(root);
 }

@@ -147,11 +147,61 @@ def resolve_eval_binary(config: WorkflowConfig, value: str, engine: str) -> Path
         f"could not resolve engine {engine!r} from evaluator input {value!r}")
 
 
-def source_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> list[str]:
+# Position sources are generated in chunks of this many trajectories so a pause loses at most one
+# chunk. Assembly is byte-identical for any chunk size, so this is not part of any fingerprint.
+SOURCE_CHUNK_TRAJECTORIES = 2000
+
+
+def source_chunk_ranges(dataset: ManagedDatasetConfig) -> list[tuple[int, int]]:
+    total = dataset.source.trajectories
+    return [(begin, min(begin + SOURCE_CHUNK_TRAJECTORIES, total))
+            for begin in range(0, total, SOURCE_CHUNK_TRAJECTORIES)]
+
+
+def source_chunks_directory(dataset: ManagedDatasetConfig) -> Path:
+    return dataset.root / "source-chunks"
+
+
+def source_chunk_path(dataset: ManagedDatasetConfig, begin: int, end: int) -> Path:
+    return source_chunks_directory(dataset) / f"chunk-{begin:09d}-{end:09d}"
+
+
+def source_chunk_commit(path: Path) -> str:
+    """Return the build commit recorded by one completed source chunk."""
+    try:
+        with (path / "chunk.jsonl").open(encoding="utf-8") as source:
+            header = json.loads(source.readline())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError(f"could not read source chunk {path}: {error}") from error
+    commit = header.get("git_commit") if isinstance(header, dict) else None
+    _require(header.get("type") == "poe2-position-source-chunk" and isinstance(commit, str) and
+             re.fullmatch(r"[0-9a-f]{40}", commit) is not None,
+             f"source chunk has invalid build provenance: {path}")
+    return commit
+
+
+def source_chunk_command(config: WorkflowConfig, dataset: ManagedDatasetConfig,
+                         begin: int, end: int) -> list[str]:
+    return [
+        str(data_binary(config, dataset)), "source-chunk",
+        "--output-dir", str(source_chunk_path(dataset, begin, end)),
+        "--trajectory-begin", str(begin), "--trajectory-end", str(end),
+        *_source_arguments(dataset),
+    ]
+
+
+def source_assemble_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> list[str]:
+    return [
+        str(data_binary(config, dataset)), "source-assemble",
+        "--output-dir", str(dataset.source_directory),
+        "--chunks", str(source_chunks_directory(dataset)),
+        *_source_arguments(dataset),
+    ]
+
+
+def _source_arguments(dataset: ManagedDatasetConfig) -> list[str]:
     source = dataset.source
     return [
-        str(data_binary(config, dataset)), "source",
-        "--output-dir", str(dataset.source_directory),
         "--corpus-id", source.corpus_id, "--seed", str(source.seed),
         "--trajectories", str(source.trajectories),
         "--samples-per-trajectory", str(source.samples_per_trajectory),
@@ -845,7 +895,7 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
 
 STAGE_ADAPTERS: dict[str, StageAdapter] = {
     "source": StageAdapter(
-        "source", "position source", True, (source_command,),
+        "source", "position source", True, (source_chunk_command, source_assemble_command),
         (source_audit_command,), authenticate_source),
     "labels": StageAdapter(
         "labels", "label corpus", True, (label_command,),

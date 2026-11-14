@@ -31,6 +31,19 @@ python3 tools/inspect_position_source.py artifacts/sources/example-corpus
 
 The example values describe the planned policy mixture, not a requirement to launch that run. `--seed` is mandatory and may be zero. A trajectory owns an independent SplitMix64 stream with a specified rejection-based bounded sampler. Work scheduling therefore cannot affect its moves. Shards made with one worker and six workers contain identical bytes; the manifest records the requested worker count and therefore intentionally differs when that setting differs.
 
+## Chunked generation
+
+A long source can be generated in resumable pieces. `source-chunk` takes the same options plus a trajectory range and writes one create-only chunk directory: `chunk.jsonl` holds the trajectories' records before splits and source IDs exist, and `COMPLETE` records its SHA-256. `source-assemble` reads every chunk in `--chunks`, then performs the corpus-wide steps (D4 duplicate grouping, split assignment, and source IDs) and writes the usual source artifact.
+
+```bash
+build/release/runner/poe2_minimax_data source-chunk <source options> \
+  --output-dir artifacts/chunks/chunk-0 --trajectory-begin 0 --trajectory-end 2000
+build/release/runner/poe2_minimax_data source-assemble <source options> \
+  --chunks artifacts/chunks --output-dir artifacts/sources/example-corpus
+```
+
+Because every trajectory depends only on the seed and its index, an assembled source is byte-identical to one `source` run with the same options, for any chunk boundaries and worker counts. Assembly refuses chunks that leave gaps or overlap, whose generation settings differ, whose digest fails, or that a different build commit, dirty state, or compiled model produced.
+
 ## What is sampled
 
 One policy is selected for each trajectory:

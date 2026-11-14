@@ -555,6 +555,26 @@ void append_hex64(std::ostream& output, std::uint64_t value) {
   return output.str();
 }
 
+void append_record_line(std::ostream& output, const PositionSourceRecord& record) {
+  output << "{\"p1\":\"";
+  append_hex64(output, record.player_one);
+  output << "\",\"p2\":\"";
+  append_hex64(output, record.player_two);
+  output << "\",\"source_id\":\"";
+  append_hex64(output, record.source_id);
+  output << "\",\"family_id\":\"";
+  append_hex64(output, record.family_id);
+  output << "\",\"trajectory_id\":\"";
+  append_hex64(output, record.trajectory_id);
+  output << "\",\"parent_id\":\"";
+  append_hex64(output, record.parent_id);
+  output << "\",\"trajectory_index\":" << record.trajectory_index
+         << ",\"policy_id\":" << static_cast<std::uint16_t>(record.policy)
+         << ",\"sample_index\":" << record.sample_index
+         << ",\"split\":" << static_cast<unsigned>(record.split)
+         << ",\"ply\":" << static_cast<unsigned>(record.ply) << "}\n";
+}
+
 class LineParser final {
  public:
   explicit LineParser(std::string_view line) : remaining_(line) {}
@@ -575,6 +595,17 @@ class LineParser final {
     const std::string_view value = remaining_.substr(0, end);
     remaining_.remove_prefix(end + 1);
     return value;
+  }
+
+  [[nodiscard]] bool boolean() {
+    for (const bool value : {true, false}) {
+      const std::string_view text = value ? "true" : "false";
+      if (remaining_.starts_with(text)) {
+        remaining_.remove_prefix(text.size());
+        return value;
+      }
+    }
+    throw std::runtime_error{"position source boolean is invalid"};
   }
 
   template <typename Integer>
@@ -828,33 +859,17 @@ struct ParsedHeader {
   return digest;
 }
 
-}  // namespace
-
-SourceOutput::SourceOutput(fs::path directory) : directory_(std::move(directory)) {}
-
-const fs::path& SourceOutput::directory() const noexcept { return directory_; }
-
-bool SourceOutput::committed() const noexcept { return committed_; }
-
-std::string_view source_policy_name(SourcePolicy policy) noexcept {
-  switch (policy) {
-    case SourcePolicy::kRandom:
-      return "random";
-    case SourcePolicy::kImmediateGain:
-      return "immediate-gain";
-    case SourcePolicy::kOpponentAware:
-      return "opponent-aware";
-    case SourcePolicy::kNoisySearch:
-      return "noisy-search";
-  }
-  return "unknown";
-}
-
-PositionSourceCorpus generate_position_source(const PositionSourceOptions& options,
-                                              const PositionSourceProgressSink& progress,
-                                              std::uint64_t progress_interval) {
+// Each trajectory depends only on the seed and its index, so any partition of the range produces
+// the same records as one pass.
+[[nodiscard]] std::vector<std::vector<PositionSourceRecord>> generate_trajectory_range(
+    const PositionSourceOptions& options, std::uint64_t begin, std::uint64_t end,
+    const PositionSourceProgressSink& progress, std::uint64_t progress_interval) {
   validate_options(options, static_cast<bool>(progress), progress_interval);
-  const std::size_t trajectory_count = static_cast<std::size_t>(options.trajectory_count);
+  if (begin >= end || end > options.trajectory_count) {
+    throw std::invalid_argument{"position source trajectory range is empty or out of range"};
+  }
+  const std::uint64_t range_count = end - begin;
+  const std::size_t trajectory_count = static_cast<std::size_t>(range_count);
   const std::size_t workers_used = std::min(options.workers, trajectory_count);
   std::vector<std::vector<PositionSourceRecord>> trajectories(trajectory_count);
   std::atomic<std::size_t> next_trajectory = 0;
@@ -871,7 +886,7 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
     }
     const std::scoped_lock lock{progress_mutex};
     ++completed;
-    if (completed < next_progress && completed != options.trajectory_count) {
+    if (completed < next_progress && completed != range_count) {
       return;
     }
     if (completed >= next_progress) {
@@ -881,7 +896,7 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
     }
     progress(PositionSourceProgress{
         .completed_trajectories = completed,
-        .total_trajectories = options.trajectory_count,
+        .total_trajectories = range_count,
     });
   };
 
@@ -900,8 +915,8 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
         if (trajectory >= trajectory_count) {
           break;
         }
-        trajectories[trajectory] =
-            generate_trajectory(trajectory, options, search.has_value() ? &*search : nullptr);
+        trajectories[trajectory] = generate_trajectory(begin + trajectory, options,
+                                                       search.has_value() ? &*search : nullptr);
         record_progress();
       }
     } catch (...) {
@@ -932,6 +947,14 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
     std::rethrow_exception(failure);
   }
 
+  return trajectories;
+}
+
+[[nodiscard]] PositionSourceCorpus assemble_trajectories(
+    const PositionSourceOptions& options,
+    std::vector<std::vector<PositionSourceRecord>> trajectories) {
+  const std::size_t trajectory_count = trajectories.size();
+  const std::size_t workers_used = std::min(options.workers, trajectory_count);
   DisjointSet components{trajectory_count};
   std::unordered_map<PositionWords, std::size_t, PositionWordsHash> first_trajectory;
   std::size_t duplicate_positions = 0;
@@ -973,6 +996,153 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
   return corpus;
 }
 
+constexpr std::string_view kChunkType = "poe2-position-source-chunk";
+constexpr std::uint32_t kChunkSchemaVersion = 1;
+
+[[nodiscard]] bool same_generation(const PositionSourceOptions& left,
+                                   const PositionSourceOptions& right) noexcept {
+  // Worker count never changes the records, so chunks generated with any worker count combine.
+  return left.corpus_id == right.corpus_id && left.seed == right.seed &&
+         left.trajectory_count == right.trajectory_count &&
+         left.samples_per_trajectory == right.samples_per_trajectory &&
+         left.shard_count == right.shard_count && left.search_nodes == right.search_nodes &&
+         left.search_hash_bytes == right.search_hash_bytes &&
+         left.noise_percent == right.noise_percent && left.policy_weights == right.policy_weights &&
+         left.evaluator == right.evaluator;
+}
+
+[[nodiscard]] std::string chunk_header_line(const PositionSourceChunk& chunk) {
+  const PositionSourceOptions& options = chunk.options;
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "{\"type\":\"" << kChunkType << "\",\"schema\":" << kChunkSchemaVersion
+         << ",\"generator\":" << kGeneratorVersion << ",\"rng\":\"" << kRngName
+         << "\",\"corpus_id_hex\":\"" << hex_bytes(options.corpus_id) << "\",\"seed\":\"";
+  append_hex64(output, options.seed);
+  output << "\",\"trajectory_count\":" << options.trajectory_count
+         << ",\"samples_per_trajectory\":" << options.samples_per_trajectory
+         << ",\"shard_count\":" << options.shard_count
+         << ",\"trajectory_begin\":" << chunk.trajectory_begin
+         << ",\"trajectory_end\":" << chunk.trajectory_end
+         << ",\"search_nodes\":" << options.search_nodes
+         << ",\"search_hash_bytes\":" << options.search_hash_bytes
+         << ",\"noise_percent\":" << static_cast<unsigned>(options.noise_percent)
+         << ",\"policy_weights\":[" << options.policy_weights.random << ','
+         << options.policy_weights.immediate_gain << ',' << options.policy_weights.opponent_aware
+         << ',' << options.policy_weights.noisy_search << "],\"evaluator\":\""
+         << evaluator_name(options.evaluator) << "\",\"model_header_sha256\":\""
+         << labeling::compiled_model_header_sha256() << "\",\"git_commit\":\""
+         << labeling::build::kGitCommit
+         << "\",\"git_dirty\":" << (labeling::build::kGitDirty ? "true" : "false") << "}\n";
+  return output.str();
+}
+
+[[nodiscard]] PositionSourceChunk parse_chunk_header(std::string_view line) {
+  LineParser parser{line};
+  parser.literal("{\"type\":\"");
+  parser.literal(kChunkType);
+  parser.literal("\",\"schema\":");
+  const std::uint32_t schema = parser.decimal<std::uint32_t>();
+  parser.literal(",\"generator\":");
+  const std::uint32_t generator = parser.decimal<std::uint32_t>();
+  parser.literal(",\"rng\":\"");
+  parser.literal(kRngName);
+  parser.literal("\",\"corpus_id_hex\":");
+  PositionSourceChunk chunk;
+  chunk.options.corpus_id = decode_hex_bytes(parser.quoted());
+  parser.literal(",\"seed\":");
+  chunk.options.seed = parser.hex64();
+  parser.literal(",\"trajectory_count\":");
+  chunk.options.trajectory_count = parser.decimal<std::uint64_t>();
+  parser.literal(",\"samples_per_trajectory\":");
+  chunk.options.samples_per_trajectory = parser.decimal<std::uint16_t>();
+  parser.literal(",\"shard_count\":");
+  chunk.options.shard_count = parser.decimal<std::uint32_t>();
+  parser.literal(",\"trajectory_begin\":");
+  chunk.trajectory_begin = parser.decimal<std::uint64_t>();
+  parser.literal(",\"trajectory_end\":");
+  chunk.trajectory_end = parser.decimal<std::uint64_t>();
+  parser.literal(",\"search_nodes\":");
+  chunk.options.search_nodes = parser.decimal<std::uint64_t>();
+  parser.literal(",\"search_hash_bytes\":");
+  const std::uint64_t search_hash_bytes = parser.decimal<std::uint64_t>();
+  if (search_hash_bytes > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error{"source chunk search hash allocation is not representable"};
+  }
+  chunk.options.search_hash_bytes = static_cast<std::size_t>(search_hash_bytes);
+  parser.literal(",\"noise_percent\":");
+  chunk.options.noise_percent = parser.decimal<std::uint8_t>();
+  parser.literal(",\"policy_weights\":[");
+  chunk.options.policy_weights.random = parser.decimal<std::uint32_t>();
+  parser.literal(",");
+  chunk.options.policy_weights.immediate_gain = parser.decimal<std::uint32_t>();
+  parser.literal(",");
+  chunk.options.policy_weights.opponent_aware = parser.decimal<std::uint32_t>();
+  parser.literal(",");
+  chunk.options.policy_weights.noisy_search = parser.decimal<std::uint32_t>();
+  parser.literal("],\"evaluator\":");
+  const std::string_view evaluator = parser.quoted();
+  parser.literal(",\"model_header_sha256\":");
+  const std::string_view model = parser.quoted();
+  parser.literal(",\"git_commit\":");
+  const std::string_view commit = parser.quoted();
+  parser.literal(",\"git_dirty\":");
+  const bool dirty = parser.boolean();
+  parser.literal("}");
+  parser.finish();
+
+  if (schema != kChunkSchemaVersion || generator != kGeneratorVersion) {
+    throw std::runtime_error{"source chunk schema or generator version is unsupported"};
+  }
+  if (evaluator == evaluator_name(Evaluator::kTwoPlyClosure)) {
+    chunk.options.evaluator = Evaluator::kTwoPlyClosure;
+  } else if (evaluator == evaluator_name(Evaluator::kPatternGain)) {
+    chunk.options.evaluator = Evaluator::kPatternGain;
+  } else {
+    throw std::runtime_error{"source chunk evaluator is unsupported"};
+  }
+  // Chunks combine only within one build, so their records cannot mix generator code or models.
+  if (commit != labeling::build::kGitCommit || dirty != labeling::build::kGitDirty ||
+      model != labeling::compiled_model_header_sha256()) {
+    throw std::runtime_error{"source chunk was generated by a different build or model"};
+  }
+  return chunk;
+}
+
+[[nodiscard]] std::string chunk_complete_marker(const labeling::Sha256Digest& digest) {
+  return std::string{kChunkType} + "\nsha256=" + labeling::sha256_text(digest) + "\n";
+}
+
+}  // namespace
+
+SourceOutput::SourceOutput(fs::path directory) : directory_(std::move(directory)) {}
+
+const fs::path& SourceOutput::directory() const noexcept { return directory_; }
+
+bool SourceOutput::committed() const noexcept { return committed_; }
+
+PositionSourceCorpus generate_position_source(const PositionSourceOptions& options,
+                                              const PositionSourceProgressSink& progress,
+                                              std::uint64_t progress_interval) {
+  return assemble_trajectories(
+      options,
+      generate_trajectory_range(options, 0, options.trajectory_count, progress, progress_interval));
+}
+
+std::string_view source_policy_name(SourcePolicy policy) noexcept {
+  switch (policy) {
+    case SourcePolicy::kRandom:
+      return "random";
+    case SourcePolicy::kImmediateGain:
+      return "immediate-gain";
+    case SourcePolicy::kOpponentAware:
+      return "opponent-aware";
+    case SourcePolicy::kNoisySearch:
+      return "noisy-search";
+  }
+  return "unknown";
+}
+
 std::vector<SerializedSourceShard> serialize_source_shards(const PositionSourceCorpus& corpus) {
   validate_options(corpus.options, false, 0);
   const std::size_t expected_records = static_cast<std::size_t>(corpus.options.trajectory_count) *
@@ -1012,23 +1182,7 @@ std::vector<SerializedSourceShard> serialize_source_shards(const PositionSourceC
       if (record.trajectory_index < begin) {
         throw std::invalid_argument{"position source records are not in trajectory order"};
       }
-      output << "{\"p1\":\"";
-      append_hex64(output, record.player_one);
-      output << "\",\"p2\":\"";
-      append_hex64(output, record.player_two);
-      output << "\",\"source_id\":\"";
-      append_hex64(output, record.source_id);
-      output << "\",\"family_id\":\"";
-      append_hex64(output, record.family_id);
-      output << "\",\"trajectory_id\":\"";
-      append_hex64(output, record.trajectory_id);
-      output << "\",\"parent_id\":\"";
-      append_hex64(output, record.parent_id);
-      output << "\",\"trajectory_index\":" << record.trajectory_index
-             << ",\"policy_id\":" << static_cast<std::uint16_t>(record.policy)
-             << ",\"sample_index\":" << record.sample_index
-             << ",\"split\":" << static_cast<unsigned>(record.split)
-             << ",\"ply\":" << static_cast<unsigned>(record.ply) << "}\n";
+      append_record_line(output, record);
       ++next_record;
     }
     SerializedSourceShard shard{
@@ -1371,6 +1525,150 @@ ReadSourceShard read_position_source_shard(const fs::path& directory, std::uint3
     throw std::runtime_error{"position source shard is missing declared trajectory samples"};
   }
   return result;
+}
+
+PositionSourceChunk generate_position_source_chunk(const PositionSourceOptions& options,
+                                                   std::uint64_t trajectory_begin,
+                                                   std::uint64_t trajectory_end,
+                                                   const PositionSourceProgressSink& progress,
+                                                   std::uint64_t progress_interval) {
+  PositionSourceChunk chunk{
+      .options = options,
+      .trajectory_begin = trajectory_begin,
+      .trajectory_end = trajectory_end,
+  };
+  for (std::vector<PositionSourceRecord>& trajectory : generate_trajectory_range(
+           options, trajectory_begin, trajectory_end, progress, progress_interval)) {
+    chunk.records.insert(chunk.records.end(), trajectory.begin(), trajectory.end());
+  }
+  return chunk;
+}
+
+std::string serialize_source_chunk(const PositionSourceChunk& chunk) {
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << chunk_header_line(chunk);
+  for (const PositionSourceRecord& record : chunk.records) {
+    append_record_line(output, record);
+  }
+  return output.str();
+}
+
+void reserve_source_chunk_output(const fs::path& directory) {
+  if (directory.empty()) {
+    throw std::invalid_argument{"source chunk output directory must not be empty"};
+  }
+  create_parent_directories(directory);
+  std::error_code error;
+  if (!fs::create_directory(directory, error)) {
+    if (error) {
+      throw fs::filesystem_error{"failed to reserve source chunk output", directory, error};
+    }
+    throw std::invalid_argument{"source chunk output directory already exists"};
+  }
+  write_text_file(directory / kSourceIncompleteMarkerName, std::string{kChunkType} + "\n");
+}
+
+void write_position_source_chunk(const fs::path& directory, const PositionSourceChunk& chunk) {
+  const fs::path incomplete = directory / kSourceIncompleteMarkerName;
+  const fs::path complete = directory / kSourceCompleteMarkerName;
+  const fs::path file = directory / kSourceChunkFileName;
+  const fs::path temporary = file.string() + ".tmp";
+  if (!fs::is_regular_file(incomplete) || fs::exists(complete) || fs::exists(file) ||
+      fs::exists(temporary)) {
+    throw std::runtime_error{"source chunk reservation is not empty and incomplete"};
+  }
+  const std::string bytes = serialize_source_chunk(chunk);
+  write_text_file(temporary, bytes);
+  fs::rename(temporary, file);
+  write_text_file(incomplete, chunk_complete_marker(labeling::sha256(bytes)));
+  fs::rename(incomplete, complete);
+}
+
+PositionSourceChunk read_position_source_chunk(const fs::path& directory) {
+  const fs::path complete = directory / kSourceCompleteMarkerName;
+  const fs::path file = directory / kSourceChunkFileName;
+  if (!fs::is_directory(directory) || !fs::is_regular_file(complete) ||
+      fs::exists(directory / kSourceIncompleteMarkerName) || !fs::is_regular_file(file)) {
+    throw std::runtime_error{"source chunk is not a completed artifact: " + directory.string()};
+  }
+  const std::string bytes = read_text_file(file);
+  if (read_text_file(complete) != chunk_complete_marker(labeling::sha256(bytes))) {
+    throw std::runtime_error{"source chunk digest verification failed: " + directory.string()};
+  }
+
+  std::istringstream lines{bytes};
+  lines.imbue(std::locale::classic());
+  std::string line;
+  if (!std::getline(lines, line)) {
+    throw std::runtime_error{"source chunk is empty"};
+  }
+  PositionSourceChunk chunk = parse_chunk_header(line);
+  const PositionSourceOptions& options = chunk.options;
+  if (chunk.trajectory_begin >= chunk.trajectory_end ||
+      chunk.trajectory_end > options.trajectory_count || options.samples_per_trajectory == 0 ||
+      options.samples_per_trajectory > kPhaseBuckets.size() || options.noise_percent > 100 ||
+      policy_weight_sum(options.policy_weights) == 0 ||
+      (options.policy_weights.noisy_search != 0 && options.search_nodes == 0)) {
+    throw std::runtime_error{"source chunk header is inconsistent"};
+  }
+
+  std::uint64_t trajectory = chunk.trajectory_begin;
+  std::uint16_t sample = 0;
+  int previous_ply = 0;
+  while (std::getline(lines, line)) {
+    const PositionSourceRecord record = parse_record(line);
+    static_cast<void>(reconstruct_position(record));
+    const std::uint64_t family_id =
+        nonzero_id(mix64(options.seed ^ mix64(trajectory ^ kFamilySalt)));
+    const std::uint64_t trajectory_id =
+        nonzero_id(mix64(options.seed ^ mix64(trajectory ^ kTrajectorySalt)));
+    if (trajectory >= chunk.trajectory_end || record.trajectory_index != trajectory ||
+        record.sample_index != sample || record.ply <= previous_ply ||
+        record.family_id != family_id || record.trajectory_id != trajectory_id ||
+        record.source_id != 0 || record.parent_id != 0 || !valid_policy(record.policy) ||
+        record.split != labeling::DatasetSplit::kUnspecified) {
+      throw std::runtime_error{"source chunk records are out of order or inconsistent"};
+    }
+    chunk.records.push_back(record);
+    previous_ply = record.ply;
+    if (++sample == options.samples_per_trajectory) {
+      ++trajectory;
+      sample = 0;
+      previous_ply = 0;
+    }
+  }
+  if (trajectory != chunk.trajectory_end || sample != 0) {
+    throw std::runtime_error{"source chunk is missing trajectory records"};
+  }
+  return chunk;
+}
+
+PositionSourceCorpus assemble_position_source(const PositionSourceOptions& options,
+                                              std::span<const PositionSourceChunk> chunks) {
+  validate_options(options, false, 0);
+  std::vector<std::vector<PositionSourceRecord>> trajectories;
+  trajectories.reserve(static_cast<std::size_t>(options.trajectory_count));
+  std::uint64_t next = 0;
+  for (const PositionSourceChunk& chunk : chunks) {
+    if (!same_generation(chunk.options, options)) {
+      throw std::invalid_argument{"source chunk settings differ from the requested source"};
+    }
+    if (chunk.trajectory_begin != next || chunk.trajectory_end <= chunk.trajectory_begin) {
+      throw std::invalid_argument{"source chunks must cover trajectories in order without gaps"};
+    }
+    for (const PositionSourceRecord& record : chunk.records) {
+      if (record.sample_index == 0) {
+        trajectories.emplace_back();
+      }
+      trajectories.back().push_back(record);
+    }
+    next = chunk.trajectory_end;
+  }
+  if (next != options.trajectory_count || trajectories.size() != options.trajectory_count) {
+    throw std::invalid_argument{"source chunks do not cover every trajectory"};
+  }
+  return assemble_trajectories(options, std::move(trajectories));
 }
 
 }  // namespace poe2::minimax::position_source

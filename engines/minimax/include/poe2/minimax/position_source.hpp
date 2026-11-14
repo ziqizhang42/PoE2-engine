@@ -20,6 +20,7 @@ inline constexpr std::string_view kSourceManifestFileName = "manifest.json";
 inline constexpr std::string_view kSourceIncompleteMarkerName = "INCOMPLETE";
 inline constexpr std::string_view kSourceCompleteMarkerName = "COMPLETE";
 inline constexpr std::string_view kSourceShardDirectoryName = "shards";
+inline constexpr std::string_view kSourceChunkFileName = "chunk.jsonl";
 
 enum class SourcePolicy : std::uint8_t {
   kRandom = 1,
@@ -72,6 +73,15 @@ struct PositionSourceCorpus {
   PositionSourceOptions options;
   std::size_t workers_used = 0;
   std::size_t duplicate_positions = 0;
+  std::vector<PositionSourceRecord> records;
+};
+
+// Generated trajectories for one contiguous range, before corpus-wide duplicate grouping assigns
+// splits and source IDs. Records are in trajectory order with unspecified splits.
+struct PositionSourceChunk {
+  PositionSourceOptions options;
+  std::uint64_t trajectory_begin = 0;
+  std::uint64_t trajectory_end = 0;
   std::vector<PositionSourceRecord> records;
 };
 
@@ -128,6 +138,22 @@ class SourceOutput final {
 void write_position_source(SourceOutput& output, const PositionSourceCorpus& corpus);
 [[nodiscard]] ReadSourceShard read_position_source_shard(const std::filesystem::path& directory,
                                                          std::uint32_t shard_index);
+
+[[nodiscard]] PositionSourceChunk generate_position_source_chunk(
+    const PositionSourceOptions& options, std::uint64_t trajectory_begin,
+    std::uint64_t trajectory_end, const PositionSourceProgressSink& progress = {},
+    std::uint64_t progress_interval = 0);
+[[nodiscard]] std::string serialize_source_chunk(const PositionSourceChunk& chunk);
+// Reserves a create-only chunk directory marked INCOMPLETE; writing it marks it COMPLETE.
+void reserve_source_chunk_output(const std::filesystem::path& directory);
+void write_position_source_chunk(const std::filesystem::path& directory,
+                                 const PositionSourceChunk& chunk);
+// Reads a COMPLETE chunk written by this same build, verifying its digest and records.
+[[nodiscard]] PositionSourceChunk read_position_source_chunk(
+    const std::filesystem::path& directory);
+// Joins chunks covering every trajectory exactly once; equals generate_position_source.
+[[nodiscard]] PositionSourceCorpus assemble_position_source(
+    const PositionSourceOptions& options, std::span<const PositionSourceChunk> chunks);
 
 }  // namespace poe2::minimax::position_source
 
