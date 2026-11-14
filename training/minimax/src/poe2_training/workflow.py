@@ -87,8 +87,8 @@ from .workflow_ui import (
 MODEL_ARCHIVE_SCHEMA = "poe2-archived-model"
 MODEL_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "index.csv"
 MODEL_INDEX_HEADER = (
-    "recorded_utc", "run", "iteration", "model", "base", "decision", "games", "score_pct",
-    "sealed_mae", "gate_run_id",
+    "recorded_utc", "run", "iteration", "model", "base", "base_model", "decision", "games",
+    "score_pct", "sealed_mae", "gate_run_id",
 )
 
 
@@ -518,8 +518,10 @@ def print_plan(config: WorkflowConfig) -> None:
                   f"promotable={str(iteration.candidate_validation.promotable).lower()}")
         if iteration.engine_gate is not None:
             gate = iteration.engine_gate
+            names = {model.model_id: model.name for model in config.models}
             base = (gate.base if gate.base_model is None else
-                    f"{gate.base_model} (built privately)")
+                    f"{config.name}/{names[gate.base_model]} "
+                    f"({gate.base_model}, built privately)")
             print(f"  engine gate: {iteration.gate_directory} base={base}")
 
 
@@ -1524,12 +1526,16 @@ def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
     sealed = candidate["model"]["quantized"].get("sealed_test")
     sealed_mae = f"{sealed['mae']:.3f}" if isinstance(sealed, dict) else ""
     model_digest = candidate["artifacts"]["model_header"]["sha256"]
-    base = saved["base_id"]
-    if base.startswith("candidate-sha256-"):
-        base = base.removeprefix("candidate-sha256-")[:12]
+    gate_settings = iteration.engine_gate
+    assert gate_settings is not None
+    base, base_model = saved["base_id"], ""
+    if gate_settings.base_model is not None:
+        # People read the run-scoped generation name; the digest keeps the row exact.
+        model = _model_by_id(config, gate_settings.base_model, "engine-gate base model")
+        base, base_model = f"{config.name}/{model.name}", model.sha256[:12]
     return [
         saved["created_at_utc"], config.name, iteration.name, model_digest[:12],
-        base, gate["sequential_decision"], str(games), f"{score:.1f}",
+        base, base_model, gate["sequential_decision"], str(games), f"{score:.1f}",
         sealed_mae, gate["run_id"],
     ]
 

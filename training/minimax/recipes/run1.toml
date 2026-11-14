@@ -60,7 +60,7 @@ search_positions = 32
 search_movetime_ms = 100
 
 [iterations.engine_gate]
-base = "000074-aa1f911c27b6"
+base_model = "g000"
 opening_book = "eval/openings/holdout.txt"
 games = 2000
 workers = 6

@@ -252,7 +252,8 @@ The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so eve
 | `recorded_utc` | When the gate started, from its manifest |
 | `run`, `iteration` | The recipe run and iteration that produced the model |
 | `model` | The first 12 hex digits of the model header digest; the archive files and the ledger's `new_id` carry the full digest |
-| `base` | The build the candidate played against, or the first 12 hex digits of a base model's digest |
+| `base` | The build the candidate played against, or a base model's run-scoped name such as `run1/g000` |
+| `base_model` | The first 12 hex digits of a base model's digest, empty for a build base |
 | `decision` | The gate's sequential decision, such as `accept_alt` or `accept_null` |
 | `games`, `score_pct` | Games played and the candidate's score, counting a no-winner game as half |
 | `sealed_mae` | Exported quantized sealed-test MAE, empty without a sealed evaluation |

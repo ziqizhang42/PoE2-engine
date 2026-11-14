@@ -1285,7 +1285,8 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.assertEqual(authenticated["manifest"]["base_id"], model.model_id)
         _, isolated = self._isolated_repository("base-model-repository", ledger_header=ledger_header)
         preview = promote_gate(isolated, "candidate")
-        self.assertEqual(preview["index_row"]["base"], model.sha256[:12])
+        self.assertEqual(preview["index_row"]["base"], "promotion-test/g000")
+        self.assertEqual(preview["index_row"]["base_model"], model.sha256[:12])
 
     def test_model_lineage_requires_entries_to_match_their_iteration(self) -> None:
         named = ModelReference(name="candidate", model_id="candidate-sha256-" + "a" * 64,
@@ -1383,7 +1384,7 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.assertEqual(index, [{
             "recorded_utc": "20260819T000000Z", "run": "promotion-test",
             "iteration": "candidate", "model": sha256_file(candidate_header)[:12],
-            "base": "fixture-base", "decision": "accept_null", "games": "2",
+            "base": "fixture-base", "base_model": "", "decision": "accept_null", "games": "2",
             "score_pct": "100.0", "sealed_mae": "",
             "gate_run_id": "workflow-promotion-test-run",
         }])

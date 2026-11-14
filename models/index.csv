@@ -1,2 +1,2 @@
-recorded_utc,run,iteration,model,base,decision,games,score_pct,sealed_mae,gate_run_id
-20260818T201537Z,run1,g000,633309adb322,000053-96a4b598a45e,accept_alt,84,91.7,4.940,20260818T201537Z__000072-1f8162e8fd16__minimax_poe2_minimax__vs__000053-96a4b598a45e__minimax_poe2_minimax
+recorded_utc,run,iteration,model,base,base_model,decision,games,score_pct,sealed_mae,gate_run_id
+20260818T201537Z,run1,g000,633309adb322,000053-96a4b598a45e,,accept_alt,84,91.7,4.940,20260818T201537Z__000072-1f8162e8fd16__minimax_poe2_minimax__vs__000053-96a4b598a45e__minimax_poe2_minimax
