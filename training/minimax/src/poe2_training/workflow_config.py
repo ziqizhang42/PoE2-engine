@@ -7,7 +7,7 @@ import json
 import math
 import re
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -63,14 +63,21 @@ class FeatureConfig:
 
 @dataclass(frozen=True)
 class ModelReference:
-    """A recipe-local name for one model archived under the repository's models/ folder."""
+    """A recipe-local name for a model archived under models/ or trained by this recipe."""
 
     name: str
-    model_id: str
-    header: Path
+    model_id: str | None
+    header: Path | None
+    # Set for the model an iteration of this recipe trains. Its ID and header are those of the
+    # iteration's authenticated candidate, filled in by the workflow once its gate accepts it.
+    iteration: str | None = None
 
     @property
     def sha256(self) -> str:
+        if self.model_id is None:
+            raise WorkflowConfigError(
+                f"model {self.name} is not available until iteration {self.iteration}'s "
+                "engine gate accepts it")
         return self.model_id.removeprefix("candidate-sha256-")
 
 
@@ -84,6 +91,10 @@ class ManagedDatasetConfig:
     features: FeatureConfig
     # The model that drives noisy-search sampling and labels; None means two-ply closure.
     teacher: ModelReference | None = None
+
+    @property
+    def taught_in_run(self) -> bool:
+        return self.teacher is not None and self.teacher.iteration is not None
 
     @property
     def source_directory(self) -> Path:
@@ -146,7 +157,8 @@ class CandidateValidationConfig:
 
 @dataclass(frozen=True)
 class EngineGateConfig:
-    # Exactly one of base (an existing build) and base_model (an archived model ID) is set.
+    # Exactly one of base (an existing build), base_model (an archived model ID), and
+    # base_iteration (an earlier iteration whose accepted candidate is the base) is set.
     base: str | None
     new_engine: str = CANDIDATE_ENGINE
     base_engine: str = "minimax/poe2_minimax"
@@ -164,6 +176,19 @@ class EngineGateConfig:
     sequential_alpha: float = 0.05
     sequential_beta: float = 0.05
     base_model: str | None = None
+    base_iteration: str | None = None
+
+
+def recorded_gate_settings(gate: EngineGateConfig) -> dict[str, Any]:
+    """Return a gate's settings as its report records them and its fingerprint covers them.
+
+    base_iteration appears only in gates that use it, so gates from before it existed keep
+    their recorded settings and fingerprints.
+    """
+    settings = asdict(gate)
+    if gate.base_iteration is None:
+        del settings["base_iteration"]
+    return settings
 
 
 @dataclass(frozen=True)
@@ -220,6 +245,42 @@ class WorkflowConfig:
                 return iteration
         raise WorkflowConfigError(f"unknown iteration: {name}")
 
+    def trained_model(self, iteration: str) -> ModelReference:
+        """Return the [models] entry for the model that one iteration of this recipe trains."""
+        for model in self.models:
+            if model.iteration == iteration:
+                return model
+        raise WorkflowConfigError(f"no config.models entry names iteration {iteration}'s model")
+
+
+def trained_models_used(config: WorkflowConfig,
+                        iteration: IterationConfig) -> tuple[ModelReference, ...]:
+    """Return the models this recipe trains that an iteration's datasets or gate base use."""
+    names = [iteration.dataset]
+    if iteration.sealed_evaluation is not None:
+        names.extend(iteration.sealed_evaluation.exclude_datasets)
+    used: dict[str, ModelReference] = {}
+    for name in names:
+        dataset = config.dataset(name)
+        if isinstance(dataset, ManagedDatasetConfig) and dataset.taught_in_run:
+            used.setdefault(dataset.teacher.name, dataset.teacher)
+    gate = iteration.engine_gate
+    if gate is not None and gate.base_iteration is not None:
+        model = config.trained_model(gate.base_iteration)
+        used.setdefault(model.name, model)
+    return tuple(used.values())
+
+
+def with_trained_model(config: WorkflowConfig, model: ModelReference) -> WorkflowConfig:
+    """Return the config with one trained model's ID and header filled in wherever it is named."""
+    models = tuple(model if item.iteration == model.iteration else item for item in config.models)
+    datasets = tuple(
+        replace(item, teacher=model)
+        if isinstance(item, ManagedDatasetConfig) and item.teacher is not None and
+        item.teacher.iteration == model.iteration else item
+        for item in config.datasets)
+    return replace(config, models=models, datasets=datasets)
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -268,6 +329,12 @@ def _parse_models(repository: Path, value: Any) -> tuple[ModelReference, ...]:
     for raw_name, model_id in table.items():
         name = _name(raw_name, f"config.models.{raw_name}")
         field = f"config.models.{name}"
+        if isinstance(model_id, dict):
+            _unknown(model_id, {"iteration"}, field)
+            iteration = _name(_string(model_id, "iteration", field), f"{field}.iteration")
+            models.append(ModelReference(name=name, model_id=None, header=None,
+                                         iteration=iteration))
+            continue
         match = MODEL_ID_PATTERN.fullmatch(model_id) if isinstance(model_id, str) else None
         _require(match is not None, f"{field} must be an archived model ID: candidate-sha256-<digest>")
         directory = repository / MODEL_ARCHIVE_DIRECTORY
@@ -452,12 +519,13 @@ def _parse_gate(repository: Path, value: Any, field: str,
     _unknown(table, allowed, field)
     _require(("base" in table) != ("base_model" in table),
              f"{field} must set exactly one of base and base_model")
-    base_model = None
+    base_model = base_iteration = None
     if "base_model" in table:
         model_name = _string(table, "base_model", field)
         _require(model_name in models,
                  f"{field}.base_model must name an entry in config.models: {model_name}")
         base_model = models[model_name].model_id
+        base_iteration = models[model_name].iteration
     seed = table.get("opening_seed")
     if seed is not None:
         _require(isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0,
@@ -487,8 +555,8 @@ def _parse_gate(repository: Path, value: Any, field: str,
              f"{field}.new_engine_args must be {CANDIDATE_ENGINE_ARGS!r} so the gate "
              "runs the candidate evaluator")
     return EngineGateConfig(
-        base=_string(table, "base", field) if base_model is None else None,
-        base_model=base_model,
+        base=_string(table, "base", field) if "base" in table else None,
+        base_model=base_model, base_iteration=base_iteration,
         new_engine=new_engine,
         base_engine=_binary_name(
             _string(table, "base_engine", field, "minimax/poe2_minimax"),
@@ -509,6 +577,117 @@ def _parse_gate(repository: Path, value: Any, field: str,
     )
 
 
+LONG_FORM_KEYS = {"models", "datasets", "iterations"}
+COMPACT_KEYS = {"defaults", "generations"}
+GENERATION_SECTIONS = ("source", "labels", "features", "training", "sealed_evaluation",
+                       "candidate_validation", "engine_gate")
+# Settings each trained generation derives from its own entry, so shared defaults cannot set
+# them. A generation may override its corpus ID and seeds, but its gate base is its parent.
+DERIVED_SETTINGS = {"source": {"corpus_id", "seed"}, "training": {"seed"},
+                    "engine_gate": {"base", "base_model"}}
+
+
+def _generation_sections(defaults: dict[str, Any], generation: dict[str, Any],
+                         field: str) -> dict[str, dict[str, Any]]:
+    """Merge a generation's own tables key by key over the shared defaults."""
+    sections: dict[str, dict[str, Any]] = {}
+    for section in GENERATION_SECTIONS:
+        if section not in defaults and section not in generation:
+            continue
+        own = _table(generation.get(section, {}), f"{field}.{section}")
+        if section == "engine_gate":
+            base = sorted(DERIVED_SETTINGS[section] & set(own))
+            _require(not base, f"{field}.engine_gate cannot set {', '.join(base)}; "
+                     "a generation's gate base is its parent")
+        sections[section] = {**defaults.get(section, {}), **own}
+    for section in ("candidate_validation", "engine_gate"):
+        _require(section in sections,
+                 f"{field} needs [defaults.{section}] or its own [generations.{section}]")
+    return sections
+
+
+def expand_generations(document: dict[str, Any]) -> dict[str, Any]:
+    """Return the long-form document that a compact [[generations]] recipe stands for."""
+    mixed = sorted(LONG_FORM_KEYS & set(document))
+    _require(not mixed,
+             "a recipe is either long-form ([models], [datasets], [[iterations]]) or compact "
+             f"([defaults], [[generations]]); this one also sets {', '.join(mixed)}")
+    _unknown(document, {"schema_version", "run", *COMPACT_KEYS}, "config")
+    run = _table(document.get("run"), "config.run")
+    run_name = _string(run, "name", "config.run")
+    defaults = _table(document.get("defaults", {}), "config.defaults")
+    _unknown(defaults, set(GENERATION_SECTIONS), "config.defaults")
+    for section, table in defaults.items():
+        shared = sorted(DERIVED_SETTINGS.get(section, set()) &
+                        set(_table(table, f"config.defaults.{section}")))
+        _require(not shared, f"config.defaults.{section} cannot set {', '.join(shared)}; "
+                 "each generation derives it")
+    generations = document.get("generations")
+    _require(isinstance(generations, list) and generations and
+             all(isinstance(item, dict) for item in generations),
+             "config.generations must be a nonempty array of tables")
+    models: dict[str, Any] = {}
+    datasets: dict[str, Any] = {}
+    iterations: list[dict[str, Any]] = []
+    for index, generation in enumerate(generations):
+        field = f"config.generations[{index}]"
+        name = _string(generation, "name", field)
+        _require(name not in models, f"generation name is repeated: {name}")
+        if "model" in generation:
+            _unknown(generation, {"name", "model"}, field)
+            models[name] = _string(generation, "model", field)
+            continue
+        _unknown(generation, {"name", "parent", "seed", *GENERATION_SECTIONS}, field)
+        parent = _string(generation, "parent", field)
+        _require(parent in models, f"{field}.parent must name an earlier generation: {parent}")
+        seed = _integer(generation, "seed", field)
+        sections = _generation_sections(defaults, generation, field)
+        dataset: dict[str, Any] = {
+            "kind": "managed", "teacher": parent,
+            "source": {"corpus_id": f"poe2-{run_name}-{name}-v1", "seed": seed,
+                       **sections.pop("source", {})},
+        }
+        for section in ("labels", "features"):
+            if section in sections:
+                dataset[section] = sections.pop(section)
+        iteration = {"name": name, "dataset": name,
+                     "training": {"seed": seed, **sections.pop("training", {})},
+                     **sections}
+        iteration["engine_gate"] = {**iteration["engine_gate"], "base_model": parent}
+        models[name] = {"iteration": name}
+        datasets[name] = dataset
+        iterations.append(iteration)
+    _require(bool(iterations), "config.generations must include a generation with a parent")
+    return {"schema_version": document.get("schema_version"), "run": run,
+            "models": models, "datasets": datasets, "iterations": iterations}
+
+
+def _check_trained_models(config: WorkflowConfig) -> None:
+    """Require each trained model to come from a gated iteration that precedes every use."""
+    order = {iteration.name: index for index, iteration in enumerate(config.iterations)}
+    named: set[str] = set()
+    for model in config.models:
+        if model.iteration is None:
+            continue
+        field = f"config.models.{model.name}"
+        _require(model.iteration in order,
+                 f"{field} names unknown iteration {model.iteration}")
+        _require(model.iteration not in named,
+                 f"{field} names iteration {model.iteration}, which another entry already names")
+        named.add(model.iteration)
+        _require(model.name == model.iteration or model.name not in order,
+                 f"{field} shares its name with iteration {model.name} but names the model of "
+                 f"iteration {model.iteration}")
+        _require(config.iteration(model.iteration).engine_gate is not None,
+                 f"{field} names iteration {model.iteration}, which has no engine gate to "
+                 "accept its model")
+    for index, iteration in enumerate(config.iterations):
+        for model in trained_models_used(config, iteration):
+            _require(order[model.iteration] < index,
+                     f"iteration {iteration.name} uses model {model.name}, which iteration "
+                     f"{model.iteration} trains, so it must come after {model.iteration}")
+
+
 def load_workflow_config(path: Path | str) -> WorkflowConfig:
     """Load one strict workflow definition without creating or modifying run state."""
     config_path = Path(path).resolve()
@@ -519,6 +698,8 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         raise WorkflowConfigError(f"could not read workflow config {config_path}: {error}") from error
     repository = find_repository_root(config_path.parent)
     _require(repository is not None, f"config is not inside a Git repository: {config_path}")
+    if COMPACT_KEYS & set(document):
+        document = expand_generations(document)
     _unknown(document, {"schema_version", "run", "models", "datasets", "iterations"}, "config")
     _require(document.get("schema_version") == SCHEMA_VERSION,
              f"config.schema_version must be {SCHEMA_VERSION}")
@@ -659,12 +840,14 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
     _require(not unreferenced,
              "config.datasets contains unreferenced dataset(s): " + ", ".join(unreferenced))
 
-    return WorkflowConfig(
+    config = WorkflowConfig(
         path=config_path, contents=contents, digest=hashlib.sha256(contents).hexdigest(),
         repository=repository, name=run_name, output_directory=output,
         build_preset=preset, label_concurrency=label_concurrency,
         datasets=tuple(datasets), iterations=tuple(iterations), models=models,
     )
+    _check_trained_models(config)
+    return config
 
 
 def _normalized(value: Any) -> Any:
@@ -685,71 +868,105 @@ def fingerprint(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _trained_model_definition(result: dict[str, dict[str, Any]], iteration: str) -> dict[str, str]:
+    """Identify a model this recipe trains by its iteration's gate, which the recipe fixes alone.
+
+    The model's digest exists only once that gate accepts it, so stages lock it as an input.
+    """
+    return {"iteration": iteration,
+            "engine_gate": fingerprint(result[f"iteration:{iteration}:engine-gate"])}
+
+
+def _dataset_definitions(config: WorkflowConfig, dataset: DatasetConfig,
+                         result: dict[str, dict[str, Any]]) -> None:
+    if isinstance(dataset, ImportedDatasetConfig):
+        result[f"dataset:{dataset.name}:features"] = {
+            "adapter": "imported-features", "path": dataset.feature_directory,
+        }
+        return
+    source_id = f"dataset:{dataset.name}:source"
+    # Teachers are added only when present so stages recorded before teachers existed
+    # keep their fingerprints.
+    teacher: dict[str, Any] = {}
+    if dataset.teacher is not None:
+        teacher["teacher"] = (
+            dataset.teacher.model_id if dataset.teacher.iteration is None else
+            _trained_model_definition(result, dataset.teacher.iteration))
+    result[source_id] = {"adapter": "source", "preset": config.build_preset,
+                         "settings": dataset.source, **teacher}
+    labels_id = f"dataset:{dataset.name}:labels"
+    result[labels_id] = {
+        "adapter": "labels", "preset": config.build_preset,
+        "source": fingerprint(result[source_id]), "settings": dataset.labels,
+        "label_concurrency": config.label_concurrency, **teacher,
+    }
+    result[f"dataset:{dataset.name}:features"] = {
+        "adapter": "features", "preset": config.build_preset,
+        "source": fingerprint(result[source_id]), "labels": fingerprint(result[labels_id]),
+        "settings": dataset.features,
+    }
+
+
+def _iteration_definitions(config: WorkflowConfig, iteration: IterationConfig,
+                           result: dict[str, dict[str, Any]]) -> None:
+    training_id = f"iteration:{iteration.name}:training"
+    dataset_id = f"dataset:{iteration.dataset}:features"
+    result[training_id] = {
+        "adapter": f"training-{iteration.training.type}",
+        "dataset": fingerprint(result[dataset_id]), "settings": iteration.training,
+        "dependencies": [fingerprint(result[f"iteration:{name}:training"])
+                         for name in iteration.depends_on],
+    }
+    if iteration.sealed_evaluation is not None:
+        stage_id = f"iteration:{iteration.name}:sealed-evaluation"
+        result[stage_id] = {
+            "adapter": "sealed-evaluation", "training": fingerprint(result[training_id]),
+            "dataset": fingerprint(result[dataset_id]),
+            "settings": iteration.sealed_evaluation,
+            "exclusions": [fingerprint(result[f"dataset:{name}:features"])
+                           for name in iteration.sealed_evaluation.exclude_datasets],
+        }
+    if iteration.candidate_validation is not None:
+        stage_id = f"iteration:{iteration.name}:candidate-validation"
+        result[stage_id] = {
+            "adapter": "candidate-validation", "preset": config.build_preset,
+            "training": fingerprint(result[training_id]),
+            "dataset": fingerprint(result[dataset_id]),
+            "sealed_evaluation": (
+                fingerprint(result[f"iteration:{iteration.name}:sealed-evaluation"])
+                if iteration.sealed_evaluation is not None else None),
+            "settings": iteration.candidate_validation,
+        }
+    gate = iteration.engine_gate
+    if gate is not None:
+        stage_id = f"iteration:{iteration.name}:engine-gate"
+        result[stage_id] = {
+            "adapter": "engine-gate", "preset": config.build_preset,
+            "candidate": fingerprint(result[
+                f"iteration:{iteration.name}:candidate-validation"]),
+            "settings": recorded_gate_settings(gate),
+        }
+        if gate.base_iteration is not None:
+            result[stage_id]["base"] = _trained_model_definition(result, gate.base_iteration)
+
+
 def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
     """Return normalized settings and upstream config fingerprints for every stage."""
     result: dict[str, dict[str, Any]] = {}
+    # A dataset taught by a model this recipe trains is defined once that model's gate is.
+    deferred = {dataset.name: dataset for dataset in config.datasets
+                if isinstance(dataset, ManagedDatasetConfig) and dataset.taught_in_run}
     for dataset in config.datasets:
-        if isinstance(dataset, ManagedDatasetConfig):
-            source_id = f"dataset:{dataset.name}:source"
-            # Teachers are added only when present so stages recorded before teachers existed
-            # keep their fingerprints.
-            teacher = ({} if dataset.teacher is None else
-                       {"teacher": dataset.teacher.model_id})
-            result[source_id] = {"adapter": "source", "preset": config.build_preset,
-                                 "settings": dataset.source, **teacher}
-            labels_id = f"dataset:{dataset.name}:labels"
-            result[labels_id] = {
-                "adapter": "labels", "preset": config.build_preset,
-                "source": fingerprint(result[source_id]), "settings": dataset.labels,
-                "label_concurrency": config.label_concurrency, **teacher,
-            }
-            features_id = f"dataset:{dataset.name}:features"
-            result[features_id] = {
-                "adapter": "features", "preset": config.build_preset,
-                "source": fingerprint(result[source_id]), "labels": fingerprint(result[labels_id]),
-                "settings": dataset.features,
-            }
-        else:
-            result[f"dataset:{dataset.name}:features"] = {
-                "adapter": "imported-features", "path": dataset.feature_directory,
-            }
+        if dataset.name not in deferred:
+            _dataset_definitions(config, dataset, result)
     for iteration in config.iterations:
-        training_id = f"iteration:{iteration.name}:training"
-        dataset_id = f"dataset:{iteration.dataset}:features"
-        result[training_id] = {
-            "adapter": f"training-{iteration.training.type}",
-            "dataset": fingerprint(result[dataset_id]), "settings": iteration.training,
-            "dependencies": [fingerprint(result[f"iteration:{name}:training"])
-                             for name in iteration.depends_on],
-        }
+        names = [iteration.dataset]
         if iteration.sealed_evaluation is not None:
-            stage_id = f"iteration:{iteration.name}:sealed-evaluation"
-            result[stage_id] = {
-                "adapter": "sealed-evaluation", "training": fingerprint(result[training_id]),
-                "dataset": fingerprint(result[dataset_id]),
-                "settings": iteration.sealed_evaluation,
-                "exclusions": [fingerprint(result[f"dataset:{name}:features"])
-                               for name in iteration.sealed_evaluation.exclude_datasets],
-            }
-        if iteration.candidate_validation is not None:
-            stage_id = f"iteration:{iteration.name}:candidate-validation"
-            result[stage_id] = {
-                "adapter": "candidate-validation", "preset": config.build_preset,
-                "training": fingerprint(result[training_id]),
-                "dataset": fingerprint(result[dataset_id]),
-                "sealed_evaluation": (
-                    fingerprint(result[f"iteration:{iteration.name}:sealed-evaluation"])
-                    if iteration.sealed_evaluation is not None else None),
-                "settings": iteration.candidate_validation,
-            }
-        if iteration.engine_gate is not None:
-            stage_id = f"iteration:{iteration.name}:engine-gate"
-            result[stage_id] = {
-                "adapter": "engine-gate", "preset": config.build_preset,
-                "candidate": fingerprint(result[
-                    f"iteration:{iteration.name}:candidate-validation"]),
-                "settings": iteration.engine_gate,
-            }
+            names.extend(iteration.sealed_evaluation.exclude_datasets)
+        for name in names:
+            if name in deferred:
+                _dataset_definitions(config, deferred.pop(name), result)
+        _iteration_definitions(config, iteration, result)
     return result
 
 

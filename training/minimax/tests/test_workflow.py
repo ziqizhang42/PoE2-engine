@@ -37,6 +37,7 @@ from poe2_training.workflow import (
     handoff_candidate,
     print_status,
     promote_gate,
+    resolve_trained_models,
     resolved_label_concurrency,
     run_lock,
     validate_existing,
@@ -57,6 +58,7 @@ from poe2_training.workflow_adapters import (
     engine_gate_command,
     gate_base_binary,
     gate_base_build_directory,
+    gate_base_model_id,
     gate_build_directory,
     label_command,
     label_shard_path,
@@ -71,6 +73,7 @@ from poe2_training.workflow_config import (
     WorkflowConfigError,
     fingerprint,
     load_workflow_config,
+    recorded_gate_settings,
     stage_definitions,
     stage_fingerprints,
 )
@@ -389,7 +392,7 @@ class WorkflowConfigTest(unittest.TestCase):
         self.assertIsNone(gate.base)
         self.assertEqual(gate.base_model, model_id)
         self.assertEqual(
-            stage_definitions(config)["iteration:g001:engine-gate"]["settings"].base_model,
+            stage_definitions(config)["iteration:g001:engine-gate"]["settings"]["base_model"],
             model_id)
         for lines, message in (
                 ('base = "000074-aa1f911c27b6"\nbase_model = "g000"\n', "exactly one"),
@@ -986,7 +989,7 @@ class WorkflowPromotionTest(unittest.TestCase):
         """)
         return load_workflow_config(_write(self.root, contents, "promotion.toml"))
 
-    def _candidate(self) -> None:
+    def _candidate(self, features: Path | None = None) -> None:
         candidate = self.iteration.candidate_validation
         assert candidate is not None
         training = self.iteration.training_directory
@@ -995,8 +998,8 @@ class WorkflowPromotionTest(unittest.TestCase):
             "schema": "poe2-minimax-pattern-experiment", "schema_version": 1})
         root = self.iteration.candidate_directory
         reserve_report_directory(root, CANDIDATE_SCHEMA)
-        log = self.config.output_directory / "logs" / "candidate-fixture.log"
-        log.parent.mkdir(parents=True)
+        log = self.config.output_directory / "logs" / f"{self.iteration.name}-fixture.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("candidate fixture\n", encoding="utf-8")
         artifacts = {}
         for name, relative in {
@@ -1007,9 +1010,9 @@ class WorkflowPromotionTest(unittest.TestCase):
         }.items():
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(name, encoding="utf-8")
+            path.write_text(f"{self.iteration.name} {name}", encoding="utf-8")
             artifacts[name] = {"path": relative, "sha256": sha256_file(path)}
-        feature_digest = sha256_file(self.root / "features" / "features.bin")
+        feature_digest = sha256_file((features or self.root / "features") / "features.bin")
         complete_json_report(root, CANDIDATE_SCHEMA, {
             "schema": CANDIDATE_SCHEMA, "schema_version": 1,
             "promotable": candidate.promotable,
@@ -1083,13 +1086,14 @@ class WorkflowPromotionTest(unittest.TestCase):
             "commit", "-qm", message], cwd=repository, check=True)
 
     def _gate(self, *, manifest_base_path: str | None = None,
+              run_id: str = "workflow-promotion-test-run",
               ledger_overrides: dict[str, str] | None = None,
               decision: str = "accept_alt") -> tuple[list[str], list[str]]:
         master = REPOSITORY / "eval" / "results.csv"
         with master.open(newline="", encoding="utf-8") as source:
             header = next(csv.reader(source))
         row = [""] * len(header)
-        row[header.index("run_id")] = "workflow-promotion-test-run"
+        row[header.index("run_id")] = run_id
         root = self.iteration.gate_directory
         reserve_report_directory(root, GATE_SCHEMA)
         header_digest = sha256_file(
@@ -1108,7 +1112,8 @@ class WorkflowPromotionTest(unittest.TestCase):
         gate = self.iteration.engine_gate
         assert gate is not None
         base_engine = gate_base_binary(self.config, self.iteration)
-        if gate.base_model is not None:
+        base_model_id = gate_base_model_id(self.config, self.iteration)
+        if base_model_id is not None:
             base_engine.parent.mkdir(parents=True, exist_ok=True)
             base_engine.write_text("base model engine\n", encoding="utf-8")
         manifest = {
@@ -1120,7 +1125,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "new_engine_args": gate.new_engine_args, "base_engine": gate.base_engine,
             "base_engine_args": gate.base_engine_args,
             "base_engine_path": manifest_base_path or str(base_engine),
-            "base_id": gate.base_model or "fixture-base",
+            "base_id": base_model_id or "fixture-base",
             "opening_book": str(gate.opening_book),
             "opening_book_digest": "fnv1a64:fixture", "opening_count": 1,
             "opening_seed": 123, "opening_seed_source": "derived",
@@ -1209,7 +1214,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
             "git_commit": "2" * 40,
             "settings": {
-                **asdict(gate),
+                **recorded_gate_settings(gate),
                 "opening_book": str(gate.opening_book),
             },
             "opening_book_sha256": sha256_file(gate.opening_book),
@@ -1563,6 +1568,70 @@ class WorkflowPromotionTest(unittest.TestCase):
         (repository / "models" / f"{model_id}.hpp").write_text("other\n", encoding="utf-8")
         with self.assertRaisesRegex(WorkflowError, "differs from the candidate"):
             promote_gate(isolated, "candidate")
+
+    def _chain_config(self):
+        """Return a parent iteration and a child taught by and gated against its model."""
+        pattern = ('[iterations.training]\ntype = "pattern"\ndevice = "cpu"\n'
+                   'suite = "frozen-pattern-gain"\n'
+                   '[iterations.candidate_validation]\npromotable = true\n')
+        contents = textwrap.dedent(f"""
+            schema_version = 1
+            [run]
+            name = "promotion-test"
+            output_dir = "{self.root / 'run'}"
+            [models]
+            candidate = {{ iteration = "candidate" }}
+            [datasets.ready]
+            kind = "imported"
+            path = "{self.root / 'features'}"
+            [datasets.child]
+            kind = "managed"
+            teacher = "candidate"
+            [datasets.child.source]
+            corpus_id = "child"
+            seed = 1
+            trajectories = 4
+            [datasets.child.labels]
+            nodes = 100
+        """) + (
+            '[[iterations]]\nname = "candidate"\ndataset = "ready"\n' + pattern +
+            f'[iterations.engine_gate]\nbase = "{self.root / "base-engine"}"\ngames = 2\n'
+            '[[iterations]]\nname = "child"\ndataset = "child"\n' + pattern +
+            '[iterations.engine_gate]\nbase_model = "candidate"\ngames = 2\n')
+        return load_workflow_config(_write(self.root, contents, "chain.toml"))
+
+    def test_a_child_is_promoted_only_after_its_parent_is_archived(self) -> None:
+        chain = self._chain_config()
+        self.config, self.iteration = chain, chain.iteration("candidate")
+        self._candidate()
+        ledger_header, _ = self._gate(run_id="parent-gate")
+        parent_digest = sha256_file(
+            self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp")
+        resolved = resolve_trained_models(chain)
+        self.assertEqual(resolved.trained_model("candidate").model_id,
+                         f"candidate-sha256-{parent_digest}")
+        features = resolved.dataset("child").feature_directory
+        features.parent.mkdir(parents=True)
+        write_feature_fixture(features, teacher_sha256=parent_digest)
+        self.config, self.iteration = resolved, resolved.iteration("child")
+        self._candidate(features)
+        self._gate(run_id="child-gate", decision="accept_null")
+        self.config = chain
+
+        repository, isolated = self._isolated_repository(
+            "chain-repository", ledger_header=ledger_header)
+        with self.assertRaisesRegex(WorkflowError, "promote candidate first"):
+            promote_gate(isolated, "child")
+        promote_gate(isolated, "candidate", apply=True)
+        self._commit_all(repository, "record parent gate")
+        preview = promote_gate(isolated, "child")
+        self.assertEqual(preview["index_row"]["base"], "promotion-test/candidate")
+        self.assertEqual(preview["index_row"]["base_model"], parent_digest[:12])
+        applied = promote_gate(isolated, "child", apply=True)
+        metrics = json.loads(
+            (repository / "models" / f"{applied['model_id']}.json").read_bytes())
+        self.assertEqual(metrics["teacher"], {
+            "evaluator": "pattern-gain", "model_id": f"candidate-sha256-{parent_digest}"})
 
     def test_gate_preview_apply_and_duplicate_rejection(self) -> None:
         self._candidate()

@@ -19,7 +19,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
@@ -77,7 +77,10 @@ from .workflow_config import (
     ModelReference,
     WorkflowConfig,
     fingerprint,
+    recorded_gate_settings,
     stage_fingerprints,
+    trained_models_used,
+    with_trained_model,
 )
 from .workflow_state import RunState, now_utc
 from .workflow_ui import (
@@ -97,6 +100,8 @@ MODEL_INDEX_HEADER = (
     "recorded_utc", "run", "iteration", "model", "base", "base_model", "decision", "games",
     "score_pct", "sealed_mae", "gate_run_id",
 )
+# Snapshot fields of an iteration that are not stage states.
+ITERATION_FIELDS = frozenset({"dataset", "depends_on", "status", "blocked_by"})
 
 
 class WorkflowError(ValueError):
@@ -402,15 +407,19 @@ def workflow_snapshot(config: WorkflowConfig) -> dict[str, Any]:
             value["candidate_validation"] = _path_state(iteration.candidate_directory)
         if iteration.engine_gate is not None:
             value["engine_gate"] = _path_state(iteration.gate_directory)
-        stages = [item for key, item in value.items()
-                  if key not in {"dataset", "depends_on"}]
+        stages = [item for key, item in value.items() if key not in ITERATION_FIELDS]
         value["status"] = ("complete" if stages and all(item == "complete" for item in stages)
                            else "blocked" if any(item in {"incomplete", "unexpected"} for item in stages)
                            else "pending")
         iterations[iteration.name] = value
+    blocked = blocked_iterations(config)
+    for name, item in blocked.items():
+        iterations[name].update(status="blocked", blocked_by=item.reason)
     all_dataset_complete = all(
         value["features"] == "complete" for value in datasets.values())
     all_iterations_complete = all(value["status"] == "complete" for value in iterations.values())
+    stopped = bool(blocked) and all(
+        value["status"] == "complete" or name in blocked for name, value in iterations.items())
     return {
         "schema": "poe2-training-status", "schema_version": 1,
         "run": config.name, "config": str(config.path), "config_digest": config.digest,
@@ -418,7 +427,8 @@ def workflow_snapshot(config: WorkflowConfig) -> dict[str, Any]:
         "logical_cpus": os.cpu_count() or 1,
         "resolved_label_concurrency": resolved_label_concurrency(config),
         "datasets": datasets, "iterations": iterations,
-        "status": "complete" if all_dataset_complete and all_iterations_complete else "pending",
+        "status": ("complete" if all_dataset_complete and all_iterations_complete else
+                   "stopped" if stopped else "pending"),
     }
 
 
@@ -443,7 +453,7 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
         stage_statuses.append(dataset["features"])
     for iteration in snapshot["iterations"].values():
         stage_statuses.extend(value for key, value in iteration.items()
-                              if key not in {"dataset", "depends_on", "status"})
+                              if key not in ITERATION_FIELDS)
     completed, total = stage_statuses.count("complete"), len(stage_statuses)
     percent = 100.0 * completed / total if total else 100.0
     iteration_statuses = [value["status"] for value in snapshot["iterations"].values()]
@@ -467,11 +477,13 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
                   f"imported features={dataset['features']}")
     for index, (name, iteration) in enumerate(snapshot["iterations"].items(), 1):
         stages = " ".join(f"{key}={value}" for key, value in iteration.items()
-                          if key not in {"dataset", "depends_on", "status"})
+                          if key not in ITERATION_FIELDS)
         decision = _recorded_gate_decision(config.iteration(name))
         if decision is not None:
             stages += f" gate_decision={decision}"
         print(f"  {status_symbol(str(iteration['status']))} iteration {index}. {name}: {stages}")
+        if "blocked_by" in iteration:
+            print(f"      not started: {iteration['blocked_by']}")
 
 
 def _recorded_gate_decision(iteration: IterationConfig) -> str | None:
@@ -486,6 +498,80 @@ def _recorded_gate_decision(iteration: IterationConfig) -> str | None:
         return None
     decision = manifest.get("sequential_decision") if isinstance(manifest, dict) else None
     return decision if isinstance(decision, str) else None
+
+
+@dataclass(frozen=True)
+class BlockedIteration:
+    """An iteration that cannot start because a model it needs did not win its gate."""
+
+    name: str
+    # The iteration whose engine gate did not accept its candidate, and that gate's decision.
+    loser: str
+    decision: str
+
+    @property
+    def reason(self) -> str:
+        return f"{self.loser} did not win its engine gate (decision {self.decision})"
+
+
+def blocked_iterations(config: WorkflowConfig) -> dict[str, BlockedIteration]:
+    """Return iterations that need a trained model whose gate decided anything but accept_alt.
+
+    This reads recorded decisions without authenticating them; resolving a model to use it
+    authenticates its gate.
+    """
+    blocked: dict[str, BlockedIteration] = {}
+    for iteration in config.iterations:
+        producers = [model.iteration for model in trained_models_used(config, iteration)]
+        for name in (*iteration.depends_on, *producers):
+            cause = blocked.get(name)
+            if cause is None and name in producers:
+                decision = _recorded_gate_decision(config.iteration(name))
+                if decision is not None and decision != "accept_alt":
+                    cause = BlockedIteration(iteration.name, name, decision)
+            if cause is not None:
+                blocked[iteration.name] = replace(cause, name=iteration.name)
+                break
+    return blocked
+
+
+def describe_not_started(blocked: Sequence[BlockedIteration]) -> list[str]:
+    """Return one line per losing iteration naming the iterations it kept from starting."""
+    groups: dict[str, list[BlockedIteration]] = {}
+    for item in blocked:
+        groups.setdefault(item.loser, []).append(item)
+    return [f"{items[0].reason}; not started: {', '.join(item.name for item in items)}"
+            for items in groups.values()]
+
+
+def _accepted_model(config: WorkflowConfig, model: ModelReference) -> ModelReference:
+    """Return a trained model filled in from its iteration's authenticated, accepted candidate."""
+    assert model.iteration is not None
+    iteration = config.iteration(model.iteration)
+    candidate = authenticate_candidate(config, iteration)
+    gate = authenticate_gate(config, iteration, candidate=candidate)
+    if gate["sequential_decision"] != "accept_alt":
+        raise WorkflowError(
+            f"model {model.name} is not usable: iteration {model.iteration}'s authenticated "
+            f"engine gate decided {gate['sequential_decision']}, not accept_alt")
+    header = candidate["artifacts"]["model_header"]
+    return replace(model, model_id=candidate_build_id(candidate),
+                   header=iteration.candidate_directory / header["path"])
+
+
+def resolve_trained_models(config: WorkflowConfig) -> WorkflowConfig:
+    """Fill in every model this recipe trains whose engine gate accepted it.
+
+    Models are resolved in iteration order, so each one's own teacher and gate base are filled
+    in before its candidate and gate are authenticated.
+    """
+    order = {iteration.name: index for index, iteration in enumerate(config.iterations)}
+    trained = sorted((model for model in config.models if model.iteration is not None),
+                     key=lambda model: order[model.iteration])
+    for model in trained:
+        if _recorded_gate_decision(config.iteration(model.iteration)) == "accept_alt":
+            config = with_trained_model(config, _accepted_model(config, model))
+    return config
 
 
 def _format_command(command: Sequence[str]) -> str:
@@ -504,6 +590,8 @@ def print_plan(config: WorkflowConfig) -> None:
         if isinstance(dataset, ImportedDatasetConfig):
             print(f"  authenticate: {dataset.feature_directory}")
             continue
+        if dataset.teacher is not None:
+            print(f"  teacher: {_describe_model(config, dataset.teacher)}")
         chunks = source_chunk_ranges(dataset)
         print(f"  source: {dataset.source_directory} ({len(chunks)} chunks of up to "
               f"{SOURCE_CHUNK_TRAJECTORIES} trajectories)")
@@ -515,10 +603,13 @@ def print_plan(config: WorkflowConfig) -> None:
         print(f"    {_format_command(label_command(config, dataset, 0))}")
         print(f"  features: {dataset.feature_directory}")
         print(f"    {_format_command(feature_command(config, dataset))}")
+    blocked = blocked_iterations(config)
     for iteration in config.iterations:
         dataset = config.dataset(iteration.dataset)
         print(paint(f"iteration {iteration.name}: dataset={iteration.dataset} "
                     f"depends_on={','.join(iteration.depends_on) or '-'}", "bold", "magenta"))
+        if iteration.name in blocked:
+            print(f"  not started: {blocked[iteration.name].reason}")
         print(f"  training: {_format_command(training_command(sys.executable, dataset, iteration))}")
         if iteration.sealed_evaluation is not None:
             print(f"  sealed evaluation: "
@@ -528,11 +619,26 @@ def print_plan(config: WorkflowConfig) -> None:
                   f"promotable={str(iteration.candidate_validation.promotable).lower()}")
         if iteration.engine_gate is not None:
             gate = iteration.engine_gate
-            names = {model.model_id: model.name for model in config.models}
-            base = (gate.base if gate.base_model is None else
-                    f"{config.name}/{names[gate.base_model]} "
-                    f"({gate.base_model}, built privately)")
+            base = (gate.base if gate.base is not None else
+                    f"{_describe_model(config, _configured_base_model(config, iteration))}, "
+                    "built privately")
             print(f"  engine gate: {iteration.gate_directory} base={base}")
+
+
+def _describe_model(config: WorkflowConfig, model: ModelReference) -> str:
+    if model.iteration is None:
+        return f"{config.name}/{model.name} ({model.model_id})"
+    return (f"{config.name}/{model.name} (the candidate of iteration {model.iteration}, "
+            "once its gate accepts it)")
+
+
+def _configured_base_model(config: WorkflowConfig, iteration: IterationConfig) -> ModelReference:
+    """Return the [models] entry a gate's base names, filled in or not."""
+    gate = iteration.engine_gate
+    assert gate is not None and gate.base is None
+    if gate.base_iteration is not None:
+        return config.trained_model(gate.base_iteration)
+    return _model_by_id(config, str(gate.base_model), "engine-gate base model")
 
 
 def _direct_audit(command: Sequence[str], repository: Path) -> str:
@@ -555,15 +661,36 @@ def _model_by_id(config: WorkflowConfig, model_id: str, label: str) -> ModelRefe
     raise WorkflowError(f"{label} is not named in config.models: {model_id}")
 
 
+def _expected_model_id(model: ModelReference, user: str) -> str:
+    """Return a model's ID, or explain that its iteration's gate has not accepted it yet."""
+    if model.model_id is None:
+        raise WorkflowError(
+            f"{user} needs model {model.name}, which iteration {model.iteration}'s engine gate "
+            f"has not accepted; run {model.iteration} first or rerun with --with-dependencies")
+    return model.model_id
+
+
+def _gate_base_model(config: WorkflowConfig, iteration: IterationConfig) -> ModelReference | None:
+    """Return the intact model a gate's base is built from, or None for an existing build."""
+    gate = iteration.engine_gate
+    if gate is None or gate.base is not None:
+        return None
+    model = _configured_base_model(config, iteration)
+    _expected_model_id(model, f"engine gate for {iteration.name}")
+    return model
+
+
 def check_model_lineage(config: WorkflowConfig, model: ModelReference | None = None) -> None:
-    """Require each [models] entry named after an iteration to be that iteration's candidate.
+    """Require each archived [models] entry named after an iteration to be its candidate.
 
     An entry is compared once its iteration's candidate exists; before then nothing disagrees.
+    An entry for a model this recipe trains is that candidate by construction.
     """
     iterations = {iteration.name: iteration for iteration in config.iterations}
     for entry in config.models if model is None else (model,):
         iteration = iterations.get(entry.name)
-        if iteration is None or _path_state(iteration.candidate_directory) != "complete":
+        if (entry.iteration is not None or iteration is None or
+                _path_state(iteration.candidate_directory) != "complete"):
             continue
         produced = candidate_build_id(authenticate_candidate(config, iteration))
         if produced != entry.model_id:
@@ -592,13 +719,31 @@ def _pending_source_chunks(dataset: ManagedDatasetConfig) -> list[tuple[int, int
     return pending
 
 
+def _waiting_models(config: WorkflowConfig, iteration: IterationConfig) -> list[ModelReference]:
+    return [model for model in trained_models_used(config, iteration) if model.model_id is None]
+
+
+def _require_not_started(path: Path, label: str, models: Sequence[ModelReference]) -> None:
+    """Reject artifacts of work that needs a trained model that is not accepted."""
+    if path.exists():
+        names = ", ".join(model.name for model in models)
+        raise WorkflowError(
+            f"{label} has artifacts, but it needs {names}, whose engine gate has not accepted "
+            f"it; move them aside explicitly: {path}")
+
+
 def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
     """Read-only validation of config evolution and every artifact currently present."""
     state = RunState(config)
     state.validate_evolution()
     check_model_lineage(config)
+    config = resolve_trained_models(config)
     authenticated: dict[str, Any] = {}
     for dataset in config.datasets:
+        if (isinstance(dataset, ManagedDatasetConfig) and dataset.teacher is not None and
+                dataset.teacher.model_id is None):
+            _require_not_started(dataset.root, f"dataset {dataset.name}", [dataset.teacher])
+            continue
         feature_state = _path_state(dataset.feature_directory)
         if isinstance(dataset, ImportedDatasetConfig):
             if feature_state != "complete":
@@ -646,6 +791,9 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
                 feature_audit_command(sys.executable, config, dataset), config.repository)
             authenticated[f"dataset:{dataset.name}:features"] = authenticate_features(dataset)
     for iteration in config.iterations:
+        if waiting := _waiting_models(config, iteration):
+            _require_not_started(iteration.root, f"iteration {iteration.name}", waiting)
+            continue
         stages = [
             ("training", iteration.training_directory,
              lambda: authenticate_training(config.dataset(iteration.dataset), iteration)),
@@ -940,8 +1088,12 @@ class WorkflowRunner:
                 source_audit_command(sys.executable, self.config, dataset), attempt=attempt)
             return authenticate_source(dataset)
 
+        source_input = asdict(dataset.source)
+        if dataset.teacher is not None and dataset.teacher.iteration is not None:
+            # The stage fingerprint names the teacher's iteration; lock the model it became.
+            source_input["teacher"] = dataset.teacher.model_id
         return self._run_simple(stage, dataset.source_directory, "position source",
-                                asdict(dataset.source), create, authenticate)
+                                source_input, create, authenticate)
 
     def _prepare_labels(self, dataset: ManagedDatasetConfig,
                         source_stats: dict[str, Any]) -> dict[str, Any]:
@@ -1073,6 +1225,8 @@ class WorkflowRunner:
             {"source": source_stats, "labels": label_stats}, create, authenticate)
 
     def run_iteration(self, iteration: IterationConfig) -> None:
+        for model in trained_models_used(self.config, iteration):
+            _expected_model_id(model, f"iteration {iteration.name}")
         dependency_stats = {}
         for name in iteration.depends_on:
             dependency = self.config.iteration(name)
@@ -1268,8 +1422,7 @@ class WorkflowRunner:
         if not gate.opening_book.is_file():
             raise WorkflowError(f"engine-gate opening book is missing: {gate.opening_book}")
         root = iteration.gate_directory
-        base_model = (None if gate.base_model is None else
-                      _model_by_id(self.config, gate.base_model, "engine-gate base model"))
+        base_model = _gate_base_model(self.config, iteration)
         if base_model is not None:
             check_model_lineage(self.config, base_model)
         base_engine_binary = gate_base_binary(self.config, iteration)
@@ -1341,7 +1494,7 @@ class WorkflowRunner:
                 "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
                 "created_at_utc": now_utc(), "git_commit": self.commit,
                 "settings": {
-                    **asdict(gate), "opening_book": str(gate.opening_book),
+                    **recorded_gate_settings(gate), "opening_book": str(gate.opening_book),
                 },
                 "opening_book_sha256": sha256_file(gate.opening_book),
                 "run_id": manifest.get("run_id"),
@@ -1391,7 +1544,8 @@ def _dependency_order(config: WorkflowConfig, iteration: IterationConfig) -> lis
     added: set[str] = set()
 
     def add(item: IterationConfig) -> None:
-        for name in item.depends_on:
+        producers = [model.iteration for model in trained_models_used(config, item)]
+        for name in (*item.depends_on, *producers):
             add(config.iteration(name))
         if item.name not in added:
             result.append(item)
@@ -1401,15 +1555,26 @@ def _dependency_order(config: WorkflowConfig, iteration: IterationConfig) -> lis
     return result
 
 
+def _require_unblocked(config: WorkflowConfig, iteration_name: str) -> None:
+    blocked = blocked_iterations(config).get(iteration_name)
+    if blocked is not None:
+        raise WorkflowError(f"iteration {iteration_name} is not started: {blocked.reason}")
+
+
 def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
-                 with_dependencies: bool = False) -> None:
-    """Execute a full run or one iteration under its create-only run lock."""
+                 with_dependencies: bool = False) -> list[BlockedIteration]:
+    """Execute a full run or one iteration under its create-only run lock.
+
+    Iterations that need a model whose gate did not accept it are skipped and returned; a
+    requested iteration that is blocked is an error instead.
+    """
     if iteration_name is None:
         selected = list(config.iterations)
     else:
         requested = config.iteration(iteration_name)
         selected = (_dependency_order(config, requested)
                     if with_dependencies else [requested])
+        _require_unblocked(config, iteration_name)
     commit = require_clean_committed(config)
     with run_lock(config):
         state = RunState(config)
@@ -1423,17 +1588,30 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
         state.write_summary(workflow_snapshot(config))
         progress = WorkflowProgress(config, state)
         runner = WorkflowRunner(config, state, commit, progress)
+        not_started: list[BlockedIteration] = []
         success = False
         try:
             with _interruptions_as_keyboard():
                 for iteration in selected:
+                    if iteration.name == iteration_name:
+                        _require_unblocked(config, iteration_name)
+                    blocked = blocked_iterations(config).get(iteration.name)
+                    if blocked is not None:
+                        not_started.append(blocked)
+                        state.append("iteration_not_started", iteration=iteration.name,
+                                     reason=blocked.reason)
+                        progress.iteration_not_started(iteration.name, blocked.reason)
+                        continue
+                    # A model this recipe trains may have been accepted earlier in this run.
+                    runner.config = resolve_trained_models(config)
                     runner.run_iteration(iteration)
                     state.append("iteration_completed", iteration=iteration.name)
                     state.write_summary(workflow_snapshot(config))
                     progress.iteration_completed(iteration.name)
                 state.append(
                     "run_completed", command=("iteration" if iteration_name else "run"),
-                    iteration=iteration_name)
+                    iteration=iteration_name,
+                    not_started=[item.name for item in not_started])
                 state.write_summary(workflow_snapshot(config))
                 success = True
         except KeyboardInterrupt as error:
@@ -1453,6 +1631,7 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
             raise
         finally:
             progress.close(success=success)
+    return not_started
 
 
 def handoff_candidate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
@@ -1465,6 +1644,7 @@ def handoff_candidate(config: WorkflowConfig, iteration_name: str, *, apply: boo
 
 def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
                        apply: bool) -> dict[str, Any]:
+    config = resolve_trained_models(config)
     iteration = config.iteration(iteration_name)
     candidate = authenticate_candidate(config, iteration)
     header_metadata = candidate["artifacts"].get("model_header")
@@ -1612,12 +1792,10 @@ def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
     sealed = candidate["model"]["quantized"].get("sealed_test")
     sealed_mae = f"{sealed['mae']:.3f}" if isinstance(sealed, dict) else ""
     model_digest = candidate["artifacts"]["model_header"]["sha256"]
-    gate_settings = iteration.engine_gate
-    assert gate_settings is not None
     base, base_model = saved["base_id"], ""
-    if gate_settings.base_model is not None:
+    model = _gate_base_model(config, iteration)
+    if model is not None:
         # People read the run-scoped generation name; the digest keeps the row exact.
-        model = _model_by_id(config, gate_settings.base_model, "engine-gate base model")
         base, base_model = f"{config.name}/{model.name}", model.sha256[:12]
     return [
         saved["created_at_utc"], config.name, iteration.name, model_digest[:12],
@@ -1746,9 +1924,25 @@ def promote_gate(config: WorkflowConfig, iteration_name: str, *, apply: bool = F
     return _promote_gate(config, iteration_name, apply=False)
 
 
+def _require_archived_inputs(config: WorkflowConfig, iteration: IterationConfig) -> None:
+    """Require every trained model a gate's iteration used to be archived before it is."""
+    for model in trained_models_used(config, iteration):
+        model_id = _expected_model_id(model, f"iteration {iteration.name}")
+        directory = config.repository / MODEL_ARCHIVE_DIRECTORY
+        header = directory / f"{model_id}.hpp"
+        if not (header.is_file() and (directory / f"{model_id}.json").is_file() and
+                sha256_file(header) == model.sha256):
+            raise WorkflowError(
+                f"promote {model.iteration} first: {iteration.name} uses its model "
+                f"{model.name}, which is not archived under {MODEL_ARCHIVE_DIRECTORY}/; run "
+                f"promote-gate --apply {model.iteration} and commit the result")
+
+
 def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
                   apply: bool) -> dict[str, Any]:
+    config = resolve_trained_models(config)
     iteration = config.iteration(iteration_name)
+    _require_archived_inputs(config, iteration)
     candidate = authenticate_candidate(config, iteration)
     gate = authenticate_gate(config, iteration, candidate=candidate)
     saved_path = Path(gate["ledger_row"])

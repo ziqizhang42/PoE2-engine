@@ -209,11 +209,18 @@ class WorkflowProgress:
             self._write(f"{paint('✗', 'red', stream=self.stream)} {pretty_stage(stage)}  "
                         f"failed after {format_duration(elapsed)}: {error}")
 
-    def iteration_completed(self, name: str) -> None:
+    def _iteration_position(self, name: str) -> str:
         index = next(index for index, item in enumerate(self.config.iterations, 1)
                      if item.name == name)
+        return f"{index}/{len(self.config.iterations)}"
+
+    def iteration_completed(self, name: str) -> None:
         self._write(f"{paint('✓', 'green', stream=self.stream)} iteration "
-                    f"{index}/{len(self.config.iterations)}  {name}")
+                    f"{self._iteration_position(name)}  {name}")
+
+    def iteration_not_started(self, name: str, reason: str) -> None:
+        self._write(f"{paint('■', 'yellow', stream=self.stream)} iteration "
+                    f"{self._iteration_position(name)}  {name} not started: {reason}")
 
     def close(self, *, success: bool) -> None:
         if self._bar is None:

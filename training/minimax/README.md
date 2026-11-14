@@ -2,6 +2,8 @@
 
 For named datasets, resumable iterations, candidate-specific builds, and deliberate promotion, start with the [consolidated training workflow](../../docs/training-workflow.md). This document keeps the independently runnable lower-level experiment commands as references.
 
+Workflow recipes live in `recipes/`. `run1.toml` is a compact recipe: shared `[defaults]` plus one `[[generations]]` entry per model generation, each naming its `parent` and `seed`. One `poe2-train run` trains the generations in order, each taught by and gated against its parent straight from the run folder. A generation starts only after its parent's gate decides `accept_alt`, so a chain stops at the first generation that does not win; to go on, add a generation whose parent is an earlier winner. Gates are still recorded by hand, one generation at a time and parents first, with `promote-gate`. See [generations](../../docs/training-workflow.md#generations) for the full rules and the long form they expand into.
+
 This isolated uv project authenticates and memory-maps the deterministic minimax feature artifact. Python 3.14 is the primary interpreter, and PyTorch 2.12.1 is pinned to the ROCm 7.2 package index.
 
 ## Manual environment setup

@@ -10,7 +10,10 @@ import time
 from pathlib import Path
 
 from .workflow import (
+    BlockedIteration,
     WorkflowError,
+    blocked_iterations,
+    describe_not_started,
     handoff_candidate,
     print_plan,
     print_status,
@@ -28,6 +31,11 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "recipes" / "pilot.toml"
 
 def _human_or_plain(human: str, plain: str, *, stream=sys.stdout) -> None:
     print(human if is_interactive(stream) else plain, file=stream)
+
+
+def _print_not_started(blocked: list[BlockedIteration]) -> None:
+    for line in describe_not_started(blocked):
+        _human_or_plain(f"  {paint('■', 'yellow')} {line}", f"training_not_started {line}")
 
 
 def _config_argument(parser: argparse.ArgumentParser) -> None:
@@ -96,18 +104,22 @@ def main() -> int:
                 f"training_config_valid run={config.name} "
                 f"authenticated_artifacts={len(artifacts)} config={config.path}",
             )
+            _print_not_started(list(blocked_iterations(config).values()))
         elif arguments.command == "status":
             print_status(config, json_output=arguments.json)
         elif arguments.command == "run":
             started = time.perf_counter()
-            run_workflow(config)
+            not_started = run_workflow(config)
             elapsed = format_duration(time.perf_counter() - started)
+            outcome = "stopped" if not_started else "complete"
             _human_or_plain(
-                f"{paint('✓', 'green')} run complete  run={config.name}  "
-                f"elapsed={elapsed}  output={config.output_directory}",
-                f"training_run_complete run={config.name} elapsed={elapsed} "
+                f"{paint('■', 'yellow') if not_started else paint('✓', 'green')} run "
+                f"{outcome}  run={config.name}  elapsed={elapsed}  "
+                f"output={config.output_directory}",
+                f"training_run_{outcome} run={config.name} elapsed={elapsed} "
                 f"output={config.output_directory}",
             )
+            _print_not_started(not_started)
         elif arguments.command == "iteration":
             started = time.perf_counter()
             run_workflow(config, iteration_name=arguments.name,

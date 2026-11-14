@@ -1,0 +1,68 @@
+schema_version = 1
+
+[run]
+name = "run1"
+output_dir = "build/training-runs/run1"
+build_preset = "release"
+
+# Generations of this architecture. g000 is the v0.2 release model; each later generation
+# is trained on positions sampled and labeled by searches that use the generation before it.
+[models]
+g000 = "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3"
+
+[datasets.g001]
+kind = "managed"
+teacher = "g000"
+
+[datasets.g001.source]
+corpus_id = "poe2-run1-g001-v1"
+seed = 20261114
+trajectories = 40000
+samples_per_trajectory = 8
+shards = 160
+workers = 6
+search_nodes = 100000
+search_hash_mb = 16
+noise_percent = 15
+random_weight = 30
+greedy_weight = 20
+opponent_weight = 20
+search_weight = 30
+progress_every = 100
+
+[datasets.g001.labels]
+mode = "teacher"
+nodes = 5000000
+hash_mb = 16
+workers = 6
+progress_every = 100
+require_all = true
+
+[[iterations]]
+name = "g001"
+dataset = "g001"
+
+[iterations.training]
+type = "pattern"
+device = "cuda"
+seed = 20261114
+suite = "frozen-pattern-gain"
+
+[iterations.sealed_evaluation]
+
+[iterations.candidate_validation]
+promotable = true
+samples = 4096
+symmetry_samples = 512
+benchmark_iterations = 100
+opening_book = "eval/openings/development.txt"
+search_positions = 32
+search_movetime_ms = 100
+
+[iterations.engine_gate]
+base_model = "g000"
+opening_book = "eval/openings/holdout.txt"
+games = 2000
+workers = 6
+timeout_ms = 1000
+go_movetime_ms = 100

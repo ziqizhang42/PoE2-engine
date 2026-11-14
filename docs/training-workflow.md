@@ -11,7 +11,7 @@ run
     └── training -> sealed evaluation? -> candidate validation? -> engine gate?
 ```
 
-Each iteration prepares its dataset automatically. Dependencies may name earlier iterations and must be complete unless `--with-dependencies` is used.
+Each iteration prepares its dataset automatically. Dependencies may name earlier iterations and must be complete unless `--with-dependencies` is used. A run of model generations is usually written as a [compact recipe](#generations), which expands into these datasets and iterations.
 
 ## Quick start
 
@@ -47,13 +47,13 @@ On an interactive terminal, mutating commands show one colored tqdm stage bar wi
 
 Stages that reuse an existing complete artifact are labeled `authenticated`, so repeated dependency or exclusion preparation is distinguishable from artifact creation.
 
-`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. A completed gate also shows its recorded `gate_decision`. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
+`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. A completed gate also shows its recorded `gate_decision`, and a generation that is [not started](#chains) because an ancestor lost its gate shows as blocked with that reason; once every other iteration is complete, the run is `stopped`. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
 
 The candidate promotion sequence is:
 
 1. Commit a recipe whose candidate iteration includes an `engine_gate` table. A gate can also be added later in a compatible recipe revision, as long as that stage has not started.
 2. Run the iteration: training, candidate validation, and the gate. The gate builds the candidate's model header privately, so nothing in the source tree changes.
-3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision.
+3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision. A generation taught by or gated against a model trained in the same recipe can be promoted only after that model is archived, so promote a chain's generations in order.
 4. Review and commit the ledger row, archive, and index.
 5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed model header.
 
@@ -109,27 +109,102 @@ kind = "imported"
 path = "build/data/features/example/b-primitives"
 ```
 
-### Teachers and generations
+### Generations
 
-A managed dataset can name a teacher: an archived model whose learned evaluator drives the noisy-search positions and the labels. Without one, both use the two-ply-closure evaluator.
+A run trains one architecture over successive generations named `g000`, `g001`, …. `g000` is the run's starting model. Each later generation is trained on positions sampled and labeled by searches that use its parent's model, and is gated against its parent. A new run starts only when the architecture or a major setting changes. Offline metrics compare models only within one generation, because each generation's labels come from a different teacher; games compare generations.
+
+A run is most simply written as a compact recipe: shared defaults plus one short entry per generation.
 
 ```toml
-[models]
-g000 = "candidate-sha256-<header digest>"
+schema_version = 1
 
-[datasets.g001]
-kind = "managed"
-teacher = "g000"
+[run]
+name = "run1"
+output_dir = "build/training-runs/run1"
+build_preset = "release"
+
+[defaults.source]
+trajectories = 40000
+shards = 160
+workers = 6
+search_nodes = 100000
+
+[defaults.labels]
+mode = "teacher"
+nodes = 5000000
+workers = 6
+
+[defaults.training]
+type = "pattern"
+device = "cuda"
+suite = "frozen-pattern-gain"
+
+[defaults.sealed_evaluation]
+
+[defaults.candidate_validation]
+promotable = true
+
+[defaults.engine_gate]
+games = 2000
+workers = 6
+
+[[generations]]
+name = "g000"
+model = "candidate-sha256-<v0.2 digest>"
+
+[[generations]]
+name = "g001"
+parent = "g000"
+seed = 20261114
+
+[[generations]]
+name = "g002"
+parent = "g001"
+seed = 20261115
+[generations.source]
+search_weight = 60
 ```
 
-Each `[models]` entry gives a recipe-local name to a model archived under `models/`. Loading the recipe requires the archived `.hpp` and `.json` to exist and the header to match its digest. The workflow builds a private data tool for each teacher under `<run>/build/teacher-<digest prefix>/`, with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the archived header, and passes `--evaluator pattern-gain` to position generation and labeling. Source, label, and feature authentication require the recorded evaluator and model digest to match the recipe. A teacher is part of the source and label stage fingerprints, so it cannot change once those stages start. Datasets without a teacher keep the fingerprints they had before teachers existed.
+A compact recipe is shorthand only. It expands into the long form described below before parsing, so its stages, fingerprints, and artifacts are exactly those of the equivalent long-form recipe; `run1.toml` was rewritten this way without changing a fingerprint. A recipe uses one form, not both.
 
-A run trains one architecture over successive generations named `g000`, `g001`, …. `g000` is the run's starting model, either imported or trained inside the run. Each later generation `gNNN` has a dataset taught by the generation before it, and its gate plays that generation with `base_model`. To start the next generation, promote the current one's gate so its model is archived, add it to `[models]` under the generation's own name, and append the new dataset and iteration in a compatible recipe revision. A `[models]` entry that shares an iteration's name must be the model that iteration produced. The workflow checks this once the iteration's candidate exists: when a run or `validate` starts, and before the entry is used as a teacher or gate base.
+- A generation with `model` is pinned: an archived model that this recipe does not train. It takes no other field.
+- Every other generation needs a `parent`, which names an earlier generation, and a `seed`. It becomes a dataset and an iteration, both named after the generation. The parent is the dataset's `teacher` and the gate's `base_model`.
+- `seed` is both the position-source seed and the training seed, and the corpus ID is `poe2-<run>-<generation>-v1`. A generation's own `[generations.source]` or `[generations.training]` can override either.
+- `[defaults.TABLE]` holds settings for any of `source`, `labels`, `features`, `training`, `sealed_evaluation`, `candidate_validation`, and `engine_gate`. A generation's `[generations.TABLE]` overrides them key by key. Defaults cannot set a corpus ID or seed, and no table sets a gate base. A table absent from both is omitted; every trained generation needs candidate validation and an engine gate.
+- Every trained generation is also a model of the recipe named after itself, so later generations can name it as their parent.
+
+#### Chains
+
+A generation whose parent is trained by the same recipe learns from the parent's candidate straight from the run folder, so one `poe2-train run` can train several generations unattended. The child starts only once the parent's gate is complete and its decision is `accept_alt`, authenticated as promote-gate authenticates a gate. The parent does not need to be promoted or archived first. The child's data tool is built from the parent's candidate header under `<run>/build/teacher-iteration-<parent>/`, and its gate builds the same header privately as its base, from the same commit as the candidate. Every manifest records the parent's model digest, as it does for an archived teacher.
+
+A child's stage fingerprints name its parent by iteration and by the fingerprint of the parent's gate stage, which the recipe alone determines, so `plan` works before the parent exists. The parent's actual model ID is locked as an input of the child's stages when they first start, like other upstream inputs.
+
+`poe2-train run` executes generations in order. When a gate ends with anything other than `accept_alt`, including the inconclusive `continue`, no generation that descends from it is started. The command still finishes normally and names the generation that did not win and the ones it did not start:
+
+```text
+■ run stopped  run=run1  elapsed=…
+  ■ g002 did not win its engine gate (decision accept_null); not started: g003, g004
+```
+
+`plan`, `status`, and `validate` show such generations as not started with the same reason, and `poe2-train iteration` refuses to run one. The number of generation entries in a recipe therefore sets how far a chain can go. To continue after a loss, append a generation whose parent is an earlier winner, with a new seed, in a compatible recipe revision:
+
+```toml
+[[generations]]
+name = "g004"
+parent = "g001"
+seed = 20261117
+```
+
+A generation that was never started can also be removed from the recipe; only started stages are locked. `poe2-train iteration NAME --with-dependencies` also runs the generations that NAME descends from.
+
+#### Long form
+
+The long form spells out every dataset and iteration. A managed dataset can name a teacher whose learned evaluator drives the noisy-search positions and the labels; without one, both use the two-ply-closure evaluator. A teacher and a gate's `base_model` name entries of `[models]`, which gives recipe-local names to two kinds of model:
 
 ```toml
 [models]
 g000 = "candidate-sha256-<v0.2 digest>"
-g001 = "candidate-sha256-<g001 digest>"
+g001 = { iteration = "g001" }
 
 [datasets.g002]
 kind = "managed"
@@ -141,7 +216,13 @@ dataset = "g002"
 
 [iterations.engine_gate]
 base_model = "g001"
-``` A new run starts only when the architecture or a major setting changes. Offline metrics compare models only within one generation, because each generation's labels come from a different teacher; games compare generations.
+```
+
+A model ID names a model archived under `models/`. Loading the recipe requires the archived `.hpp` and `.json` to exist and the header to match its digest. The workflow builds a private data tool for each archived teacher under `<run>/build/teacher-<digest prefix>/`, with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the archived header, and passes `--evaluator pattern-gain` to position generation and labeling. Source, label, and feature authentication require the recorded evaluator and model digest to match the recipe. A teacher is part of the source and label stage fingerprints, so it cannot change once those stages start. Datasets without a teacher keep the fingerprints they had before teachers existed.
+
+`{ iteration = "NAME" }` names the model that an earlier iteration of this recipe trains, used as described under [chains](#chains). That iteration must have an engine gate, only later iterations may use its model, and an entry may share a name only with its own iteration. Keep this reference after the model is promoted: replacing it with the archived ID would change the fingerprints of the stages that already used it.
+
+An archived `[models]` entry that shares an iteration's name must be the model that iteration produced. The workflow checks this once the iteration's candidate exists: when a run or `validate` starts, and before the entry is used as a teacher or gate base.
 
 Baseline training uses `type = "baseline"` and accepts `device`, `seed`, `close_margin`, and `ridge_lambdas`. Pattern suites are `default`, `frozen-pattern-gain`, and `line-pattern-audit`.
 
@@ -194,7 +275,7 @@ The candidate side is fixed to `minimax/poe2_minimax --evaluator pattern-gain`. 
 
 A gate sets exactly one base. `base` names an existing build ID, build directory, or engine binary. `base_model` names a `[models]` entry; the gate then builds that archived header privately under `engine-gate/builds/<model ID>/` from the same commit as the candidate, so both sides differ only in their weights. The ledger records the base's `base_id` as that model ID. A gate cannot use its own candidate as its base.
 
-Every valid gate completes and records its sequential decision, including `accept_null` and `continue`, so a gate that does not show a win can still be promoted to the ledger and archived. Only handoff requires a win.
+Every valid gate completes and records its sequential decision, including `accept_null` and `continue`, so a gate that does not show a win can still be promoted to the ledger and archived. Only handoff, and a [chain](#chains) continuing past the gate, require a win.
 
 When `label_concurrency` is omitted, label processes are sized as:
 
@@ -234,6 +315,8 @@ uv run --frozen poe2-train promote-gate --config "$CONFIG" "$ITERATION" --apply
 ```
 
 Promotion requires a clean tree and the run lock. It authenticates the saved row against the gate manifest and summary, validates the master schema, coordinates with native ledger writers, and rejects duplicate run IDs before appending to `eval/results.csv`.
+
+A generation whose teacher or gate base is a model trained by the same recipe is promoted only after that model is archived, so every archived model's teacher is archived too. Promote a chain in generation order, committing each result before the next. Recording stays manual: a chain that ran unattended is promoted afterwards, one generation at a time.
 
 Promotion also archives the gated model, whether it won or not, in two files named by its build identity:
 

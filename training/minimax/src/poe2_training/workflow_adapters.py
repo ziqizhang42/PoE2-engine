@@ -24,6 +24,7 @@ from .workflow_config import (
     IterationConfig,
     ManagedDatasetConfig,
     WorkflowConfig,
+    recorded_gate_settings,
 )
 
 
@@ -67,10 +68,17 @@ def _require_report_layout(directory: Path, label: str,
 
 def data_build_directory(config: WorkflowConfig,
                          dataset: ManagedDatasetConfig | None = None) -> Path:
-    """Return the run-local build tree, private to the dataset's teacher model when it has one."""
+    """Return the run-local build tree, private to the dataset's teacher model when it has one.
+
+    A teacher this recipe trains is named by its iteration, so the plan knows the path before
+    the model exists; the binary still embeds and is checked against the model digest.
+    """
     root = config.output_directory / "build"
     if dataset is not None and dataset.teacher is not None:
-        root = root / f"teacher-{dataset.teacher.sha256[:12]}"
+        teacher = dataset.teacher
+        name = (teacher.sha256[:12] if teacher.iteration is None else
+                f"iteration-{teacher.iteration}")
+        root = root / f"teacher-{name}"
     return root / config.build_preset
 
 
@@ -99,20 +107,32 @@ def gate_build_directory(config: WorkflowConfig, iteration: IterationConfig,
             config.build_preset)
 
 
+def gate_base_model_id(config: WorkflowConfig, iteration: IterationConfig) -> str | None:
+    """Return the model ID a gate's base is built from, or None for an existing build base."""
+    gate = iteration.engine_gate
+    _require(gate is not None, "iteration has no engine gate")
+    if gate.base_iteration is None:
+        return gate.base_model
+    model = config.trained_model(gate.base_iteration)
+    _require(model.model_id is not None,
+             f"engine-gate base {model.name} has no accepted candidate from iteration "
+             f"{gate.base_iteration}")
+    return model.model_id
+
+
 def gate_base_build_directory(config: WorkflowConfig, iteration: IterationConfig) -> Path:
     """Return the private build of a gate's base model, in the layout the build-ID reader names."""
-    gate = iteration.engine_gate
-    _require(gate is not None and gate.base_model is not None, "gate has no base model")
-    return iteration.gate_directory / "builds" / gate.base_model / config.build_preset
+    model_id = gate_base_model_id(config, iteration)
+    _require(model_id is not None, "gate has no base model")
+    return iteration.gate_directory / "builds" / model_id / config.build_preset
 
 
 def gate_base_input(config: WorkflowConfig, iteration: IterationConfig) -> str:
     """Return the evaluator --base argument: an existing build or the base model's private build."""
     gate = iteration.engine_gate
     _require(gate is not None, "iteration has no engine gate")
-    if gate.base_model is not None:
+    if gate.base is None:
         return str(gate_base_build_directory(config, iteration))
-    assert gate.base is not None
     return gate.base
 
 
@@ -120,10 +140,9 @@ def gate_base_binary(config: WorkflowConfig, iteration: IterationConfig) -> Path
     """Return the base engine a gate plays; a base model's build exists only once the gate ran."""
     gate = iteration.engine_gate
     _require(gate is not None, "iteration has no engine gate")
-    if gate.base_model is not None:
+    if gate.base is None:
         return (gate_base_build_directory(config, iteration) / "engines" /
                 gate.base_engine).resolve()
-    assert gate.base is not None
     return resolve_eval_binary(config, gate.base, gate.base_engine)
 
 
@@ -413,7 +432,13 @@ def recorded_teacher(search: dict[str, Any], label: str) -> str | None:
 
 
 def _expected_teacher(dataset: ManagedDatasetConfig) -> str | None:
-    return None if dataset.teacher is None else dataset.teacher.model_id
+    teacher = dataset.teacher
+    if teacher is None:
+        return None
+    _require(teacher.model_id is not None,
+             f"dataset {dataset.name} has teacher {teacher.name}, which iteration "
+             f"{teacher.iteration}'s engine gate has not accepted")
+    return teacher.model_id
 
 
 def authenticate_source(dataset: ManagedDatasetConfig) -> dict[str, Any]:
@@ -455,7 +480,7 @@ def authenticate_source(dataset: ManagedDatasetConfig) -> dict[str, Any]:
     }
     # Stage statistics feed later stages' input fingerprints, so teacher-less runs keep their shape.
     if dataset.teacher is not None:
-        stats["teacher"] = dataset.teacher.model_id
+        stats["teacher"] = _expected_teacher(dataset)
     return stats
 
 
@@ -502,7 +527,7 @@ def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[
         "workers_requested": search.get("workers_requested"),
         "workers_used": search.get("workers_used"),
         "git_commit": build["git_commit"],
-        **({} if dataset.teacher is None else {"teacher": dataset.teacher.model_id}),
+        **({} if dataset.teacher is None else {"teacher": _expected_teacher(dataset)}),
     }
 
 
@@ -772,7 +797,7 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
     _require(names == {"COMPLETE", "report.json", "builds", "runs"},
              f"engine gate has unexpected output files: {iteration.gate_directory}")
     gate = iteration.engine_gate
-    expected_settings = asdict(gate)
+    expected_settings = recorded_gate_settings(gate)
     expected_settings["opening_book"] = str(gate.opening_book)
     _require(report.get("settings") == expected_settings,
              "engine-gate settings differ from configuration")
@@ -834,10 +859,11 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
     manifest = _manifest(run_path / "manifest.json")
     summary = _manifest(run_path / "summary.json")
     base_engine_path = gate_base_binary(config, iteration)
-    if gate.base_model is not None:
+    base_model_id = gate_base_model_id(config, iteration)
+    if base_model_id is not None:
         _require(iteration.gate_directory in base_engine_path.parents,
                  "engine-gate base model build escapes the gate directory")
-        _require(manifest.get("base_id") == gate.base_model,
+        _require(manifest.get("base_id") == base_model_id,
                  "engine-gate base build is not the configured base model")
     base_metadata = report.get("base_engine_artifact")
     _require(isinstance(base_metadata, dict) and
