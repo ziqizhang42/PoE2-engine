@@ -7,8 +7,9 @@ run
 ├── datasets
 │   ├── managed: source -> label shards -> features
 │   └── imported: authenticate and pin completed features
-└── iterations (TOML order)
-    └── training -> sealed evaluation? -> candidate validation? -> engine gate?
+├── iterations (TOML order)
+│   └── training -> sealed evaluation? -> candidate validation? -> engine gate?
+└── comparisons: a match between two models, once both exist
 ```
 
 Each iteration prepares its dataset automatically. Dependencies may name earlier iterations and must be complete unless `--with-dependencies` is used. A run of model generations is usually written as a [compact recipe](#generations), which expands into these datasets and iterations.
@@ -27,15 +28,18 @@ make train-run
 make train-status
 ```
 
-Run one iteration with Make or include incomplete dependencies through the CLI:
+Run one iteration or [comparison](#comparisons) with Make, or include incomplete dependencies through the CLI:
 
 ```bash
 make train-iteration TRAIN_ITERATION=ITERATION_NAME
+make train-comparison TRAIN_COMPARISON=COMPARISON_NAME
 
 cd training/minimax
 CONFIG=recipes/RECIPE_NAME.toml
 uv run --frozen poe2-train iteration --config "$CONFIG" \
   ITERATION_NAME --with-dependencies
+uv run --frozen poe2-train comparison --config "$CONFIG" \
+  COMPARISON_NAME --with-dependencies
 uv run --frozen poe2-train status --config "$CONFIG" --json
 ```
 
@@ -47,7 +51,7 @@ On an interactive terminal, mutating commands show one colored tqdm stage bar wi
 
 Stages that reuse an existing complete artifact are labeled `authenticated`, so repeated dependency or exclusion preparation is distinguishable from artifact creation.
 
-`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. A completed gate also shows its recorded `gate_decision`, and a generation that is [not started](#chains) because an ancestor lost its gate shows as blocked with that reason; once every other iteration is complete, the run is `stopped`. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
+`status` prints the same ordered iteration graph, an overall stage bar, and cumulative recorded stage time. A completed gate or comparison also shows its recorded decision. A generation that is [not started](#chains) because an ancestor lost its gate shows as blocked with that reason, as does a comparison of a model that is never trained; once all other work is complete, the run is `stopped`. `status --json` remains undecorated and machine-readable. Redirected output is compact one-line stage reporting without ANSI control sequences.
 
 The candidate promotion sequence is:
 
@@ -228,6 +232,36 @@ Baseline training uses `type = "baseline"` and accepts `device`, `seed`, `close_
 
 Iteration dependencies enforce ordering and authentication only; they never copy a selected model or settings into a later iteration. The exploratory suites report their own validation winner, while `frozen-pattern-gain` always trains the fixed engine-compatible deployment contract. A recipe containing both roles is therefore a reproducibility and audit pipeline, not an automatic nested model-selection pipeline.
 
+### Comparisons
+
+A comparison plays two models of the recipe against each other, separately from any gate. Typical uses are the newest generation against the starting model, and a generation that lost to its parent against an older generation. Each side names a `[models]` entry, archived or trained by the recipe; in a compact recipe, each names a generation.
+
+```toml
+[[comparisons]]
+new = "g003"
+base = "g000"
+
+[[comparisons]]
+name = "g002-vs-g000-long"
+new = "g002"
+base = "g000"
+games = 4000
+```
+
+`name` defaults to `NEW-vs-BASE`. An entry takes the engine gate's match settings: `opening_book`, `games`, `workers`, `timeout_ms`, `go_movetime_ms`, `opening_seed`, and the `sequential_*` bounds. In a compact recipe it starts from `[defaults.engine_gate]` and overrides it key by key, which expands into the same long-form entry; in a long-form recipe, unset settings take the gate's defaults. Both sides always run `minimax/poe2_minimax --evaluator pattern-gain`, so the four engine fields may be given only with those values. Comparing a model with itself, by name or by model ID, is rejected.
+
+A side trained by the recipe needs only its iteration's authenticated, promotable candidate. Its own gate does not have to accept it, because comparing a generation that lost is a fair question. The result goes under `<run>/comparisons/<name>/` and is laid out like a gate: both models are built privately at the same commit under `builds/<model ID>/`, the evaluator run is under `runs/`, and the result is create-only, authenticated before reuse, and discarded if a pause interrupts it. Comparison builds skip the test suite, which each candidate's gate already ran.
+
+`poe2-train run` plays each comparison as soon as both of its models exist, checking before the first iteration and after each one. Comparisons play in recipe order, one at a time and never alongside other work, because matches are timed. If a side is never trained, because its generation is not started after a lost gate, the comparison is not started either. `plan`, `status`, and `validate` show it with the reason, and `run` skips it without an error:
+
+```text
+  ■ g002 did not win its engine gate (decision accept_null); not started: g003, comparison g003-vs-g000
+```
+
+`poe2-train comparison NAME` plays one comparison, and `--with-dependencies` first runs the iterations that train its models.
+
+A comparison is its own stage. Its fingerprint covers its match settings and both models' identities. An archived model is identified by its ID. A trained model is identified by its iteration and the fingerprint of that iteration's candidate-validation stage, which the recipe alone determines. The actual model IDs are locked as inputs when the comparison first starts. Adding or removing a comparison that has not started changes no other stage's fingerprint; like any stage, a started one cannot change or be removed. A comparison never decides whether a chain continues and never makes a model installable.
+
 ### Optional pattern stages
 
 Sealed evaluation can exclude positions found in other named datasets:
@@ -294,7 +328,8 @@ Every mutating command holds `<run>/.orchestrator.lock`. Accepted TOML revisions
 ├── logs/<stage>/attempt-...
 ├── build/<preset>/
 ├── datasets/<name>/{source-chunks,source,labels/shards,features}
-└── iterations/<name>/{training/{report.json,training-metrics.svg},sealed-evaluation,candidate,engine-gate}
+├── iterations/<name>/{training/{report.json,training-metrics.svg},sealed-evaluation,candidate,engine-gate}
+└── comparisons/<name>/{builds/<model ID>,runs}
 ```
 
 Build trees are private to each run or candidate. Once a stage starts, its configuration and input digests cannot change or be removed; unstarted stages and new iterations may be added in a later compatible recipe revision.
@@ -345,6 +380,29 @@ The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so eve
 The archive and the index row are written before the ledger row, so an interrupted promotion can be retried. Existing archive files and index rows are reused only if they match exactly; otherwise promotion stops.
 
 An archived model can be rebuilt for analysis or a later re-gate by configuring a build with `-DPOE2_MINIMAX_MODEL_HEADER=models/candidate-sha256-<header digest>.hpp`.
+
+## Comparison recording
+
+`record-comparison` previews or records a finished comparison, like promote-gate:
+
+```bash
+uv run --frozen poe2-train record-comparison --config "$CONFIG" COMPARISON_NAME
+uv run --frozen poe2-train record-comparison --config "$CONFIG" COMPARISON_NAME --apply
+```
+
+Both models must already be in the `models/` archive, so every hash in the record resolves. Promote the gate of each trained side first; promote-gate archives a model whatever its decision. Recording authenticates the comparison and its saved ledger row the way promote-gate checks a gate. It then appends a row to the tracked `models/comparisons.csv` and the ledger row to `eval/results.csv` with kind `training-comparison`. Like promote-gate, it requires a clean tree and the run lock, rejects a run ID already in the ledger, and reuses an identical index row on a retry. Review and commit both files.
+
+| Column | Meaning |
+|---|---|
+| `recorded_utc` | When the match started, from its manifest |
+| `run`, `comparison` | The recipe run and the comparison's name |
+| `new`, `base` | Each side's run-scoped name, such as `run1/g003` |
+| `new_model`, `base_model` | The first 12 hex digits of each model's header digest |
+| `decision` | The sequential decision for `new` against `base` |
+| `games`, `score_pct` | Games played and `new`'s score, counting a no-winner game as half |
+| `run_id` | The ledger row's `run_id` |
+
+`models/index.csv` stays one row per promoted gate. The ledger convention that the newest accepted gate is the champion applies to gate rows (kind `training-gate`), not to comparison rows (kind `training-comparison`): a comparison that ends in `accept_alt` does not make its new model the champion.
 
 ## Candidate handoff
 

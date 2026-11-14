@@ -218,9 +218,13 @@ class WorkflowProgress:
         self._write(f"{paint('✓', 'green', stream=self.stream)} iteration "
                     f"{self._iteration_position(name)}  {name}")
 
-    def iteration_not_started(self, name: str, reason: str) -> None:
-        self._write(f"{paint('■', 'yellow', stream=self.stream)} iteration "
-                    f"{self._iteration_position(name)}  {name} not started: {reason}")
+    def comparison_completed(self, name: str) -> None:
+        self._write(f"{paint('✓', 'green', stream=self.stream)} comparison {name}")
+
+    def not_started(self, kind: str, name: str, reason: str) -> None:
+        where = f"iteration {self._iteration_position(name)} " if kind == "iteration" else kind
+        self._write(f"{paint('■', 'yellow', stream=self.stream)} {where} {name} "
+                    f"not started: {reason}")
 
     def close(self, *, success: bool) -> None:
         if self._bar is None:

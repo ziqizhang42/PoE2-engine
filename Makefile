@@ -26,7 +26,7 @@ SEQUENTIAL_ALT ?= 20
 SEQUENTIAL_ALPHA ?= 0.05
 SEQUENTIAL_BETA ?= 0.05
 
-.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release release-package release-verify training-test train-plan train-validate train-status train-run train-iteration wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
+.PHONY: configure build test format format-check tidy tidy-fix fix check full-check ready clean debug release release-package release-verify training-test train-plan train-validate train-status train-run train-iteration train-comparison wasm-configure wasm-build wasm-test require-clean git-configure git-build git-test require-base require-eval-engines eval-gate eval-smoke
 
 TRAIN_CONFIG ?= training/minimax/recipes/pilot.toml
 TRAIN_ITERATION ?=
@@ -113,6 +113,11 @@ train-iteration:
 	@test -n "$(TRAIN_ITERATION)" || \
 	  (echo "TRAIN_ITERATION=<name> is required" >&2; exit 1)
 	cd training/minimax && uv run --frozen poe2-train iteration --config $(abspath $(TRAIN_CONFIG)) $(TRAIN_ITERATION)
+
+train-comparison:
+	@test -n "$(TRAIN_COMPARISON)" || \
+	  (echo "TRAIN_COMPARISON=<name> is required" >&2; exit 1)
+	cd training/minimax && uv run --frozen poe2-train comparison --config $(abspath $(TRAIN_CONFIG)) $(TRAIN_COMPARISON)
 
 wasm-configure:
 	cmake --preset wasm-release

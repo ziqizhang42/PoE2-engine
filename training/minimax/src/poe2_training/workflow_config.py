@@ -7,7 +7,7 @@ import json
 import math
 import re
 import tomllib
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -156,14 +156,13 @@ class CandidateValidationConfig:
 
 
 @dataclass(frozen=True)
-class EngineGateConfig:
-    # Exactly one of base (an existing build), base_model (an archived model ID), and
-    # base_iteration (an earlier iteration whose accepted candidate is the base) is set.
-    base: str | None
+class MatchConfig:
+    """Settings of one timed match between two engines: a gate or a comparison."""
+
     new_engine: str = CANDIDATE_ENGINE
-    base_engine: str = "minimax/poe2_minimax"
+    base_engine: str = CANDIDATE_ENGINE
     new_engine_args: str = CANDIDATE_ENGINE_ARGS
-    base_engine_args: str = "--evaluator pattern-gain"
+    base_engine_args: str = CANDIDATE_ENGINE_ARGS
     opening_book: Path = Path("eval/openings/holdout.txt")
     games: int = 2000
     workers: int = 1
@@ -175,8 +174,32 @@ class EngineGateConfig:
     sequential_alt: float = 20.0
     sequential_alpha: float = 0.05
     sequential_beta: float = 0.05
+
+
+MATCH_FIELDS = frozenset(item.name for item in fields(MatchConfig))
+
+
+def match_settings(settings: MatchConfig) -> dict[str, Any]:
+    return {name: value for name, value in asdict(settings).items() if name in MATCH_FIELDS}
+
+
+@dataclass(frozen=True, kw_only=True)
+class EngineGateConfig(MatchConfig):
+    # Exactly one of base (an existing build), base_model (an archived model ID), and
+    # base_iteration (an earlier iteration whose accepted candidate is the base) is set.
+    base: str | None
     base_model: str | None = None
     base_iteration: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ComparisonConfig(MatchConfig):
+    """A match between two [models] entries, apart from any iteration's gate."""
+
+    name: str
+    new: str
+    base: str
+    root: Path
 
 
 def recorded_gate_settings(gate: EngineGateConfig) -> dict[str, Any]:
@@ -232,6 +255,7 @@ class WorkflowConfig:
     datasets: tuple[DatasetConfig, ...]
     iterations: tuple[IterationConfig, ...]
     models: tuple[ModelReference, ...] = ()
+    comparisons: tuple[ComparisonConfig, ...] = ()
 
     def dataset(self, name: str) -> DatasetConfig:
         for dataset in self.datasets:
@@ -244,6 +268,18 @@ class WorkflowConfig:
             if iteration.name == name:
                 return iteration
         raise WorkflowConfigError(f"unknown iteration: {name}")
+
+    def comparison(self, name: str) -> ComparisonConfig:
+        for comparison in self.comparisons:
+            if comparison.name == name:
+                return comparison
+        raise WorkflowConfigError(f"unknown comparison: {name}")
+
+    def model(self, name: str) -> ModelReference:
+        for model in self.models:
+            if model.name == name:
+                return model
+        raise WorkflowConfigError(f"unknown model: {name}")
 
     def trained_model(self, iteration: str) -> ModelReference:
         """Return the [models] entry for the model that one iteration of this recipe trains."""
@@ -509,23 +545,9 @@ def _parse_candidate(repository: Path, value: Any, field: str) -> CandidateValid
     )
 
 
-def _parse_gate(repository: Path, value: Any, field: str,
-                models: dict[str, ModelReference]) -> EngineGateConfig:
-    table = _table(value, field)
-    allowed = {"base", "base_model", "new_engine", "base_engine", "new_engine_args",
-               "base_engine_args", "opening_book", "games", "workers", "timeout_ms",
-               "go_movetime_ms", "opening_seed", "sequential_stop", "sequential_null",
-               "sequential_alt", "sequential_alpha", "sequential_beta"}
-    _unknown(table, allowed, field)
-    _require(("base" in table) != ("base_model" in table),
-             f"{field} must set exactly one of base and base_model")
-    base_model = base_iteration = None
-    if "base_model" in table:
-        model_name = _string(table, "base_model", field)
-        _require(model_name in models,
-                 f"{field}.base_model must name an entry in config.models: {model_name}")
-        base_model = models[model_name].model_id
-        base_iteration = models[model_name].iteration
+def _parse_match(repository: Path, output: Path, table: dict[str, Any],
+                 field: str) -> dict[str, Any]:
+    """Return validated MatchConfig settings; the new side always runs the pattern-gain engine."""
     seed = table.get("opening_seed")
     if seed is not None:
         _require(isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0,
@@ -543,6 +565,8 @@ def _parse_gate(repository: Path, value: Any, field: str,
         f"{field}.opening_book")
     _require(opening_book.is_file(),
              f"{field}.opening_book is not a file: {opening_book}")
+    _require(output != opening_book and output not in opening_book.parents,
+             f"{field}.opening_book must be outside the run root")
     new_engine = _binary_name(
         _string(table, "new_engine", field, CANDIDATE_ENGINE),
         f"{field}.new_engine")
@@ -554,27 +578,67 @@ def _parse_gate(repository: Path, value: Any, field: str,
     _require(new_engine_args == CANDIDATE_ENGINE_ARGS,
              f"{field}.new_engine_args must be {CANDIDATE_ENGINE_ARGS!r} so the gate "
              "runs the candidate evaluator")
+    games = _integer(table, "games", field, 2000, minimum=2)
+    _require(games % 2 == 0, f"{field}.games must be even")
+    return {
+        "new_engine": new_engine,
+        "base_engine": _binary_name(
+            _string(table, "base_engine", field, CANDIDATE_ENGINE), f"{field}.base_engine"),
+        "new_engine_args": new_engine_args,
+        "base_engine_args": _string(table, "base_engine_args", field, CANDIDATE_ENGINE_ARGS,
+                                    nonempty=False),
+        "opening_book": opening_book,
+        "games": games,
+        "workers": _integer(table, "workers", field, 1, minimum=1),
+        "timeout_ms": _integer(table, "timeout_ms", field, 1000, minimum=1),
+        "go_movetime_ms": _integer(table, "go_movetime_ms", field, 100, minimum=1),
+        "opening_seed": seed,
+        "sequential_stop": _boolean(table, "sequential_stop", field, True),
+        "sequential_null": sequential_null,
+        "sequential_alt": sequential_alt,
+        "sequential_alpha": alpha, "sequential_beta": beta,
+    }
+
+
+def _parse_gate(repository: Path, output: Path, value: Any, field: str,
+                models: dict[str, ModelReference]) -> EngineGateConfig:
+    table = _table(value, field)
+    _unknown(table, {"base", "base_model", *MATCH_FIELDS}, field)
+    _require(("base" in table) != ("base_model" in table),
+             f"{field} must set exactly one of base and base_model")
+    base_model = base_iteration = None
+    if "base_model" in table:
+        model_name = _string(table, "base_model", field)
+        _require(model_name in models,
+                 f"{field}.base_model must name an entry in config.models: {model_name}")
+        base_model = models[model_name].model_id
+        base_iteration = models[model_name].iteration
     return EngineGateConfig(
         base=_string(table, "base", field) if "base" in table else None,
         base_model=base_model, base_iteration=base_iteration,
-        new_engine=new_engine,
-        base_engine=_binary_name(
-            _string(table, "base_engine", field, "minimax/poe2_minimax"),
-            f"{field}.base_engine"),
-        new_engine_args=new_engine_args,
-        base_engine_args=_string(table, "base_engine_args", field,
-                                 "--evaluator pattern-gain", nonempty=False),
-        opening_book=opening_book,
-        games=_integer(table, "games", field, 2000, minimum=2),
-        workers=_integer(table, "workers", field, 1, minimum=1),
-        timeout_ms=_integer(table, "timeout_ms", field, 1000, minimum=1),
-        go_movetime_ms=_integer(table, "go_movetime_ms", field, 100, minimum=1),
-        opening_seed=seed,
-        sequential_stop=_boolean(table, "sequential_stop", field, True),
-        sequential_null=sequential_null,
-        sequential_alt=sequential_alt,
-        sequential_alpha=alpha, sequential_beta=beta,
+        **_parse_match(repository, output, table, field),
     )
+
+
+def _parse_comparison(repository: Path, output: Path, value: Any, field: str,
+                      models: dict[str, ModelReference]) -> ComparisonConfig:
+    table = _table(value, field)
+    _unknown(table, {"name", "new", "base", *MATCH_FIELDS}, field)
+    new, base = (_string(table, side, field) for side in ("new", "base"))
+    for side, model in (("new", new), ("base", base)):
+        _require(model in models, f"{field}.{side} must name an entry in config.models: {model}")
+    _require(new != base and (models[new].model_id is None or
+                              models[new].model_id != models[base].model_id),
+             f"{field} compares {new} with the same model")
+    for name, fixed in (("new_engine", CANDIDATE_ENGINE), ("base_engine", CANDIDATE_ENGINE),
+                        ("new_engine_args", CANDIDATE_ENGINE_ARGS),
+                        ("base_engine_args", CANDIDATE_ENGINE_ARGS)):
+        _require(table.get(name, fixed) == fixed,
+                 f"{field}.{name} must be {fixed!r}; a comparison plays both models with the "
+                 "pattern-gain engine")
+    name = _name(_string(table, "name", field, f"{new}-vs-{base}"), f"{field}.name")
+    return ComparisonConfig(name=name, new=new, base=base, root=output / "comparisons" / name,
+                            **_parse_match(repository, output, table, field))
 
 
 LONG_FORM_KEYS = {"models", "datasets", "iterations"}
@@ -612,7 +676,7 @@ def expand_generations(document: dict[str, Any]) -> dict[str, Any]:
     _require(not mixed,
              "a recipe is either long-form ([models], [datasets], [[iterations]]) or compact "
              f"([defaults], [[generations]]); this one also sets {', '.join(mixed)}")
-    _unknown(document, {"schema_version", "run", *COMPACT_KEYS}, "config")
+    _unknown(document, {"schema_version", "run", "comparisons", *COMPACT_KEYS}, "config")
     run = _table(document.get("run"), "config.run")
     run_name = _string(run, "name", "config.run")
     defaults = _table(document.get("defaults", {}), "config.defaults")
@@ -659,7 +723,22 @@ def expand_generations(document: dict[str, Any]) -> dict[str, Any]:
         iterations.append(iteration)
     _require(bool(iterations), "config.generations must include a generation with a parent")
     return {"schema_version": document.get("schema_version"), "run": run,
-            "models": models, "datasets": datasets, "iterations": iterations}
+            "models": models, "datasets": datasets, "iterations": iterations,
+            "comparisons": _generation_comparisons(document, defaults, models)}
+
+
+def _generation_comparisons(document: dict[str, Any], defaults: dict[str, Any],
+                            generations: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expand compact comparisons, which play like the gates unless an entry overrides them."""
+    entries = document.get("comparisons", [])
+    _require(isinstance(entries, list) and all(isinstance(item, dict) for item in entries),
+             "config.comparisons must be an array of tables")
+    for index, entry in enumerate(entries):
+        for side in ("new", "base"):
+            name = _string(entry, side, f"config.comparisons[{index}]")
+            _require(name in generations,
+                     f"config.comparisons[{index}].{side} must name a generation: {name}")
+    return [{**defaults.get("engine_gate", {}), **entry} for entry in entries]
 
 
 def _check_trained_models(config: WorkflowConfig) -> None:
@@ -700,7 +779,8 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
     _require(repository is not None, f"config is not inside a Git repository: {config_path}")
     if COMPACT_KEYS & set(document):
         document = expand_generations(document)
-    _unknown(document, {"schema_version", "run", "models", "datasets", "iterations"}, "config")
+    _unknown(document, {"schema_version", "run", "models", "datasets", "iterations",
+                        "comparisons"}, "config")
     _require(document.get("schema_version") == SCHEMA_VERSION,
              f"config.schema_version must be {SCHEMA_VERSION}")
 
@@ -793,7 +873,7 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         candidate = (_parse_candidate(repository, table["candidate_validation"],
                                       f"{field}.candidate_validation")
                      if "candidate_validation" in table else None)
-        gate = (_parse_gate(repository, table["engine_gate"], f"{field}.engine_gate",
+        gate = (_parse_gate(repository, output, table["engine_gate"], f"{field}.engine_gate",
                             models_by_name)
                 if "engine_gate" in table else None)
         if sealed is not None:
@@ -815,9 +895,6 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
                      f"{field}.engine_gate requires candidate_validation")
             _require(candidate.promotable,
                      f"{field}.engine_gate requires a promotable candidate")
-            _require(gate.games % 2 == 0, f"{field}.engine_gate.games must be even")
-            _require(output != gate.opening_book and output not in gate.opening_book.parents,
-                     f"{field}.engine_gate.opening_book must be outside the run root")
         iterations.append(IterationConfig(
             name=name, dataset=dataset_name, depends_on=dependencies,
             root=output / "iterations" / name, training=training,
@@ -840,11 +917,22 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
     _require(not unreferenced,
              "config.datasets contains unreferenced dataset(s): " + ", ".join(unreferenced))
 
+    raw_comparisons = document.get("comparisons", [])
+    _require(isinstance(raw_comparisons, list),
+             "config.comparisons must be an array of tables")
+    comparisons = [_parse_comparison(repository, output, value, f"config.comparisons[{index}]",
+                                     models_by_name)
+                   for index, value in enumerate(raw_comparisons)]
+    names = [comparison.name for comparison in comparisons]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    _require(not repeated, f"comparison name is repeated: {', '.join(repeated)}")
+
     config = WorkflowConfig(
         path=config_path, contents=contents, digest=hashlib.sha256(contents).hexdigest(),
         repository=repository, name=run_name, output_directory=output,
         build_preset=preset, label_concurrency=label_concurrency,
         datasets=tuple(datasets), iterations=tuple(iterations), models=models,
+        comparisons=tuple(comparisons),
     )
     _check_trained_models(config)
     return config
@@ -950,6 +1038,20 @@ def _iteration_definitions(config: WorkflowConfig, iteration: IterationConfig,
             result[stage_id]["base"] = _trained_model_definition(result, gate.base_iteration)
 
 
+def _model_identity(config: WorkflowConfig, result: dict[str, dict[str, Any]],
+                    name: str) -> Any:
+    """Identify a comparison side from the recipe alone: an archived ID or its candidate stage.
+
+    A trained side needs only its candidate, not an accepting gate, so the candidate stage
+    rather than the gate identifies it; the digest is locked as a run-time input.
+    """
+    model = config.model(name)
+    if model.iteration is None:
+        return model.model_id
+    return {"iteration": model.iteration, "candidate_validation": fingerprint(
+        result[f"iteration:{model.iteration}:candidate-validation"])}
+
+
 def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
     """Return normalized settings and upstream config fingerprints for every stage."""
     result: dict[str, dict[str, Any]] = {}
@@ -967,7 +1069,18 @@ def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
             if name in deferred:
                 _dataset_definitions(config, deferred.pop(name), result)
         _iteration_definitions(config, iteration, result)
+    for comparison in config.comparisons:
+        result[comparison_stage(comparison)] = {
+            "adapter": "comparison", "preset": config.build_preset,
+            "new": _model_identity(config, result, comparison.new),
+            "base": _model_identity(config, result, comparison.base),
+            "settings": match_settings(comparison),
+        }
     return result
+
+
+def comparison_stage(comparison: ComparisonConfig) -> str:
+    return f"comparison:{comparison.name}:match"
 
 
 def stage_fingerprints(config: WorkflowConfig) -> dict[str, str]:

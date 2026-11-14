@@ -10,14 +10,15 @@ import time
 from pathlib import Path
 
 from .workflow import (
-    BlockedIteration,
+    Blocked,
     WorkflowError,
-    blocked_iterations,
+    blocked_work,
     describe_not_started,
     handoff_candidate,
     print_plan,
     print_status,
     promote_gate,
+    record_comparison,
     run_workflow,
     validate_existing,
 )
@@ -33,7 +34,7 @@ def _human_or_plain(human: str, plain: str, *, stream=sys.stdout) -> None:
     print(human if is_interactive(stream) else plain, file=stream)
 
 
-def _print_not_started(blocked: list[BlockedIteration]) -> None:
+def _print_not_started(blocked: list[Blocked]) -> None:
     for line in describe_not_started(blocked):
         _human_or_plain(f"  {paint('■', 'yellow')} {line}", f"training_not_started {line}")
 
@@ -72,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="execute incomplete earlier iteration dependencies first",
     )
 
+    comparison = subparsers.add_parser("comparison", help="play one named comparison")
+    _config_argument(comparison)
+    comparison.add_argument("name", help="configured comparison name")
+    comparison.add_argument(
+        "--with-dependencies", action="store_true",
+        help="first execute the iterations that train its models",
+    )
+
     handoff = subparsers.add_parser(
         "handoff", help="preview or install a recorded gate winner's header")
     _config_argument(handoff)
@@ -86,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
     _iteration_argument(promote)
     promote.add_argument("--apply", action="store_true",
                          help="append the authenticated ledger row and archive the model")
+
+    record = subparsers.add_parser(
+        "record-comparison",
+        help="preview or record a finished comparison in eval/results.csv")
+    _config_argument(record)
+    record.add_argument("name", help="configured comparison name")
+    record.add_argument("--apply", action="store_true",
+                        help="append the authenticated ledger and comparison-index rows")
     return parser
 
 
@@ -104,7 +121,7 @@ def main() -> int:
                 f"training_config_valid run={config.name} "
                 f"authenticated_artifacts={len(artifacts)} config={config.path}",
             )
-            _print_not_started(list(blocked_iterations(config).values()))
+            _print_not_started(blocked_work(config))
         elif arguments.command == "status":
             print_status(config, json_output=arguments.json)
         elif arguments.command == "run":
@@ -131,6 +148,20 @@ def main() -> int:
                 f"training_iteration_complete run={config.name} "
                 f"iteration={arguments.name} elapsed={elapsed}",
             )
+        elif arguments.command == "comparison":
+            started = time.perf_counter()
+            run_workflow(config, comparison_name=arguments.name,
+                         with_dependencies=arguments.with_dependencies)
+            elapsed = format_duration(time.perf_counter() - started)
+            _human_or_plain(
+                f"{paint('✓', 'green')} comparison complete  run={config.name}  "
+                f"comparison={arguments.name}  elapsed={elapsed}",
+                f"training_comparison_complete run={config.name} "
+                f"comparison={arguments.name} elapsed={elapsed}",
+            )
+        elif arguments.command == "record-comparison":
+            result = record_comparison(config, arguments.name, apply=arguments.apply)
+            print(json.dumps(result, indent=2, sort_keys=True))
         elif arguments.command == "handoff":
             result = handoff_candidate(config, arguments.name, apply=arguments.apply)
             print(json.dumps(result, indent=2, sort_keys=True))

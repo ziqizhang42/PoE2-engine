@@ -7,6 +7,7 @@
 - 2026-11-14: The reproduction played even with `000074` (49.8% over 1,308 games, no difference), and its recipe was retired. v0.2 is generation `g000` of the next run.
 - 2026-11-14: Datasets can name an archived teacher model, which drives position sampling and labels and is recorded in every data manifest. v0.2 is archived as `g000`, and `run1` trains `g001` from it.
 - 2026-11-14: Recipes can be written compactly as shared defaults plus one short entry per generation, which expands into the same datasets, iterations, and fingerprints as the long form. A generation can learn from an earlier generation of the same recipe straight from the run folder once that parent wins its gate, so one `poe2-train run` trains a chain of generations and stops at the first that does not win. `run1.toml` now uses the compact form, with unchanged fingerprints.
+- 2026-11-14: Recipes can list comparisons between any two of their models, such as the newest generation against `g000` or a generation that lost to its parent against an older one. A run plays each comparison as soon as both models exist, and `record-comparison` records it in `eval/results.csv` as `training-comparison` and in the new `models/comparisons.csv`, apart from the gates that decide champions and chains.
 
 ## 0.2.0 - 2026-08-18
 

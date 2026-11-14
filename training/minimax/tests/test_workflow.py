@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from fixture import write_feature_fixture
+from test_workflow_generations import V02
 from poe2_training.pattern_suites import pattern_suite
 from poe2_training.shared import (
     complete_json_report,
@@ -32,11 +34,13 @@ from poe2_training.workflow import (
     CommandRunner,
     WorkflowRunner,
     WorkflowError,
+    _comparison_models,
     _dependency_order,
     check_model_lineage,
     handoff_candidate,
     print_status,
     promote_gate,
+    record_comparison,
     resolve_trained_models,
     resolved_label_concurrency,
     run_lock,
@@ -45,14 +49,18 @@ from poe2_training.workflow import (
 )
 from poe2_training.workflow_adapters import (
     CANDIDATE_SCHEMA,
+    COMPARISON_KIND,
+    COMPARISON_SCHEMA,
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
     authenticate_candidate,
+    authenticate_comparison,
     authenticate_features,
     authenticate_gate,
     authenticate_label_shard,
     authenticate_training,
     candidate_build_id,
+    comparison_side,
     data_binary,
     data_build_directory,
     engine_gate_command,
@@ -73,6 +81,7 @@ from poe2_training.workflow_config import (
     WorkflowConfigError,
     fingerprint,
     load_workflow_config,
+    match_settings,
     recorded_gate_settings,
     stage_definitions,
     stage_fingerprints,
@@ -1085,66 +1094,46 @@ class WorkflowPromotionTest(unittest.TestCase):
             "git", "-c", "user.name=Workflow Test", "-c", "user.email=test@example.invalid",
             "commit", "-qm", message], cwd=repository, check=True)
 
-    def _gate(self, *, manifest_base_path: str | None = None,
-              run_id: str = "workflow-promotion-test-run",
-              ledger_overrides: dict[str, str] | None = None,
-              decision: str = "accept_alt") -> tuple[list[str], list[str]]:
+    def _write_match_run(self, root: Path, settings, *, kind: str, new_id: str, base_id: str,
+                         new_engine_path: Path, base_engine_path: str, run_id: str,
+                         decision: str, ledger_overrides: dict[str, str] | None = None):
+        """Write one evaluator run under root/runs/one, as the native runner records it."""
         master = REPOSITORY / "eval" / "results.csv"
         with master.open(newline="", encoding="utf-8") as source:
             header = next(csv.reader(source))
         row = [""] * len(header)
         row[header.index("run_id")] = run_id
-        root = self.iteration.gate_directory
-        reserve_report_directory(root, GATE_SCHEMA)
-        header_digest = sha256_file(
-            self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp")
-        candidate_stats = {
-            "artifacts": {"model_header": {"sha256": header_digest}}}
-        build_id = candidate_build_id(candidate_stats)
-        build = gate_build_directory(self.config, self.iteration, candidate_stats)
-        new_engine_binary = build / "engines/minimax/poe2_minimax"
-        runner_binary = build / "runner/poe2_runner"
-        for path in (new_engine_binary, runner_binary):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(path.name, encoding="utf-8")
         run = root / "runs" / "one"
         run.mkdir(parents=True)
-        gate = self.iteration.engine_gate
-        assert gate is not None
-        base_engine = gate_base_binary(self.config, self.iteration)
-        base_model_id = gate_base_model_id(self.config, self.iteration)
-        if base_model_id is not None:
-            base_engine.parent.mkdir(parents=True, exist_ok=True)
-            base_engine.write_text("base model engine\n", encoding="utf-8")
         manifest = {
-            "run_id": row[header.index("run_id")],
+            "run_id": run_id,
             "created_at_utc": "20260819T000000Z", "valid": True,
-            "kind": "training-gate", "new_id": build_id,
-            "new_engine": gate.new_engine,
-            "new_engine_path": str(new_engine_binary.resolve()),
-            "new_engine_args": gate.new_engine_args, "base_engine": gate.base_engine,
-            "base_engine_args": gate.base_engine_args,
-            "base_engine_path": manifest_base_path or str(base_engine),
-            "base_id": base_model_id or "fixture-base",
-            "opening_book": str(gate.opening_book),
+            "kind": kind, "new_id": new_id,
+            "new_engine": settings.new_engine,
+            "new_engine_path": str(new_engine_path.resolve()),
+            "new_engine_args": settings.new_engine_args, "base_engine": settings.base_engine,
+            "base_engine_args": settings.base_engine_args,
+            "base_engine_path": base_engine_path,
+            "base_id": base_id,
+            "opening_book": str(settings.opening_book),
             "opening_book_digest": "fnv1a64:fixture", "opening_count": 1,
             "opening_seed": 123, "opening_seed_source": "derived",
             "opening_sampling": "deterministic_shuffle_without_replacement",
             "shuffle_openings": True, "unique_openings": 1,
-            "games": gate.games, "games_played": gate.games,
-            "workers_requested": gate.workers, "workers_used": 1,
+            "games": settings.games, "games_played": settings.games,
+            "workers_requested": settings.workers, "workers_used": 1,
             "games_discarded": 0, "invalid_reason": None,
-            "timeout_ms": gate.timeout_ms, "go_depth": None,
-            "go_movetime_ms": gate.go_movetime_ms, "go_nodes": None,
+            "timeout_ms": settings.timeout_ms, "go_depth": None,
+            "go_movetime_ms": settings.go_movetime_ms, "go_nodes": None,
             "analysis_version": 2, "statistical_unit": "opening_pair",
             "confidence_method": "paired_betting_confidence_sequence",
             "sequential_test_method": "paired_normalized_elo_gsprt",
-            "sequential_stop": gate.sequential_stop,
+            "sequential_stop": settings.sequential_stop,
             "sequential_bound_unit": "normalized_elo",
-            "sequential_null": gate.sequential_null,
-            "sequential_alt": gate.sequential_alt,
-            "sequential_alpha": gate.sequential_alpha,
-            "sequential_beta": gate.sequential_beta,
+            "sequential_null": settings.sequential_null,
+            "sequential_alt": settings.sequential_alt,
+            "sequential_alpha": settings.sequential_alpha,
+            "sequential_beta": settings.sequential_beta,
             "sequential_llr": 1.0, "sequential_lower_bound": -2.0,
             "sequential_upper_bound": 2.0, "normalized_elo": 20.0,
             "betting_log_evidence_above_even": 3.0,
@@ -1153,35 +1142,35 @@ class WorkflowPromotionTest(unittest.TestCase):
         }
         summary = {
             "analysis_version": 2, "valid": True, "invalid_reason": None,
-            "games_requested": gate.games, "games_played": gate.games,
-            "workers_requested": gate.workers, "workers_used": 1,
+            "games_requested": settings.games, "games_played": settings.games,
+            "workers_requested": settings.workers, "workers_used": 1,
             "games_discarded": 0, "unique_openings": 1,
-            "engine_one_wins": gate.games, "engine_two_wins": 0, "no_winner": 0,
+            "engine_one_wins": settings.games, "engine_two_wins": 0, "no_winner": 0,
             "statistical_unit": "opening_pair", "statistical_samples": 1,
-            "statistical_games": gate.games,
+            "statistical_games": settings.games,
             "statistical_score_rate_counts": {
                 "0": 0, "0.25": 0, "0.5": 0, "0.75": 0, "1": 1,
             },
         }
         ledger_values = {
             "created_at_utc": manifest["created_at_utc"],
-            "kind": "training-gate", "new_id": build_id,
-            "new_engine": gate.new_engine,
-            "new_engine_args": gate.new_engine_args, "base_id": manifest["base_id"],
-            "base_engine": gate.base_engine, "base_engine_args": gate.base_engine_args,
-            "games_requested": str(gate.games), "games_played": str(gate.games),
-            "engine_one_wins": str(gate.games), "engine_two_wins": "0", "no_winner": "0",
+            "kind": kind, "new_id": new_id,
+            "new_engine": settings.new_engine,
+            "new_engine_args": settings.new_engine_args, "base_id": manifest["base_id"],
+            "base_engine": settings.base_engine, "base_engine_args": settings.base_engine_args,
+            "games_requested": str(settings.games), "games_played": str(settings.games),
+            "engine_one_wins": str(settings.games), "engine_two_wins": "0", "no_winner": "0",
             "engine_one_score_pct": "100.000", "confidence_low_pct": "50.000",
             "confidence_high_pct": "100.000",
             "sequential_decision": manifest["sequential_decision"],
-            "sequential_null": str(gate.sequential_null),
-            "sequential_alt": str(gate.sequential_alt),
-            "opening_book": str(gate.opening_book),
+            "sequential_null": str(settings.sequential_null),
+            "sequential_alt": str(settings.sequential_alt),
+            "opening_book": str(settings.opening_book),
             "opening_book_digest": manifest["opening_book_digest"],
-            "opening_count": "1", "go_movetime_ms": str(gate.go_movetime_ms),
-            "timeout_ms": str(gate.timeout_ms), "run_dir": str(run.resolve()),
+            "opening_count": "1", "go_movetime_ms": str(settings.go_movetime_ms),
+            "timeout_ms": str(settings.timeout_ms), "run_dir": str(run.resolve()),
             "analysis_version": "2", "statistical_unit": "opening_pair",
-            "statistical_samples": "1", "statistical_games": str(gate.games),
+            "statistical_samples": "1", "statistical_games": str(settings.games),
             "pair_score_0": "0", "pair_score_0_5": "0", "pair_score_1": "0",
             "pair_score_1_5": "0", "pair_score_2": "1",
             "confidence_method": manifest["confidence_method"],
@@ -1195,7 +1184,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "sequential_upper_bound": "2.000", "normalized_elo": "20.000",
             "betting_log_evidence_above_even": "3.000",
             "betting_log_evidence_below_even": "-3.000",
-            "workers_requested": str(gate.workers), "workers_used": "1",
+            "workers_requested": str(settings.workers), "workers_used": "1",
             "games_discarded": "0",
         }
         ledger_values.update(ledger_overrides or {})
@@ -1210,6 +1199,37 @@ class WorkflowPromotionTest(unittest.TestCase):
             writer = csv.writer(destination, lineterminator="\n")
             writer.writerow(header)
             writer.writerow(row)
+        return header, row, run
+
+    def _gate(self, *, manifest_base_path: str | None = None,
+              run_id: str = "workflow-promotion-test-run",
+              ledger_overrides: dict[str, str] | None = None,
+              decision: str = "accept_alt") -> tuple[list[str], list[str]]:
+        root = self.iteration.gate_directory
+        reserve_report_directory(root, GATE_SCHEMA)
+        header_digest = sha256_file(
+            self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp")
+        candidate_stats = {
+            "artifacts": {"model_header": {"sha256": header_digest}}}
+        build_id = candidate_build_id(candidate_stats)
+        build = gate_build_directory(self.config, self.iteration, candidate_stats)
+        new_engine_binary = build / "engines/minimax/poe2_minimax"
+        runner_binary = build / "runner/poe2_runner"
+        for path in (new_engine_binary, runner_binary):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(path.name, encoding="utf-8")
+        gate = self.iteration.engine_gate
+        assert gate is not None
+        base_engine = gate_base_binary(self.config, self.iteration)
+        base_model_id = gate_base_model_id(self.config, self.iteration)
+        if base_model_id is not None:
+            base_engine.parent.mkdir(parents=True, exist_ok=True)
+            base_engine.write_text("base model engine\n", encoding="utf-8")
+        header, row, run = self._write_match_run(
+            root, gate, kind="training-gate", new_id=build_id,
+            base_id=base_model_id or "fixture-base", new_engine_path=new_engine_binary,
+            base_engine_path=manifest_base_path or str(base_engine), run_id=run_id,
+            decision=decision, ledger_overrides=ledger_overrides)
         complete_json_report(root, GATE_SCHEMA, {
             "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
             "git_commit": "2" * 40,
@@ -1632,6 +1652,112 @@ class WorkflowPromotionTest(unittest.TestCase):
             (repository / "models" / f"{applied['model_id']}.json").read_bytes())
         self.assertEqual(metrics["teacher"], {
             "evaluator": "pattern-gain", "model_id": f"candidate-sha256-{parent_digest}"})
+
+    def _comparison_config(self):
+        """Return a gated iteration and a comparison of its model with the archived v0.2."""
+        contents = textwrap.dedent(f"""
+            schema_version = 1
+            [run]
+            name = "promotion-test"
+            output_dir = "{self.root / 'run'}"
+            [models]
+            g000 = "{V02}"
+            candidate = {{ iteration = "candidate" }}
+            [datasets.ready]
+            kind = "imported"
+            path = "{self.root / 'features'}"
+            [[iterations]]
+            name = "candidate"
+            dataset = "ready"
+            [iterations.training]
+            type = "pattern"
+            device = "cpu"
+            suite = "frozen-pattern-gain"
+            [iterations.candidate_validation]
+            promotable = true
+            [iterations.engine_gate]
+            base = "{self.root / 'base-engine'}"
+            games = 2
+            [[comparisons]]
+            new = "candidate"
+            base = "g000"
+            games = 2
+        """)
+        return load_workflow_config(_write(self.root, contents, "comparison.toml"))
+
+    def _comparison_artifacts(self, comparison, new, base) -> None:
+        """Write a complete comparison as run_comparison records it."""
+        root = comparison.root
+        reserve_report_directory(root, COMPARISON_SCHEMA)
+        sides = {"new": comparison_side(self.config, comparison, new),
+                 "base": comparison_side(self.config, comparison, base)}
+        binaries = {
+            "new_engine_binary":
+                root / sides["new"]["build_directory"] / "engines/minimax/poe2_minimax",
+            "base_engine_binary":
+                root / sides["base"]["build_directory"] / "engines/minimax/poe2_minimax",
+            "runner_binary": root / sides["new"]["build_directory"] / "runner/poe2_runner",
+        }
+        for name, binary in binaries.items():
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_text(name, encoding="utf-8")
+        _, _, run = self._write_match_run(
+            root, comparison, kind=COMPARISON_KIND, new_id=new.model_id, base_id=base.model_id,
+            new_engine_path=binaries["new_engine_binary"],
+            base_engine_path=str(binaries["base_engine_binary"].resolve()),
+            run_id="comparison-run", decision="accept_alt")
+        complete_json_report(root, COMPARISON_SCHEMA, {
+            "schema": COMPARISON_SCHEMA, "schema_version": 1, "git_commit": "3" * 40,
+            "settings": {**match_settings(comparison),
+                         "opening_book": str(comparison.opening_book)},
+            "opening_book_sha256": sha256_file(comparison.opening_book),
+            "run_id": "comparison-run", "run_directory": "runs/one", **sides,
+            "build_artifacts": {name: {"path": binary.relative_to(root).as_posix(),
+                                       "sha256": sha256_file(binary)}
+                                for name, binary in binaries.items()},
+            "artifacts": {name: sha256_file(run / name) for name in
+                          ("manifest.json", "summary.json", "games.csv", "ledger-row.csv")},
+        })
+
+    def test_a_comparison_is_recorded_once_both_models_are_archived(self) -> None:
+        self.config = self._comparison_config()
+        self.iteration = self.config.iteration("candidate")
+        self._candidate()
+        ledger_header, _ = self._gate(run_id="parent-gate", decision="accept_null")
+        comparison = self.config.comparison("candidate-vs-g000")
+        with self.assertRaisesRegex(WorkflowError, "has not finished"):
+            record_comparison(self.config, "candidate-vs-g000")
+        new, base = _comparison_models(self.config, comparison)
+        self._comparison_artifacts(comparison, new, base)
+        self.assertEqual(authenticate_comparison(
+            self.config, comparison, new, base)["sequential_decision"], "accept_alt")
+
+        repository, isolated = self._isolated_repository(
+            "comparison-repository", ledger_header=ledger_header)
+        (repository / "models").mkdir()
+        for suffix in (".hpp", ".json"):
+            shutil.copy(REPOSITORY / "models" / f"{V02}{suffix}", repository / "models")
+        self._commit_all(repository, "archive g000")
+        with self.assertRaisesRegex(WorkflowError, "promote candidate first"):
+            record_comparison(isolated, "candidate-vs-g000")
+        promote_gate(isolated, "candidate", apply=True)
+        self._commit_all(repository, "record the losing gate")
+        preview = record_comparison(isolated, "candidate-vs-g000")
+        self.assertEqual(preview["index_row"], {
+            "recorded_utc": "20260819T000000Z", "run": "promotion-test",
+            "comparison": "candidate-vs-g000", "new": "promotion-test/candidate",
+            "new_model": new.sha256[:12], "base": "promotion-test/g000",
+            "base_model": V02.removeprefix("candidate-sha256-")[:12], "decision": "accept_alt",
+            "games": "2", "score_pct": "100.0", "run_id": "comparison-run"})
+        self.assertTrue(record_comparison(isolated, "candidate-vs-g000", apply=True)["applied"])
+        with (repository / "eval/results.csv").open(newline="", encoding="utf-8") as source:
+            self.assertEqual([row["kind"] for row in csv.DictReader(source)],
+                             ["training-gate", "training-comparison"])
+        for name, rows in (("comparisons.csv", 1), ("index.csv", 1)):
+            with (repository / "models" / name).open(newline="", encoding="utf-8") as source:
+                self.assertEqual(len(list(csv.DictReader(source))), rows, name)
+        with self.assertRaisesRegex(WorkflowError, "already contains run ID comparison-run"):
+            record_comparison(isolated, "candidate-vs-g000")
 
     def test_gate_preview_apply_and_duplicate_rejection(self) -> None:
         self._candidate()

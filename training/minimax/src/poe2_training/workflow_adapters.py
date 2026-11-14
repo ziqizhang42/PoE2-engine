@@ -20,10 +20,14 @@ from .pattern_suites import pattern_suite
 from .shared import open_json_report, sha256_file
 from .workflow_config import (
     BaselineTrainingConfig,
+    ComparisonConfig,
     DatasetConfig,
     IterationConfig,
     ManagedDatasetConfig,
+    MatchConfig,
+    ModelReference,
     WorkflowConfig,
+    match_settings,
     recorded_gate_settings,
 )
 
@@ -32,6 +36,10 @@ CANDIDATE_SCHEMA = "poe2-training-candidate"
 GATE_SCHEMA = "poe2-training-engine-gate"
 # Version 2 gates build the candidate header privately instead of the tracked engine header.
 GATE_SCHEMA_VERSION = 2
+COMPARISON_SCHEMA = "poe2-training-comparison"
+# Ledger kinds; only gate rows decide champions and chains.
+GATE_KIND = "training-gate"
+COMPARISON_KIND = "training-comparison"
 
 
 class AdapterError(ValueError):
@@ -100,11 +108,15 @@ def candidate_build_id(candidate: dict[str, Any]) -> str:
     return f"candidate-sha256-{header['sha256']}"
 
 
+def private_build_directory(config: WorkflowConfig, root: Path, model_id: str) -> Path:
+    """Return a model's private build under a match root, a layout the build-ID reader names."""
+    return root / "builds" / model_id / config.build_preset
+
+
 def gate_build_directory(config: WorkflowConfig, iteration: IterationConfig,
                          candidate: dict[str, Any]) -> Path:
-    """Choose a candidate-specific layout understood by the native build-ID reader."""
-    return (iteration.gate_directory / "builds" / candidate_build_id(candidate) /
-            config.build_preset)
+    return private_build_directory(
+        config, iteration.gate_directory, candidate_build_id(candidate))
 
 
 def gate_base_model_id(config: WorkflowConfig, iteration: IterationConfig) -> str | None:
@@ -124,7 +136,7 @@ def gate_base_build_directory(config: WorkflowConfig, iteration: IterationConfig
     """Return the private build of a gate's base model, in the layout the build-ID reader names."""
     model_id = gate_base_model_id(config, iteration)
     _require(model_id is not None, "gate has no base model")
-    return iteration.gate_directory / "builds" / model_id / config.build_preset
+    return private_build_directory(config, iteration.gate_directory, model_id)
 
 
 def gate_base_input(config: WorkflowConfig, iteration: IterationConfig) -> str:
@@ -379,34 +391,50 @@ def search_benchmark_command(python: str, config: WorkflowConfig,
     ]
 
 
+def match_command(config: WorkflowConfig, settings: MatchConfig, *, runner: Path,
+                  new_build: Path, base: str, kind: str, root: Path) -> list[str]:
+    """Return the evaluator command for one match, recorded under root/runs without a ledger."""
+    command = [
+        str(runner), "eval", "--new-build", str(new_build), "--base", base,
+        "--new-engine", settings.new_engine, "--base-engine", settings.base_engine,
+        "--preset", config.build_preset, "--kind", kind,
+        "--run-root", str(root / "runs"), "--no-ledger",
+        "--opening-book", str(settings.opening_book), "--shuffle-openings",
+        "--games", str(settings.games), "--workers", str(settings.workers),
+        "--timeout-ms", str(settings.timeout_ms),
+        "--go-movetime-ms", str(settings.go_movetime_ms),
+        "--sequential-null", str(settings.sequential_null),
+        "--sequential-alt", str(settings.sequential_alt),
+        "--sequential-alpha", str(settings.sequential_alpha),
+        "--sequential-beta", str(settings.sequential_beta),
+    ]
+    if settings.new_engine_args:
+        command.extend(("--new-engine-args", settings.new_engine_args))
+    if settings.base_engine_args:
+        command.extend(("--base-engine-args", settings.base_engine_args))
+    if settings.opening_seed is not None:
+        command.extend(("--opening-seed", str(settings.opening_seed)))
+    if settings.sequential_stop:
+        command.append("--sequential-stop")
+    return command
+
+
 def engine_gate_command(config: WorkflowConfig, iteration: IterationConfig,
                         build: Path, runner: Path) -> list[str]:
     gate = iteration.engine_gate
     _require(gate is not None, "iteration has no engine gate")
-    command = [
-        str(runner), "eval", "--new-build", str(build),
-        "--base", gate_base_input(config, iteration),
-        "--new-engine", gate.new_engine, "--base-engine", gate.base_engine,
-        "--preset", config.build_preset, "--kind", "training-gate",
-        "--run-root", str(iteration.gate_directory / "runs"), "--no-ledger",
-        "--opening-book", str(gate.opening_book), "--shuffle-openings",
-        "--games", str(gate.games), "--workers", str(gate.workers),
-        "--timeout-ms", str(gate.timeout_ms),
-        "--go-movetime-ms", str(gate.go_movetime_ms),
-        "--sequential-null", str(gate.sequential_null),
-        "--sequential-alt", str(gate.sequential_alt),
-        "--sequential-alpha", str(gate.sequential_alpha),
-        "--sequential-beta", str(gate.sequential_beta),
-    ]
-    if gate.new_engine_args:
-        command.extend(("--new-engine-args", gate.new_engine_args))
-    if gate.base_engine_args:
-        command.extend(("--base-engine-args", gate.base_engine_args))
-    if gate.opening_seed is not None:
-        command.extend(("--opening-seed", str(gate.opening_seed)))
-    if gate.sequential_stop:
-        command.append("--sequential-stop")
-    return command
+    return match_command(config, gate, runner=runner, new_build=build,
+                         base=gate_base_input(config, iteration), kind=GATE_KIND,
+                         root=iteration.gate_directory)
+
+
+def comparison_command(config: WorkflowConfig, comparison: ComparisonConfig,
+                       new_id: str, base_id: str) -> list[str]:
+    new_build = private_build_directory(config, comparison.root, new_id)
+    return match_command(
+        config, comparison, runner=new_build / "runner" / "poe2_runner", new_build=new_build,
+        base=str(private_build_directory(config, comparison.root, base_id)),
+        kind=COMPARISON_KIND, root=comparison.root)
 
 
 def _manifest(path: Path) -> dict[str, Any]:
@@ -782,6 +810,107 @@ def authenticate_candidate(config: WorkflowConfig,
     }
 
 
+def _authenticate_build_artifacts(root: Path, report: dict[str, Any],
+                                  expected: dict[str, str], label: str) -> dict[str, Path]:
+    """Authenticate binaries a match report records by path relative to its root."""
+    build_artifacts = report.get("build_artifacts")
+    _require(isinstance(build_artifacts, dict) and set(build_artifacts) == set(expected),
+             f"{label} build artifact map is incomplete")
+    paths: dict[str, Path] = {}
+    for name, relative in expected.items():
+        metadata = build_artifacts[name]
+        _require(isinstance(metadata, dict) and metadata.get("path") == relative and
+                 isinstance(metadata.get("sha256"), str),
+                 f"{label} build artifact {name} metadata is malformed")
+        path = (root / relative).resolve()
+        _require(root in path.parents and path.is_file() and
+                 sha256_file(path) == metadata["sha256"],
+                 f"{label} build artifact {name} is missing, unsafe, or changed")
+        paths[name] = path
+    return paths
+
+
+def _authenticate_match_run(config: WorkflowConfig, root: Path, report: dict[str, Any],
+                            settings: MatchConfig, recorded: dict[str, Any], *, label: str,
+                            kind: str, new_id: str, base_id: str | None,
+                            new_engine_path: Path, base_engine_path: Path) -> dict[str, Any]:
+    """Authenticate a match report's settings and its single evaluator run against both sides."""
+    _require(report.get("settings") == {**recorded, "opening_book": str(settings.opening_book)},
+             f"{label} settings differ from configuration")
+    _require(settings.opening_book.is_file(),
+             f"{label} opening book is missing: {settings.opening_book}")
+    _require(report.get("opening_book_sha256") == sha256_file(settings.opening_book),
+             f"{label} opening book changed after evaluation")
+    _require(isinstance(report.get("git_commit"), str) and
+             re.fullmatch(r"[0-9a-f]{40}", report["git_commit"]) is not None,
+             f"{label} Git commit is malformed")
+    run_relative = report.get("run_directory")
+    _require(isinstance(run_relative, str) and bool(run_relative),
+             f"{label} run directory metadata is malformed")
+    run_path = (root / run_relative).resolve()
+    _require(root in run_path.parents and run_path.is_dir(),
+             f"{label} run directory is missing or unsafe")
+    try:
+        run_entries = list((root / "runs").iterdir())
+    except OSError as error:
+        raise AdapterError(f"could not inspect {label} runs: {error}") from error
+    _require(len(run_entries) == 1 and run_entries[0].resolve() == run_path,
+             f"{label} has missing or unexpected evaluator runs")
+    run_artifacts = report.get("artifacts")
+    _require(isinstance(run_artifacts, dict), f"{label} run artifact map is missing")
+    for name in ("manifest.json", "summary.json", "games.csv", "ledger-row.csv"):
+        expected = run_artifacts.get(name)
+        _require(isinstance(expected, str) and sha256_file(run_path / name) == expected,
+                 f"{label} {name} is missing or changed")
+    manifest = _manifest(run_path / "manifest.json")
+    summary = _manifest(run_path / "summary.json")
+    if base_id is not None:
+        _require(manifest.get("base_id") == base_id,
+                 f"{label} base build is not the configured base model")
+    run_id = report.get("run_id")
+    _require(isinstance(run_id, str) and bool(run_id) and
+             manifest.get("run_id") == run_id and manifest.get("valid") is True,
+             f"{label} manifest is invalid")
+    manifest_base_path = manifest.get("base_engine_path")
+    _require(isinstance(manifest_base_path, str) and bool(manifest_base_path),
+             f"{label} manifest base engine path is malformed")
+    normalized_manifest_base = Path(manifest_base_path)
+    if not normalized_manifest_base.is_absolute():
+        normalized_manifest_base = config.repository / normalized_manifest_base
+    _require(
+        manifest.get("kind") == kind and
+        manifest.get("new_id") == new_id and
+        manifest.get("new_engine_path") == str(new_engine_path) and
+        manifest.get("new_engine") == settings.new_engine and
+        manifest.get("new_engine_args") == settings.new_engine_args and
+        manifest.get("base_engine") == settings.base_engine and
+        manifest.get("base_engine_args") == settings.base_engine_args and
+        normalized_manifest_base.resolve() == base_engine_path and
+        manifest.get("opening_book") == str(settings.opening_book) and
+        manifest.get("games") == settings.games and
+        manifest.get("workers_requested") == settings.workers and
+        manifest.get("timeout_ms") == settings.timeout_ms and
+        manifest.get("go_movetime_ms") == settings.go_movetime_ms and
+        manifest.get("sequential_stop") == settings.sequential_stop and
+        manifest.get("sequential_null") == settings.sequential_null and
+        manifest.get("sequential_alt") == settings.sequential_alt and
+        manifest.get("sequential_alpha") == settings.sequential_alpha and
+        manifest.get("sequential_beta") == settings.sequential_beta,
+        f"{label} manifest settings differ from configuration")
+    if settings.opening_seed is not None:
+        _require(manifest.get("opening_seed") == settings.opening_seed,
+                 f"{label} opening seed differs from configuration")
+    decision = manifest.get("sequential_decision")
+    _require(isinstance(decision, str) and bool(decision),
+             f"{label} manifest has no sequential decision")
+    _require(summary.get("valid") is True, f"{label} summary is invalid")
+    return {
+        "run_id": run_id, "sequential_decision": decision, "run_directory": str(run_path),
+        "manifest": manifest, "summary": summary,
+        "ledger_row": str(run_path / "ledger-row.csv"),
+    }
+
+
 def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
                       candidate: dict[str, Any] | None = None) -> dict[str, Any]:
     """Authenticate a completed gate; pass an already authenticated candidate to reuse it."""
@@ -797,14 +926,6 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
     _require(names == {"COMPLETE", "report.json", "builds", "runs"},
              f"engine gate has unexpected output files: {iteration.gate_directory}")
     gate = iteration.engine_gate
-    expected_settings = recorded_gate_settings(gate)
-    expected_settings["opening_book"] = str(gate.opening_book)
-    _require(report.get("settings") == expected_settings,
-             "engine-gate settings differ from configuration")
-    _require(gate.opening_book.is_file(),
-             f"engine-gate opening book is missing: {gate.opening_book}")
-    _require(report.get("opening_book_sha256") == sha256_file(gate.opening_book),
-             "engine-gate opening book changed after evaluation")
     _require(report.get("candidate_report_sha256") == candidate["report_sha256"],
              "engine gate references a different candidate report")
     _require(report.get("candidate_build_id") == build_id and
@@ -814,109 +935,65 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
     candidate_header = candidate["artifacts"]["model_header"]
     _require(report.get("model_header_sha256") == candidate_header["sha256"],
              "engine gate was not built from the candidate model header")
-    _require(isinstance(report.get("git_commit"), str) and
-             re.fullmatch(r"[0-9a-f]{40}", report["git_commit"]) is not None,
-             "engine-gate Git commit is malformed")
-    run_relative = report.get("run_directory")
-    _require(isinstance(run_relative, str) and bool(run_relative),
-             "engine-gate run directory metadata is malformed")
-    run_path = (iteration.gate_directory / run_relative).resolve()
-    _require(iteration.gate_directory in run_path.parents and run_path.is_dir(),
-             "engine-gate run directory is missing or unsafe")
-    try:
-        run_entries = list((iteration.gate_directory / "runs").iterdir())
-    except OSError as error:
-        raise AdapterError(f"could not inspect engine-gate runs: {error}") from error
-    _require(len(run_entries) == 1 and run_entries[0].resolve() == run_path,
-             "engine gate has missing or unexpected evaluator runs")
-    run_artifacts = report.get("artifacts")
-    _require(isinstance(run_artifacts, dict),
-             "engine-gate run artifact map is missing")
-    for name in ("manifest.json", "summary.json", "games.csv", "ledger-row.csv"):
-        expected = run_artifacts.get(name)
-        _require(isinstance(expected, str) and sha256_file(run_path / name) == expected,
-                 f"engine-gate {name} is missing or changed")
-    build_artifacts = report.get("build_artifacts")
     build_relative = build.relative_to(iteration.gate_directory)
-    expected_build_artifacts = {
+    build_paths = _authenticate_build_artifacts(iteration.gate_directory, report, {
         "new_engine_binary": (build_relative / "engines" / gate.new_engine).as_posix(),
         "runner_binary": (build_relative / "runner" / "poe2_runner").as_posix(),
-    }
-    _require(isinstance(build_artifacts, dict) and
-             set(build_artifacts) == set(expected_build_artifacts),
-             "engine-gate build artifact map is incomplete")
-    authenticated_build_paths: dict[str, Path] = {}
-    for name, relative in expected_build_artifacts.items():
-        metadata = build_artifacts[name]
-        _require(isinstance(metadata, dict) and metadata.get("path") == relative and
-                 isinstance(metadata.get("sha256"), str),
-                 f"engine-gate build artifact {name} metadata is malformed")
-        path = (iteration.gate_directory / relative).resolve()
-        _require(iteration.gate_directory in path.parents and path.is_file() and
-                 sha256_file(path) == metadata["sha256"],
-                 f"engine-gate build artifact {name} is missing, unsafe, or changed")
-        authenticated_build_paths[name] = path
-    manifest = _manifest(run_path / "manifest.json")
-    summary = _manifest(run_path / "summary.json")
+    }, "engine-gate")
     base_engine_path = gate_base_binary(config, iteration)
     base_model_id = gate_base_model_id(config, iteration)
     if base_model_id is not None:
         _require(iteration.gate_directory in base_engine_path.parents,
                  "engine-gate base model build escapes the gate directory")
-        _require(manifest.get("base_id") == base_model_id,
-                 "engine-gate base build is not the configured base model")
     base_metadata = report.get("base_engine_artifact")
     _require(isinstance(base_metadata, dict) and
              base_metadata.get("path") == str(base_engine_path) and
              isinstance(base_metadata.get("sha256"), str) and
              sha256_file(base_engine_path) == base_metadata["sha256"],
              "engine-gate base engine artifact is missing or changed")
-    run_id = report.get("run_id")
-    _require(isinstance(run_id, str) and bool(run_id) and
-             manifest.get("run_id") == run_id and manifest.get("valid") is True,
-             "engine-gate manifest is invalid")
-    manifest_base_path = manifest.get("base_engine_path")
-    _require(isinstance(manifest_base_path, str) and bool(manifest_base_path),
-             "engine-gate manifest base engine path is malformed")
-    normalized_manifest_base = Path(manifest_base_path)
-    if not normalized_manifest_base.is_absolute():
-        normalized_manifest_base = config.repository / normalized_manifest_base
-    normalized_manifest_base = normalized_manifest_base.resolve()
-    _require(
-        manifest.get("kind") == "training-gate" and
-        manifest.get("new_id") == build_id and
-        manifest.get("new_engine_path") ==
-        str(authenticated_build_paths["new_engine_binary"]) and
-        manifest.get("new_engine") == gate.new_engine and
-        manifest.get("new_engine_args") == gate.new_engine_args and
-        manifest.get("base_engine") == gate.base_engine and
-        manifest.get("base_engine_args") == gate.base_engine_args and
-        normalized_manifest_base == base_engine_path and
-        manifest.get("opening_book") == str(gate.opening_book) and
-        manifest.get("games") == gate.games and
-        manifest.get("workers_requested") == gate.workers and
-        manifest.get("timeout_ms") == gate.timeout_ms and
-        manifest.get("go_movetime_ms") == gate.go_movetime_ms and
-        manifest.get("sequential_stop") == gate.sequential_stop and
-        manifest.get("sequential_null") == gate.sequential_null and
-        manifest.get("sequential_alt") == gate.sequential_alt and
-        manifest.get("sequential_alpha") == gate.sequential_alpha and
-        manifest.get("sequential_beta") == gate.sequential_beta,
-        "engine-gate manifest settings differ from configuration")
-    if gate.opening_seed is not None:
-        _require(manifest.get("opening_seed") == gate.opening_seed,
-                 "engine-gate opening seed differs from configuration")
-    decision = manifest.get("sequential_decision")
-    _require(isinstance(decision, str) and bool(decision),
-             "engine-gate manifest has no sequential decision")
-    _require(summary.get("valid") is True,
-             "engine-gate summary is invalid")
-    return {
-        "report_sha256": digest, "run_id": report.get("run_id"),
-        "candidate_build_id": build_id, "sequential_decision": decision,
-        "run_directory": str(run_path), "manifest": manifest, "summary": summary,
-        "ledger_row": str(run_path / "ledger-row.csv"),
-    }
+    match = _authenticate_match_run(
+        config, iteration.gate_directory, report, gate, recorded_gate_settings(gate),
+        label="engine-gate", kind=GATE_KIND, new_id=build_id, base_id=base_model_id,
+        new_engine_path=build_paths["new_engine_binary"], base_engine_path=base_engine_path)
+    return {"report_sha256": digest, "candidate_build_id": build_id, **match}
+
+
+def comparison_side(config: WorkflowConfig, comparison: ComparisonConfig,
+                    model: ModelReference) -> dict[str, str]:
+    """Return how a comparison report records one side: its name, model, and private build."""
+    _require(model.model_id is not None, f"comparison model {model.name} is not available")
+    return {"name": model.name, "model_id": model.model_id,
+            "build_directory": private_build_directory(config, comparison.root, model.model_id)
+            .relative_to(comparison.root).as_posix()}
+
+
+def authenticate_comparison(config: WorkflowConfig, comparison: ComparisonConfig,
+                            new: ModelReference, base: ModelReference) -> dict[str, Any]:
+    """Authenticate a completed comparison between the two models it resolved to."""
+    root = comparison.root
+    report, digest = open_json_report(root, schema=COMPARISON_SCHEMA, error_type=AdapterError)
+    names = {path.name for path in root.iterdir()}
+    _require(names == {"COMPLETE", "report.json", "builds", "runs"},
+             f"comparison has unexpected output files: {root}")
+    sides = {"new": comparison_side(config, comparison, new),
+             "base": comparison_side(config, comparison, base)}
+    _require(report.get("new") == sides["new"] and report.get("base") == sides["base"],
+             f"comparison {comparison.name} was played between different models")
+    builds = {path.name for path in (root / "builds").iterdir()}
+    _require(builds == {new.model_id, base.model_id},
+             f"comparison has unexpected private builds: {root / 'builds'}")
+    build_paths = _authenticate_build_artifacts(root, report, {
+        "new_engine_binary": f"{sides['new']['build_directory']}/engines/{comparison.new_engine}",
+        "base_engine_binary":
+            f"{sides['base']['build_directory']}/engines/{comparison.base_engine}",
+        "runner_binary": f"{sides['new']['build_directory']}/runner/poe2_runner",
+    }, "comparison")
+    match = _authenticate_match_run(
+        config, root, report, comparison, match_settings(comparison), label="comparison",
+        kind=COMPARISON_KIND, new_id=new.model_id, base_id=base.model_id,
+        new_engine_path=build_paths["new_engine_binary"],
+        base_engine_path=build_paths["base_engine_binary"])
+    return {"report_sha256": digest, "new_id": new.model_id, "base_id": base.model_id, **match}
 
 
 STAGE_ADAPTERS: dict[str, StageAdapter] = {
@@ -948,4 +1025,7 @@ STAGE_ADAPTERS: dict[str, StageAdapter] = {
     "engine-gate": StageAdapter(
         "engine-gate", "engine gate", True, (engine_gate_command,), (),
         authenticate_gate),
+    "comparison": StageAdapter(
+        "comparison", "comparison", True, (comparison_command,), (),
+        authenticate_comparison),
 }

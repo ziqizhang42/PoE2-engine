@@ -32,11 +32,15 @@ from .shared import (
 )
 from .workflow_adapters import (
     CANDIDATE_SCHEMA,
+    COMPARISON_KIND,
+    COMPARISON_SCHEMA,
+    GATE_KIND,
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
     SOURCE_CHUNK_TRAJECTORIES,
     aggregate_label_stats,
     authenticate_candidate,
+    authenticate_comparison,
     authenticate_evaluation,
     authenticate_features,
     authenticate_gate,
@@ -44,6 +48,8 @@ from .workflow_adapters import (
     authenticate_source,
     authenticate_training,
     candidate_build_id,
+    comparison_command,
+    comparison_side,
     data_binary,
     data_build_directory,
     engine_gate_command,
@@ -70,13 +76,18 @@ from .workflow_adapters import (
     training_command,
 )
 from .workflow_config import (
+    CANDIDATE_ENGINE,
     MODEL_ARCHIVE_DIRECTORY,
+    ComparisonConfig,
     ImportedDatasetConfig,
     IterationConfig,
     ManagedDatasetConfig,
+    MatchConfig,
     ModelReference,
     WorkflowConfig,
+    comparison_stage,
     fingerprint,
+    match_settings,
     recorded_gate_settings,
     stage_fingerprints,
     trained_models_used,
@@ -100,8 +111,12 @@ MODEL_INDEX_HEADER = (
     "recorded_utc", "run", "iteration", "model", "base", "base_model", "decision", "games",
     "score_pct", "sealed_mae", "gate_run_id",
 )
-# Snapshot fields of an iteration that are not stage states.
-ITERATION_FIELDS = frozenset({"dataset", "depends_on", "status", "blocked_by"})
+COMPARISON_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "comparisons.csv"
+COMPARISON_INDEX_HEADER = (
+    "recorded_utc", "run", "comparison", "new", "new_model", "base", "base_model", "decision",
+    "games", "score_pct", "run_id",
+)
+ITERATION_NON_STAGE_FIELDS = frozenset({"dataset", "depends_on", "status", "blocked_by"})
 
 
 class WorkflowError(ValueError):
@@ -407,7 +422,7 @@ def workflow_snapshot(config: WorkflowConfig) -> dict[str, Any]:
             value["candidate_validation"] = _path_state(iteration.candidate_directory)
         if iteration.engine_gate is not None:
             value["engine_gate"] = _path_state(iteration.gate_directory)
-        stages = [item for key, item in value.items() if key not in ITERATION_FIELDS]
+        stages = [item for key, item in value.items() if key not in ITERATION_NON_STAGE_FIELDS]
         value["status"] = ("complete" if stages and all(item == "complete" for item in stages)
                            else "blocked" if any(item in {"incomplete", "unexpected"} for item in stages)
                            else "pending")
@@ -415,19 +430,30 @@ def workflow_snapshot(config: WorkflowConfig) -> dict[str, Any]:
     blocked = blocked_iterations(config)
     for name, item in blocked.items():
         iterations[name].update(status="blocked", blocked_by=item.reason)
+    comparisons: dict[str, Any] = {}
+    blocked_matches = blocked_comparisons(config, blocked)
+    for comparison in config.comparisons:
+        match = _path_state(comparison.root)
+        value = {"new": comparison.new, "base": comparison.base, "match": match,
+                 "status": "complete" if match == "complete" else
+                 "blocked" if match in {"incomplete", "unexpected"} else "pending"}
+        if comparison.name in blocked_matches:
+            value.update(status="blocked", blocked_by=blocked_matches[comparison.name].reason)
+        comparisons[comparison.name] = value
     all_dataset_complete = all(
         value["features"] == "complete" for value in datasets.values())
-    all_iterations_complete = all(value["status"] == "complete" for value in iterations.values())
-    stopped = bool(blocked) and all(
-        value["status"] == "complete" or name in blocked for name, value in iterations.items())
+    work = [*iterations.items(), *comparisons.items()]
+    all_work_complete = all(value["status"] == "complete" for _, value in work)
+    stopped = bool(blocked or blocked_matches) and all(
+        value["status"] == "complete" or "blocked_by" in value for _, value in work)
     return {
         "schema": "poe2-training-status", "schema_version": 1,
         "run": config.name, "config": str(config.path), "config_digest": config.digest,
         "output_directory": str(config.output_directory), "build_preset": config.build_preset,
         "logical_cpus": os.cpu_count() or 1,
         "resolved_label_concurrency": resolved_label_concurrency(config),
-        "datasets": datasets, "iterations": iterations,
-        "status": ("complete" if all_dataset_complete and all_iterations_complete else
+        "datasets": datasets, "iterations": iterations, "comparisons": comparisons,
+        "status": ("complete" if all_dataset_complete and all_work_complete else
                    "stopped" if stopped else "pending"),
     }
 
@@ -453,7 +479,8 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
         stage_statuses.append(dataset["features"])
     for iteration in snapshot["iterations"].values():
         stage_statuses.extend(value for key, value in iteration.items()
-                              if key not in ITERATION_FIELDS)
+                              if key not in ITERATION_NON_STAGE_FIELDS)
+    stage_statuses.extend(value["match"] for value in snapshot["comparisons"].values())
     completed, total = stage_statuses.count("complete"), len(stage_statuses)
     percent = 100.0 * completed / total if total else 100.0
     iteration_statuses = [value["status"] for value in snapshot["iterations"].values()]
@@ -477,50 +504,91 @@ def print_status(config: WorkflowConfig, *, json_output: bool = False) -> None:
                   f"imported features={dataset['features']}")
     for index, (name, iteration) in enumerate(snapshot["iterations"].items(), 1):
         stages = " ".join(f"{key}={value}" for key, value in iteration.items()
-                          if key not in ITERATION_FIELDS)
+                          if key not in ITERATION_NON_STAGE_FIELDS)
         decision = _recorded_gate_decision(config.iteration(name))
         if decision is not None:
             stages += f" gate_decision={decision}"
         print(f"  {status_symbol(str(iteration['status']))} iteration {index}. {name}: {stages}")
         if "blocked_by" in iteration:
             print(f"      not started: {iteration['blocked_by']}")
+    for name, comparison in snapshot["comparisons"].items():
+        decision = _recorded_decision(config.comparison(name).root)
+        print(f"  {status_symbol(str(comparison['status']))} comparison {name}: "
+              f"new={comparison['new']} base={comparison['base']} match={comparison['match']}"
+              f"{f' decision={decision}' if decision is not None else ''}")
+        if "blocked_by" in comparison:
+            print(f"      not started: {comparison['blocked_by']}")
 
 
-def _recorded_gate_decision(iteration: IterationConfig) -> str | None:
-    """Return a completed gate's recorded decision for display, without authenticating it."""
-    if iteration.engine_gate is None or _path_state(iteration.gate_directory) != "complete":
+def _recorded_decision(root: Path) -> str | None:
+    """Return a completed match's recorded decision for display, without authenticating it."""
+    if _path_state(root) != "complete":
         return None
     try:
-        report = json.loads((iteration.gate_directory / "report.json").read_bytes())
-        manifest = json.loads(
-            (iteration.gate_directory / report["run_directory"] / "manifest.json").read_bytes())
+        report = json.loads((root / "report.json").read_bytes())
+        manifest = json.loads((root / report["run_directory"] / "manifest.json").read_bytes())
     except (OSError, ValueError, KeyError, TypeError):
         return None
     decision = manifest.get("sequential_decision") if isinstance(manifest, dict) else None
     return decision if isinstance(decision, str) else None
 
 
+def _recorded_gate_decision(iteration: IterationConfig) -> str | None:
+    if iteration.engine_gate is None:
+        return None
+    return _recorded_decision(iteration.gate_directory)
+
+
 @dataclass(frozen=True)
-class BlockedIteration:
-    """An iteration that cannot start because a model it needs did not win its gate."""
+class Blocked:
+    """An iteration or comparison that cannot start because a model it needs was not trained."""
 
     name: str
     # The iteration whose engine gate did not accept its candidate, and that gate's decision.
     loser: str
     decision: str
+    kind: str = "iteration"
 
     @property
     def reason(self) -> str:
         return f"{self.loser} did not win its engine gate (decision {self.decision})"
 
+    @property
+    def label(self) -> str:
+        return self.name if self.kind == "iteration" else f"{self.kind} {self.name}"
 
-def blocked_iterations(config: WorkflowConfig) -> dict[str, BlockedIteration]:
+
+def blocked_comparisons(config: WorkflowConfig,
+                        iterations: dict[str, Blocked] | None = None) -> dict[str, Blocked]:
+    """Return comparisons with a side whose iteration is never started.
+
+    A side whose own gate did not win still plays: comparing a loser is a fair question.
+    """
+    iterations = blocked_iterations(config) if iterations is None else iterations
+    blocked: dict[str, Blocked] = {}
+    for comparison in config.comparisons:
+        for side in (comparison.new, comparison.base):
+            iteration = config.model(side).iteration
+            cause = None if iteration is None else iterations.get(iteration)
+            if cause is not None:
+                blocked[comparison.name] = replace(
+                    cause, name=comparison.name, kind="comparison")
+                break
+    return blocked
+
+
+def blocked_work(config: WorkflowConfig) -> list[Blocked]:
+    iterations = blocked_iterations(config)
+    return [*iterations.values(), *blocked_comparisons(config, iterations).values()]
+
+
+def blocked_iterations(config: WorkflowConfig) -> dict[str, Blocked]:
     """Return iterations that need a trained model whose gate decided anything but accept_alt.
 
     This reads recorded decisions without authenticating them; resolving a model to use it
     authenticates its gate.
     """
-    blocked: dict[str, BlockedIteration] = {}
+    blocked: dict[str, Blocked] = {}
     for iteration in config.iterations:
         producers = [model.iteration for model in trained_models_used(config, iteration)]
         for name in (*iteration.depends_on, *producers):
@@ -528,20 +596,27 @@ def blocked_iterations(config: WorkflowConfig) -> dict[str, BlockedIteration]:
             if cause is None and name in producers:
                 decision = _recorded_gate_decision(config.iteration(name))
                 if decision is not None and decision != "accept_alt":
-                    cause = BlockedIteration(iteration.name, name, decision)
+                    cause = Blocked(iteration.name, name, decision)
             if cause is not None:
                 blocked[iteration.name] = replace(cause, name=iteration.name)
                 break
     return blocked
 
 
-def describe_not_started(blocked: Sequence[BlockedIteration]) -> list[str]:
-    """Return one line per losing iteration naming the iterations it kept from starting."""
-    groups: dict[str, list[BlockedIteration]] = {}
+def describe_not_started(blocked: Sequence[Blocked]) -> list[str]:
+    """Return one line per losing iteration naming the work it kept from starting."""
+    groups: dict[str, list[Blocked]] = {}
     for item in blocked:
         groups.setdefault(item.loser, []).append(item)
-    return [f"{items[0].reason}; not started: {', '.join(item.name for item in items)}"
+    return [f"{items[0].reason}; not started: {', '.join(item.label for item in items)}"
             for items in groups.values()]
+
+
+def _candidate_model(model: ModelReference, iteration: IterationConfig,
+                     candidate: dict[str, Any]) -> ModelReference:
+    header = candidate["artifacts"]["model_header"]
+    return replace(model, model_id=candidate_build_id(candidate),
+                   header=iteration.candidate_directory / header["path"])
 
 
 def _accepted_model(config: WorkflowConfig, model: ModelReference) -> ModelReference:
@@ -554,9 +629,36 @@ def _accepted_model(config: WorkflowConfig, model: ModelReference) -> ModelRefer
         raise WorkflowError(
             f"model {model.name} is not usable: iteration {model.iteration}'s authenticated "
             f"engine gate decided {gate['sequential_decision']}, not accept_alt")
-    header = candidate["artifacts"]["model_header"]
-    return replace(model, model_id=candidate_build_id(candidate),
-                   header=iteration.candidate_directory / header["path"])
+    return _candidate_model(model, iteration, candidate)
+
+
+def _comparison_ready(config: WorkflowConfig, comparison: ComparisonConfig) -> bool:
+    """Return whether both sides exist: archived, or trained with a complete candidate."""
+    return all(
+        model.iteration is None or
+        _path_state(config.iteration(model.iteration).candidate_directory) == "complete"
+        for model in (config.model(comparison.new), config.model(comparison.base)))
+
+
+def _comparison_model(config: WorkflowConfig, name: str) -> ModelReference:
+    """Return an intact comparison side; a trained one needs only its authenticated candidate.
+
+    Pass a config whose accepted models are resolved, so the candidate's teacher is known.
+    """
+    model = config.model(name)
+    if model.iteration is None:
+        return _model_by_id(config, model.model_id, "comparison model")
+    iteration = config.iteration(model.iteration)
+    return _candidate_model(model, iteration, authenticate_candidate(config, iteration))
+
+
+def _comparison_models(config: WorkflowConfig,
+                       comparison: ComparisonConfig) -> tuple[ModelReference, ModelReference]:
+    new, base = (_comparison_model(config, name) for name in (comparison.new, comparison.base))
+    if new.model_id == base.model_id:
+        raise WorkflowError(
+            f"comparison {comparison.name} would play {new.model_id} against itself")
+    return new, base
 
 
 def resolve_trained_models(config: WorkflowConfig) -> WorkflowConfig:
@@ -623,13 +725,22 @@ def print_plan(config: WorkflowConfig) -> None:
                     f"{_describe_model(config, _configured_base_model(config, iteration))}, "
                     "built privately")
             print(f"  engine gate: {iteration.gate_directory} base={base}")
+    blocked_matches = blocked_comparisons(config, blocked)
+    for comparison in config.comparisons:
+        print(paint(f"comparison {comparison.name}: {comparison.root}", "bold", "magenta"))
+        if comparison.name in blocked_matches:
+            print(f"  not started: {blocked_matches[comparison.name].reason}")
+        for side, name in (("new", comparison.new), ("base", comparison.base)):
+            print(f"  {side}: {_describe_model(config, config.model(name), accepted=False)}, "
+                  "built privately")
 
 
-def _describe_model(config: WorkflowConfig, model: ModelReference) -> str:
+def _describe_model(config: WorkflowConfig, model: ModelReference, *,
+                    accepted: bool = True) -> str:
     if model.iteration is None:
         return f"{config.name}/{model.name} ({model.model_id})"
-    return (f"{config.name}/{model.name} (the candidate of iteration {model.iteration}, "
-            "once its gate accepts it)")
+    return (f"{config.name}/{model.name} (the candidate of iteration {model.iteration}"
+            f"{', once its gate accepts it' if accepted else ''})")
 
 
 def _configured_base_model(config: WorkflowConfig, iteration: IterationConfig) -> ModelReference:
@@ -638,7 +749,7 @@ def _configured_base_model(config: WorkflowConfig, iteration: IterationConfig) -
     assert gate is not None and gate.base is None
     if gate.base_iteration is not None:
         return config.trained_model(gate.base_iteration)
-    return _model_by_id(config, str(gate.base_model), "engine-gate base model")
+    return _model_by_id(config, gate.base_model, "engine-gate base model")
 
 
 def _direct_audit(command: Sequence[str], repository: Path) -> str:
@@ -790,6 +901,20 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
             _direct_audit(
                 feature_audit_command(sys.executable, config, dataset), config.repository)
             authenticated[f"dataset:{dataset.name}:features"] = authenticate_features(dataset)
+    blocked_matches = blocked_comparisons(config)
+    for comparison in config.comparisons:
+        path_state = _path_state(comparison.root)
+        if comparison.name in blocked_matches or not _comparison_ready(config, comparison):
+            if path_state != "missing":
+                raise WorkflowError(
+                    f"comparison {comparison.name} has artifacts, but one of its models was "
+                    f"never trained; move them aside explicitly: {comparison.root}")
+            continue
+        if path_state in {"incomplete", "unexpected"}:
+            raise _blocked_path(comparison.root, "comparison")
+        if path_state == "complete":
+            authenticated[comparison_stage(comparison)] = authenticate_comparison(
+                config, comparison, *_comparison_models(config, comparison))
     for iteration in config.iterations:
         if waiting := _waiting_models(config, iteration):
             _require_not_started(iteration.root, f"iteration {iteration.name}", waiting)
@@ -814,6 +939,25 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
             if path_state == "complete":
                 authenticated[f"iteration:{iteration.name}:{name}"] = authenticate()
     return authenticated
+
+
+def _evaluator_run(result: CommandResult, root: Path, label: str) -> Path:
+    """Return the one valid evaluator run a match command reported inside its root."""
+    matches = re.findall(r"^eval_run run_dir=(.+?) ledger=disabled$", result.output, re.MULTILINE)
+    if len(matches) != 1:
+        raise WorkflowError(f"engine evaluator emitted no unique run path: {result.log_path}")
+    run_path = Path(matches[0]).resolve()
+    if root not in run_path.parents:
+        raise WorkflowError(f"engine evaluator escaped {label} root: {run_path}")
+    manifest = json.loads((run_path / "manifest.json").read_bytes())
+    if manifest.get("valid") is not True:
+        raise WorkflowError(f"{label} is invalid: {run_path}")
+    return run_path
+
+
+def _run_artifacts(run_path: Path) -> dict[str, str]:
+    return {name: sha256_file(run_path / name) for name in
+            ("manifest.json", "summary.json", "games.csv", "ledger-row.csv")}
 
 
 def _parse_key_values(line: str) -> dict[str, Any]:
@@ -1460,29 +1604,14 @@ class WorkflowRunner:
             require_candidate_header()
             if base_model is not None:
                 # Both sides build from this commit, so the gate measures only the weights.
-                base_build = gate_base_build_directory(self.config, iteration)
-                self._command(stage, "configure-base", [
-                    "cmake", "--preset", self.config.build_preset, "-B", str(base_build),
-                    f"-DPOE2_MINIMAX_MODEL_HEADER={base_model.header}"], attempt=attempt)
-                self._command(stage, "build-base", [
-                    "cmake", "--build", str(base_build), "--target", "poe2_minimax"],
-                    attempt=attempt)
-                if not base_engine_binary.is_file():
-                    raise WorkflowError(
-                        f"engine gate did not build its base model: {base_engine_binary}")
+                self._build_model_engine(
+                    stage, attempt, base_model, gate_base_build_directory(self.config, iteration),
+                    "base", engine=gate.base_engine)
             runner = build / "runner" / "poe2_runner"
             command = engine_gate_command(self.config, iteration, build, runner)
             result = self._command(stage, "evaluate", command, attempt=attempt)
-            matches = re.findall(r"^eval_run run_dir=(.+?) ledger=disabled$",
-                                 result.output, re.MULTILINE)
-            if len(matches) != 1:
-                raise WorkflowError(f"engine evaluator emitted no unique run path: {result.log_path}")
-            run_path = Path(matches[0]).resolve()
-            if root not in run_path.parents:
-                raise WorkflowError(f"engine evaluator escaped gate root: {run_path}")
+            run_path = _evaluator_run(result, root, "engine gate")
             manifest = json.loads((run_path / "manifest.json").read_bytes())
-            if manifest.get("valid") is not True:
-                raise WorkflowError(f"engine gate is invalid: {run_path}")
             build_artifacts = {
                 "new_engine_binary": build / "engines" / gate.new_engine,
                 "runner_binary": runner,
@@ -1512,8 +1641,7 @@ class WorkflowRunner:
                            "sha256": sha256_file(path)}
                     for name, path in build_artifacts.items()
                 },
-                "artifacts": {name: sha256_file(run_path / name) for name in
-                              ("manifest.json", "summary.json", "games.csv", "ledger-row.csv")},
+                "artifacts": _run_artifacts(run_path),
             }
             complete_json_report(root, GATE_SCHEMA, report)
 
@@ -1525,6 +1653,76 @@ class WorkflowRunner:
             "opening_book_sha256": sha256_file(gate.opening_book),
             **({"base_engine_sha256": sha256_file(base_engine_binary)} if base_model is None
                else {"base_model": base_model.model_id}),
+        }, create, authenticate)
+
+    def _build_model_engine(self, stage: str, attempt: int, model: ModelReference, build: Path,
+                            role: str, *, engine: str = CANDIDATE_ENGINE,
+                            runner: bool = False) -> Path:
+        """Build one model's engine privately at this commit, optionally with the match runner."""
+        if model.header is None or not model.header.is_file() or (
+                sha256_file(model.header) != model.sha256):
+            raise WorkflowError(f"model {model.name} is missing or changed: {model.header}")
+        self._command(stage, f"configure-{role}", [
+            "cmake", "--preset", self.config.build_preset, "-B", str(build),
+            f"-DPOE2_MINIMAX_MODEL_HEADER={model.header}"], attempt=attempt)
+        targets = ["poe2_minimax", *(["poe2_runner"] if runner else [])]
+        self._command(stage, f"build-{role}", ["cmake", "--build", str(build), "--target",
+                                                *targets], attempt=attempt)
+        binary = build / "engines" / engine
+        if not binary.is_file():
+            raise WorkflowError(f"{stage} did not build model {model.name}: {binary}")
+        return binary
+
+    def run_comparison(self, comparison: ComparisonConfig) -> dict[str, Any]:
+        """Play a comparison between both models, each built privately at this commit."""
+        stage = comparison_stage(comparison)
+        if not comparison.opening_book.is_file():
+            raise WorkflowError(
+                f"comparison opening book is missing: {comparison.opening_book}")
+        new, base = _comparison_models(self.config, comparison)
+        root = comparison.root
+
+        def create(attempt: int) -> None:
+            reserve_report_directory(root, COMPARISON_SCHEMA)
+            sides = {"new": comparison_side(self.config, comparison, new),
+                     "base": comparison_side(self.config, comparison, base)}
+            binaries = {
+                "new_engine_binary": self._build_model_engine(
+                    stage, attempt, new, root / sides["new"]["build_directory"], "new",
+                    runner=True),
+                "base_engine_binary": self._build_model_engine(
+                    stage, attempt, base, root / sides["base"]["build_directory"], "base"),
+            }
+            binaries["runner_binary"] = (
+                root / sides["new"]["build_directory"] / "runner" / "poe2_runner")
+            result = self._command(stage, "evaluate", comparison_command(
+                self.config, comparison, new.model_id, base.model_id),
+                attempt=attempt)
+            run_path = _evaluator_run(result, root, "comparison")
+            report = {
+                "schema": COMPARISON_SCHEMA, "schema_version": 1,
+                "created_at_utc": now_utc(), "git_commit": self.commit,
+                "settings": {**match_settings(comparison),
+                             "opening_book": str(comparison.opening_book)},
+                "opening_book_sha256": sha256_file(comparison.opening_book),
+                "run_id": json.loads((run_path / "manifest.json").read_bytes()).get("run_id"),
+                "run_directory": run_path.relative_to(root).as_posix(),
+                **sides,
+                "build_artifacts": {
+                    name: {"path": path.relative_to(root).as_posix(),
+                           "sha256": sha256_file(path)}
+                    for name, path in binaries.items()
+                },
+                "artifacts": _run_artifacts(run_path),
+            }
+            complete_json_report(root, COMPARISON_SCHEMA, report)
+
+        def authenticate(_attempt: int) -> dict[str, Any]:
+            return authenticate_comparison(self.config, comparison, new, base)
+
+        return self._run_simple(stage, root, "comparison", {
+            "new": new.model_id, "base": base.model_id,
+            "opening_book_sha256": sha256_file(comparison.opening_book),
         }, create, authenticate)
 
     @staticmethod
@@ -1555,26 +1753,57 @@ def _dependency_order(config: WorkflowConfig, iteration: IterationConfig) -> lis
     return result
 
 
-def _require_unblocked(config: WorkflowConfig, iteration_name: str) -> None:
-    blocked = blocked_iterations(config).get(iteration_name)
+def _comparison_order(config: WorkflowConfig,
+                      comparison: ComparisonConfig) -> list[IterationConfig]:
+    """Return the iterations, with their dependencies, that train a comparison's sides."""
+    needed: set[str] = set()
+    for name in (comparison.new, comparison.base):
+        iteration = config.model(name).iteration
+        if iteration is not None:
+            needed.update(item.name for item in
+                          _dependency_order(config, config.iteration(iteration)))
+    return [item for item in config.iterations if item.name in needed]
+
+
+def _require_unblocked(config: WorkflowConfig, name: str, kind: str) -> None:
+    blocked = (blocked_iterations(config) if kind == "iteration" else
+               blocked_comparisons(config)).get(name)
     if blocked is not None:
-        raise WorkflowError(f"iteration {iteration_name} is not started: {blocked.reason}")
+        raise WorkflowError(f"{kind} {name} is not started: {blocked.reason}")
+
+
+def _selected_work(config: WorkflowConfig, iteration_name: str | None,
+                   comparison_name: str | None, with_dependencies: bool,
+                   ) -> tuple[list[IterationConfig], list[ComparisonConfig]]:
+    if comparison_name is not None:
+        comparison = config.comparison(comparison_name)
+        _require_unblocked(config, comparison_name, "comparison")
+        if with_dependencies:
+            return _comparison_order(config, comparison), [comparison]
+        if not _comparison_ready(config, comparison):
+            raise WorkflowError(
+                f"comparison {comparison_name} needs the candidates of the iterations that train "
+                "its models; run them first or rerun with --with-dependencies")
+        return [], [comparison]
+    if iteration_name is not None:
+        requested = config.iteration(iteration_name)
+        _require_unblocked(config, iteration_name, "iteration")
+        return (_dependency_order(config, requested) if with_dependencies else [requested]), []
+    return list(config.iterations), list(config.comparisons)
 
 
 def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
-                 with_dependencies: bool = False) -> list[BlockedIteration]:
-    """Execute a full run or one iteration under its create-only run lock.
+                 comparison_name: str | None = None,
+                 with_dependencies: bool = False) -> list[Blocked]:
+    """Execute a full run, one iteration, or one comparison under its create-only run lock.
 
-    Iterations that need a model whose gate did not accept it are skipped and returned; a
-    requested iteration that is blocked is an error instead.
+    Comparisons play one at a time, in recipe order, as soon as both models exist. Work that
+    needs a model whose gate did not accept it is skipped and returned; requested work that is
+    blocked is an error instead.
     """
-    if iteration_name is None:
-        selected = list(config.iterations)
-    else:
-        requested = config.iteration(iteration_name)
-        selected = (_dependency_order(config, requested)
-                    if with_dependencies else [requested])
-        _require_unblocked(config, iteration_name)
+    selected, comparisons = _selected_work(
+        config, iteration_name, comparison_name, with_dependencies)
+    command = ("comparison" if comparison_name else "iteration" if iteration_name else "run")
     commit = require_clean_committed(config)
     with run_lock(config):
         state = RunState(config)
@@ -1583,24 +1812,36 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
         state.recover_running_stages()
         state.accept_config()
         state.append("run_started", git_commit=commit, config_digest=config.digest,
-                     command=("iteration" if iteration_name else "run"),
-                     iteration=iteration_name)
+                     command=command, iteration=iteration_name, comparison=comparison_name)
         state.write_summary(workflow_snapshot(config))
         progress = WorkflowProgress(config, state)
         runner = WorkflowRunner(config, state, commit, progress)
-        not_started: list[BlockedIteration] = []
+        not_started: list[Blocked] = []
+        pending = list(comparisons)
         success = False
+
+        def play_ready_comparisons() -> None:
+            for comparison in list(pending):
+                if _comparison_ready(config, comparison):
+                    pending.remove(comparison)
+                    runner.config = resolve_trained_models(config)
+                    runner.run_comparison(comparison)
+                    state.append("comparison_completed", comparison=comparison.name)
+                    state.write_summary(workflow_snapshot(config))
+                    progress.comparison_completed(comparison.name)
+
         try:
             with _interruptions_as_keyboard():
+                play_ready_comparisons()
                 for iteration in selected:
                     if iteration.name == iteration_name:
-                        _require_unblocked(config, iteration_name)
+                        _require_unblocked(config, iteration_name, "iteration")
                     blocked = blocked_iterations(config).get(iteration.name)
                     if blocked is not None:
                         not_started.append(blocked)
                         state.append("iteration_not_started", iteration=iteration.name,
                                      reason=blocked.reason)
-                        progress.iteration_not_started(iteration.name, blocked.reason)
+                        progress.not_started(blocked.kind, blocked.name, blocked.reason)
                         continue
                     # A model this recipe trains may have been accepted earlier in this run.
                     runner.config = resolve_trained_models(config)
@@ -1608,10 +1849,21 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
                     state.append("iteration_completed", iteration=iteration.name)
                     state.write_summary(workflow_snapshot(config))
                     progress.iteration_completed(iteration.name)
-                state.append(
-                    "run_completed", command=("iteration" if iteration_name else "run"),
-                    iteration=iteration_name,
-                    not_started=[item.name for item in not_started])
+                    play_ready_comparisons()
+                for comparison in pending:
+                    if comparison.name == comparison_name:
+                        _require_unblocked(config, comparison_name, "comparison")
+                    blocked = blocked_comparisons(config).get(comparison.name)
+                    if blocked is None:
+                        raise WorkflowError(
+                            f"comparison {comparison.name} has a model that was not trained")
+                    not_started.append(blocked)
+                    state.append("comparison_not_started", comparison=comparison.name,
+                                 reason=blocked.reason)
+                    progress.not_started(blocked.kind, blocked.name, blocked.reason)
+                state.append("run_completed", command=command, iteration=iteration_name,
+                             comparison=comparison_name,
+                             not_started=[item.label for item in not_started])
                 state.write_summary(workflow_snapshot(config))
                 success = True
         except KeyboardInterrupt as error:
@@ -1781,14 +2033,20 @@ def _write_archived_model(entry: ArchiveEntry) -> None:
         raise WorkflowError(f"could not archive model {entry.header_path.stem}: {error}") from error
 
 
+def _games_and_score(saved: dict[str, str]) -> tuple[int, str]:
+    """Return games played and the new side's score, counting a no-winner game as half."""
+    games = int(saved["games_played"])
+    if games <= 0:
+        raise WorkflowError("authenticated match played no games")
+    score = 100.0 * (int(saved["engine_one_wins"]) + 0.5 * int(saved["no_winner"])) / games
+    return games, f"{score:.1f}"
+
+
 def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
                      candidate: dict[str, Any], gate: dict[str, Any],
                      saved: dict[str, str]) -> list[str]:
     """Return one readable index row built only from authenticated gate and candidate fields."""
-    games = int(saved["games_played"])
-    if games <= 0:
-        raise WorkflowError("authenticated gate played no games")
-    score = 100.0 * (int(saved["engine_one_wins"]) + 0.5 * int(saved["no_winner"])) / games
+    games, score = _games_and_score(saved)
     sealed = candidate["model"]["quantized"].get("sealed_test")
     sealed_mae = f"{sealed['mae']:.3f}" if isinstance(sealed, dict) else ""
     model_digest = candidate["artifacts"]["model_header"]["sha256"]
@@ -1799,37 +2057,49 @@ def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
         base, base_model = f"{config.name}/{model.name}", model.sha256[:12]
     return [
         saved["created_at_utc"], config.name, iteration.name, model_digest[:12],
-        base, base_model, gate["sequential_decision"], str(games), f"{score:.1f}",
+        base, base_model, gate["sequential_decision"], str(games), score,
         sealed_mae, gate["run_id"],
     ]
 
 
-def _model_index_has_row(path: Path, row: list[str]) -> bool:
-    """Return whether the index already records this gate; reject conflicting records."""
+def _comparison_index_row(config: WorkflowConfig, comparison: ComparisonConfig,
+                          new: ModelReference, base: ModelReference, match: dict[str, Any],
+                          saved: dict[str, str]) -> list[str]:
+    """Return one readable comparison row built only from authenticated fields."""
+    games, score = _games_and_score(saved)
+    return [
+        saved["created_at_utc"], config.name, comparison.name,
+        f"{config.name}/{new.name}", new.sha256[:12], f"{config.name}/{base.name}",
+        base.sha256[:12], match["sequential_decision"], str(games), score, match["run_id"],
+    ]
+
+
+def _csv_has_row(path: Path, header: Sequence[str], key: str, row: list[str]) -> bool:
+    """Return whether a tracked index already records this row's key; reject conflicts."""
     if not path.exists():
         return False
     try:
         with path.open(newline="", encoding="utf-8") as source:
             rows = list(csv.reader(source))
     except (OSError, UnicodeDecodeError, csv.Error) as error:
-        raise WorkflowError(f"could not read model index {path}: {error}") from error
-    if not rows or tuple(rows[0]) != MODEL_INDEX_HEADER:
-        raise WorkflowError(f"model index has an unexpected header: {path}")
-    run_index = MODEL_INDEX_HEADER.index("gate_run_id")
-    matches = [item for item in rows[1:] if len(item) > run_index and item[run_index] == row[run_index]]
+        raise WorkflowError(f"could not read index {path}: {error}") from error
+    if not rows or tuple(rows[0]) != tuple(header):
+        raise WorkflowError(f"index has an unexpected header: {path}")
+    key_index = list(header).index(key)
+    matches = [item for item in rows[1:] if len(item) > key_index and item[key_index] == row[key_index]]
     if any(item != row for item in matches):
         raise WorkflowError(
-            f"model index already records gate {row[run_index]} with different values: {path}")
+            f"index already records {row[key_index]} with different values: {path}")
     return bool(matches)
 
 
-def _append_model_index(path: Path, row: list[str]) -> None:
-    if _model_index_has_row(path, row):
+def _append_csv_row(path: Path, header: Sequence[str], key: str, row: list[str]) -> None:
+    if _csv_has_row(path, header, key, row):
         return
     try:
         if not path.exists():
             contents = io.StringIO()
-            csv.writer(contents, lineterminator="\n").writerows([MODEL_INDEX_HEADER, row])
+            csv.writer(contents, lineterminator="\n").writerows([header, row])
             atomic_write_bytes(path, contents.getvalue().encode("utf-8"))
             return
         with path.open("a", newline="", encoding="utf-8") as destination:
@@ -1837,7 +2107,7 @@ def _append_model_index(path: Path, row: list[str]) -> None:
             destination.flush()
             os.fsync(destination.fileno())
     except (OSError, csv.Error) as error:
-        raise WorkflowError(f"could not append model index {path}: {error}") from error
+        raise WorkflowError(f"could not append index {path}: {error}") from error
 
 
 def _master_ledger_path(config: WorkflowConfig) -> Path:
@@ -1916,65 +2186,56 @@ def _ledger_lock(path: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
-def promote_gate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
-    """Preview or append one authenticated local engine-gate row to the master ledger."""
-    if apply:
-        with run_lock(config):
-            return _promote_gate(config, iteration_name, apply=True)
-    return _promote_gate(config, iteration_name, apply=False)
+@dataclass(frozen=True)
+class SavedLedgerRow:
+    """The ledger row a match saved beside its run, checked against its manifest and summary."""
+
+    path: Path
+    header: list[str]
+    row: list[str]
+
+    @property
+    def run_index(self) -> int:
+        return self.header.index("run_id")
+
+    @property
+    def run_id(self) -> str:
+        return self.row[self.run_index]
+
+    @property
+    def values(self) -> dict[str, str]:
+        return dict(zip(self.header, self.row, strict=True))
 
 
-def _require_archived_inputs(config: WorkflowConfig, iteration: IterationConfig) -> None:
-    """Require every trained model a gate's iteration used to be archived before it is."""
-    for model in trained_models_used(config, iteration):
-        model_id = _expected_model_id(model, f"iteration {iteration.name}")
-        directory = config.repository / MODEL_ARCHIVE_DIRECTORY
-        header = directory / f"{model_id}.hpp"
-        if not (header.is_file() and (directory / f"{model_id}.json").is_file() and
-                sha256_file(header) == model.sha256):
-            raise WorkflowError(
-                f"promote {model.iteration} first: {iteration.name} uses its model "
-                f"{model.name}, which is not archived under {MODEL_ARCHIVE_DIRECTORY}/; run "
-                f"promote-gate --apply {model.iteration} and commit the result")
-
-
-def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
-                  apply: bool) -> dict[str, Any]:
-    config = resolve_trained_models(config)
-    iteration = config.iteration(iteration_name)
-    _require_archived_inputs(config, iteration)
-    candidate = authenticate_candidate(config, iteration)
-    gate = authenticate_gate(config, iteration, candidate=candidate)
-    saved_path = Path(gate["ledger_row"])
-    header, row = _read_ledger_row(saved_path)
-    try:
-        run_index = header.index("run_id")
-    except ValueError as error:
-        raise WorkflowError("saved ledger schema has no run_id") from error
-    run_id = row[run_index]
-    if run_id != gate["run_id"]:
-        raise WorkflowError("saved ledger row run ID differs from authenticated gate")
-    saved = dict(zip(header, row, strict=True))
-    manifest = gate.get("manifest")
-    summary = gate.get("summary")
+def _verified_ledger_row(match: dict[str, Any], settings: MatchConfig, *, kind: str,
+                         new_id: str, label: str) -> SavedLedgerRow:
+    """Return a match's saved ledger row after checking every field it shares with the run."""
+    path = Path(match["ledger_row"])
+    header, row = _read_ledger_row(path)
+    if "run_id" not in header:
+        raise WorkflowError("saved ledger schema has no run_id")
+    saved = SavedLedgerRow(path, header, row)
+    if saved.run_id != match["run_id"]:
+        raise WorkflowError(f"saved ledger row run ID differs from authenticated {label}")
+    values = saved.values
+    manifest = match.get("manifest")
+    summary = match.get("summary")
     if not isinstance(manifest, dict) or not isinstance(summary, dict):
-        raise WorkflowError("authenticated gate lacks manifest or summary statistics")
-    gate_settings = iteration.engine_gate
-    assert gate_settings is not None
+        raise WorkflowError(f"authenticated {label} lacks manifest or summary statistics")
     expected_saved = {
-        "kind": "training-gate",
-        "new_id": gate["candidate_build_id"],
-        "new_engine": gate_settings.new_engine,
-        "new_engine_args": gate_settings.new_engine_args,
-        "base_engine": gate_settings.base_engine,
-        "base_engine_args": gate_settings.base_engine_args,
-        "games_requested": str(gate_settings.games),
-        "opening_book": str(gate_settings.opening_book),
-        "go_movetime_ms": str(gate_settings.go_movetime_ms),
-        "timeout_ms": str(gate_settings.timeout_ms),
-        "run_dir": gate["run_directory"],
+        "kind": kind,
+        "new_id": new_id,
+        "new_engine": settings.new_engine,
+        "new_engine_args": settings.new_engine_args,
+        "base_engine": settings.base_engine,
+        "base_engine_args": settings.base_engine_args,
+        "games_requested": str(settings.games),
+        "opening_book": str(settings.opening_book),
+        "go_movetime_ms": str(settings.go_movetime_ms),
+        "timeout_ms": str(settings.timeout_ms),
+        "run_dir": match["run_directory"],
         "valid": "true",
-        "workers_requested": str(gate_settings.workers),
+        "workers_requested": str(settings.workers),
     }
     manifest_fields = {
         "created_at_utc": "created_at_utc",
@@ -2011,7 +2272,7 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
     if missing_manifest or missing_summary:
         missing = sorted(set(missing_manifest + missing_summary))
         raise WorkflowError(
-            "authenticated gate lacks ledger provenance fields: " + ", ".join(missing))
+            f"authenticated {label} lacks ledger provenance fields: " + ", ".join(missing))
     expected_saved.update({
         ledger_name: _ledger_scalar(manifest[manifest_name])
         for ledger_name, manifest_name in manifest_fields.items()
@@ -2025,16 +2286,16 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
     expected_saved["analysis_note"] = "paired normalized-Elo GSPRT"
     score_counts = summary.get("statistical_score_rate_counts")
     if not isinstance(score_counts, dict):
-        raise WorkflowError("authenticated gate lacks statistical score counts")
+        raise WorkflowError(f"authenticated {label} lacks statistical score counts")
     for ledger_name, score_name in {
             "pair_score_0": "0", "pair_score_0_5": "0.25", "pair_score_1": "0.5",
             "pair_score_1_5": "0.75", "pair_score_2": "1"}.items():
         if score_name not in score_counts:
             raise WorkflowError(
-                f"authenticated gate lacks statistical score count {score_name}")
+                f"authenticated {label} lacks statistical score count {score_name}")
         expected_saved[ledger_name] = _ledger_scalar(score_counts[score_name])
     mismatches = [name for name, value in expected_saved.items()
-                  if saved.get(name) != value]
+                  if values.get(name) != value]
     for ledger_name, manifest_name in {
             "sequential_null": "sequential_null",
             "sequential_alt": "sequential_alt",
@@ -2046,60 +2307,160 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
             "betting_log_evidence_below_even": "betting_log_evidence_below_even",
     }.items():
         if manifest_name not in manifest or not _ledger_number_matches(
-                saved.get(ledger_name), manifest[manifest_name]):
+                values.get(ledger_name), manifest[manifest_name]):
             mismatches.append(ledger_name)
     if mismatches:
         raise WorkflowError(
-            "saved ledger row differs from the authenticated gate in: " +
+            f"saved ledger row differs from the authenticated {label} in: " +
             ", ".join(sorted(set(mismatches))))
+    return saved
+
+
+def _inspect_master(master: Path, saved: SavedLedgerRow) -> bool:
+    """Return whether the master ledger already has this run; reject a schema mismatch."""
+    existing = _read_master_ledger(master)
+    if not existing or existing[0] != saved.header:
+        raise WorkflowError(f"master and saved ledger schemas differ: {master}")
+    if any(len(item) != len(saved.header) for item in existing[1:]):
+        raise WorkflowError(f"master ledger contains a malformed row: {master}")
+    return any(item[saved.run_index] == saved.run_id for item in existing[1:])
+
+
+def _preview_ledger_row(config: WorkflowConfig, saved: SavedLedgerRow) -> None:
+    if _inspect_master(_master_ledger_path(config), saved):
+        raise WorkflowError(f"master ledger already contains run ID {saved.run_id}")
+
+
+def _append_ledger_row(config: WorkflowConfig, saved: SavedLedgerRow,
+                       record_first: Callable[[], None]) -> None:
+    """Append a verified row under the ledger lock, after the records that describe it."""
     master = _master_ledger_path(config)
+    require_clean_committed(config)
+    try:
+        with _ledger_lock(master):
+            require_clean_committed(config)
+            _preview_ledger_row(config, saved)
+            # Records are written before the row so an interrupted apply retries cleanly: they
+            # are idempotent for the same run, while the ledger rejects duplicates.
+            record_first()
+            with master.open("a", newline="", encoding="utf-8") as destination:
+                writer = csv.writer(destination, lineterminator="\n")
+                writer.writerow(saved.row)
+                destination.flush()
+                os.fsync(destination.fileno())
+    except (OSError, csv.Error) as error:
+        raise WorkflowError(f"could not append master ledger {master}: {error}") from error
+
+
+def _is_archived(config: WorkflowConfig, model: ModelReference) -> bool:
+    directory = config.repository / MODEL_ARCHIVE_DIRECTORY
+    header = directory / f"{model.model_id}.hpp"
+    return (header.is_file() and (directory / f"{model.model_id}.json").is_file() and
+            sha256_file(header) == model.sha256)
+
+
+def promote_gate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
+    """Preview or append one authenticated local engine-gate row to the master ledger."""
+    if apply:
+        with run_lock(config):
+            return _promote_gate(config, iteration_name, apply=True)
+    return _promote_gate(config, iteration_name, apply=False)
+
+
+def _require_archived_inputs(config: WorkflowConfig, iteration: IterationConfig) -> None:
+    """Require every trained model a gate's iteration used to be archived before it is."""
+    for model in trained_models_used(config, iteration):
+        _expected_model_id(model, f"iteration {iteration.name}")
+        if not _is_archived(config, model):
+            raise WorkflowError(
+                f"promote {model.iteration} first: {iteration.name} uses its model "
+                f"{model.name}, which is not archived under {MODEL_ARCHIVE_DIRECTORY}/; run "
+                f"promote-gate --apply {model.iteration} and commit the result")
+
+
+def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
+                  apply: bool) -> dict[str, Any]:
+    config = resolve_trained_models(config)
+    iteration = config.iteration(iteration_name)
+    _require_archived_inputs(config, iteration)
+    candidate = authenticate_candidate(config, iteration)
+    gate = authenticate_gate(config, iteration, candidate=candidate)
+    assert iteration.engine_gate is not None
+    saved = _verified_ledger_row(gate, iteration.engine_gate, kind=GATE_KIND,
+                                 new_id=gate["candidate_build_id"], label="gate")
     archive = _archive_entry(config, iteration, candidate)
     model_index = config.repository / MODEL_INDEX_PATH
-    index_row = _model_index_row(config, iteration, candidate, gate, saved)
-
-    def inspect_master() -> bool:
-        existing = _read_master_ledger(master)
-        if not existing or existing[0] != header:
-            raise WorkflowError(f"master and saved ledger schemas differ: {master}")
-        if any(len(item) != len(header) for item in existing[1:]):
-            raise WorkflowError(f"master ledger contains a malformed row: {master}")
-        return any(item[run_index] == run_id for item in existing[1:])
-
-    preview = {"iteration": iteration_name, "run_id": run_id,
+    index_row = _model_index_row(config, iteration, candidate, gate, saved.values)
+    preview = {"iteration": iteration_name, "run_id": saved.run_id,
                "model_id": gate["candidate_build_id"],
                "sequential_decision": gate["sequential_decision"],
-               "saved_row": str(saved_path), "ledger": str(master),
+               "saved_row": str(saved.path), "ledger": str(_master_ledger_path(config)),
                "archived_header": str(archive.header_path),
                "archived_metrics": str(archive.metrics_path),
                "archived": _archived_model_state(archive),
                "model_index": str(model_index),
                "index_row": dict(zip(MODEL_INDEX_HEADER, index_row, strict=True)),
-               "indexed": _model_index_has_row(model_index, index_row),
+               "indexed": _csv_has_row(model_index, MODEL_INDEX_HEADER, "gate_run_id",
+                                       index_row),
                "duplicate": False, "applied": False}
     if not apply:
-        preview["duplicate"] = inspect_master()
-        if preview["duplicate"]:
-            raise WorkflowError(f"master ledger already contains run ID {run_id}")
+        _preview_ledger_row(config, saved)
         return preview
-    require_clean_committed(config)
-    try:
-        with _ledger_lock(master):
-            require_clean_committed(config)
-            preview["duplicate"] = inspect_master()
-            if preview["duplicate"]:
-                raise WorkflowError(f"master ledger already contains run ID {run_id}")
-            # Archive and index before appending so an interrupted promotion retries cleanly:
-            # both are idempotent for the same gate, while the ledger rejects duplicates.
-            _write_archived_model(archive)
-            preview["archived"] = True
-            _append_model_index(model_index, index_row)
-            preview["indexed"] = True
-            with master.open("a", newline="", encoding="utf-8") as destination:
-                writer = csv.writer(destination, lineterminator="\n")
-                writer.writerow(row)
-                destination.flush()
-                os.fsync(destination.fileno())
-    except (OSError, csv.Error) as error:
-        raise WorkflowError(f"could not append master ledger {master}: {error}") from error
+
+    def record() -> None:
+        _write_archived_model(archive)
+        preview["archived"] = True
+        _append_csv_row(model_index, MODEL_INDEX_HEADER, "gate_run_id", index_row)
+        preview["indexed"] = True
+
+    _append_ledger_row(config, saved, record)
+    preview["applied"] = True
+    return preview
+
+
+def record_comparison(config: WorkflowConfig, name: str, *,
+                      apply: bool = False) -> dict[str, Any]:
+    """Preview or append one finished comparison to the master ledger and comparison index."""
+    if apply:
+        with run_lock(config):
+            return _record_comparison(config, name, apply=True)
+    return _record_comparison(config, name, apply=False)
+
+
+def _record_comparison(config: WorkflowConfig, name: str, *, apply: bool) -> dict[str, Any]:
+    config = resolve_trained_models(config)
+    comparison = config.comparison(name)
+    _require_unblocked(config, name, "comparison")
+    if _path_state(comparison.root) != "complete":
+        raise WorkflowError(f"comparison {name} has not finished; play it first")
+    new, base = _comparison_models(config, comparison)
+    for model in (new, base):
+        if not _is_archived(config, model):
+            raise WorkflowError(
+                f"promote {model.iteration} first: comparison {name} plays its model "
+                f"{model.name}, which is not archived under {MODEL_ARCHIVE_DIRECTORY}/; run "
+                f"promote-gate --apply {model.iteration} and commit the result")
+    match = authenticate_comparison(config, comparison, new, base)
+    saved = _verified_ledger_row(match, comparison, kind=COMPARISON_KIND,
+                                 new_id=new.model_id, label="comparison")
+    index = config.repository / COMPARISON_INDEX_PATH
+    row = _comparison_index_row(config, comparison, new, base, match, saved.values)
+    preview = {"comparison": name, "run_id": saved.run_id,
+               "new_model": new.model_id, "base_model": base.model_id,
+               "sequential_decision": match["sequential_decision"],
+               "saved_row": str(saved.path), "ledger": str(_master_ledger_path(config)),
+               "comparison_index": str(index),
+               "index_row": dict(zip(COMPARISON_INDEX_HEADER, row, strict=True)),
+               "indexed": _csv_has_row(index, COMPARISON_INDEX_HEADER, "run_id", row),
+               "applied": False}
+    if not apply:
+        _preview_ledger_row(config, saved)
+        return preview
+
+    def record() -> None:
+        _append_csv_row(index, COMPARISON_INDEX_HEADER, "run_id", row)
+        preview["indexed"] = True
+
+    _append_ledger_row(config, saved, record)
     preview["applied"] = True
     return preview
