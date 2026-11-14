@@ -214,6 +214,18 @@ def _trajectory_range(trajectory_count: int, shard_count: int,
     return begin, begin + base + (1 if shard_index < remainder else 0)
 
 
+def _check_search_evaluator(owner: dict[str, Any], label: str) -> None:
+    """Require a supported search evaluator; sources written before teachers omit it."""
+    evaluator = owner.get("evaluator", "two-ply-closure")
+    model = owner.get("model_header_sha256")
+    if evaluator == "pattern-gain":
+        _require(isinstance(model, str) and re.fullmatch(r"[0-9a-f]{64}", model) is not None,
+                 f"{label}.model_header_sha256 must be a SHA-256 hex digest")
+    else:
+        _require(evaluator == "two-ply-closure", f"{label}.evaluator is unknown")
+        _require(model is None, f"{label}.model_header_sha256 requires pattern-gain")
+
+
 def _parse_record(value: dict[str, Any], label: str) -> ParsedRecord:
     expected = {"p1", "p2", "source_id", "family_id", "trajectory_id", "parent_id",
                 "trajectory_index", "policy_id", "sample_index", "split", "ply"}
@@ -337,6 +349,7 @@ def audit_source(directory: Path) -> AuditSummary:
     _require(weights[3] == 0 or search_nodes > 0,
              "noisy-search policy has no node budget")
     _require(search_hash_bytes >= 0, "search hash bytes is invalid")
+    _check_search_evaluator(generator, "generator")
     _require(len(manifest_shards) == shard_count, "manifest shard count is wrong")
     for field in ("git_commit", "project_version", "compiler_id", "compiler_version",
                   "build_type", "target_processor"):

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -247,8 +248,14 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
     expected_mode = {"exact": 1, "teacher": 2}.get(search.get("mode"))
     _require(expected_mode is not None, "search.mode is unknown")
     # Schema-v2 artifacts predating the descriptive evaluator names used "b".
-    _require(search.get("evaluator") in ("two-ply-closure", "b"),
-             "search evaluator is unknown")
+    evaluator = search.get("evaluator")
+    model = search.get("model_header_sha256")
+    if evaluator == "pattern-gain":
+        _require(isinstance(model, str) and re.fullmatch(r"[0-9a-f]{64}", model) is not None,
+                 "search.model_header_sha256 must be a SHA-256 hex digest")
+    else:
+        _require(evaluator in ("two-ply-closure", "b"), "search evaluator is unknown")
+        _require(model is None, "search.model_header_sha256 requires pattern-gain")
     _require(search.get("symmetry") is True, "symmetry must be enabled")
     _require(search.get("two_ply_closure") is True, "two-ply closure must be enabled")
     if schema_version >= 2:

@@ -1404,6 +1404,18 @@ AnalysisResult Search::analyze(const Position& position, const engine::EngineLim
                                         use_symmetry_, table_, history_scores_, groups, evaluator_);
 }
 
+std::string_view evaluator_name(Evaluator evaluator) noexcept {
+  switch (evaluator) {
+    case Evaluator::kStatic:
+      return "static";
+    case Evaluator::kTwoPlyClosure:
+      return "two-ply-closure";
+    case Evaluator::kPatternGain:
+      return "pattern-gain";
+  }
+  return "unknown";
+}
+
 int Search::terminal_depth(const Position& position) const noexcept {
   const int empty_count = position.board().empty_count();
   if (empty_count == 0) {

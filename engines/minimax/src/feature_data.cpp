@@ -311,16 +311,31 @@ struct LoadedLabelShard {
   std::vector<labeling::LabelRecord> records;
 };
 
+[[nodiscard]] bool is_sha256_hex(std::string_view text) noexcept {
+  return text.size() == 64 && std::ranges::all_of(text, [](char character) {
+           return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
+         });
+}
+
 [[nodiscard]] LabelProvenance parse_label_provenance(std::string_view manifest) {
-  // Label schema v2 artifacts produced before the evaluator rename used the value "b".
-  const bool supported_evaluator =
-      manifest.find("\"evaluator\": \"two-ply-closure\"") != std::string_view::npos ||
-      manifest.find("\"evaluator\": \"b\"") != std::string_view::npos;
   if (manifest.find("\"schema\": \"poe2-minimax-labels\"") == std::string_view::npos ||
-      manifest.find("\"schema_version\": 2") == std::string_view::npos || !supported_evaluator ||
+      manifest.find("\"schema_version\": 2") == std::string_view::npos ||
       manifest.find("\"symmetry\": true") == std::string_view::npos ||
       manifest.find("\"two_ply_closure\": true") == std::string_view::npos) {
     throw std::runtime_error{"label manifest has unsupported semantics"};
+  }
+  std::string evaluator = manifest_string(manifest, "\"evaluator\": \"");
+  // Label schema v2 artifacts produced before the evaluator rename used the value "b".
+  if (evaluator == "b") {
+    evaluator = "two-ply-closure";
+  }
+  const bool has_model = manifest.find("\"model_header_sha256\": \"") != std::string_view::npos;
+  std::string model_header_sha256 =
+      has_model ? manifest_string(manifest, "\"model_header_sha256\": \"") : std::string{};
+  const bool valid_evaluator = (evaluator == "two-ply-closure" && !has_model) ||
+                               (evaluator == "pattern-gain" && is_sha256_hex(model_header_sha256));
+  if (!valid_evaluator) {
+    throw std::runtime_error{"label manifest has an unsupported evaluator"};
   }
   const std::uint64_t hash_bytes =
       manifest_unsigned<std::uint64_t>(manifest, "\"hash_bytes_effective\": ");
@@ -338,6 +353,8 @@ struct LoadedLabelShard {
       .hash_bytes_effective = static_cast<std::size_t>(hash_bytes),
       .workers_requested = static_cast<std::size_t>(workers),
       .target_selection = manifest_string(manifest, "\"target_selection\": \""),
+      .evaluator = std::move(evaluator),
+      .model_header_sha256 = std::move(model_header_sha256),
   };
 }
 
@@ -924,7 +941,13 @@ std::string serialize_feature_manifest(const FeatureDataset& dataset,
          << "\", \"node_limit\": " << dataset.labels.node_limit
          << ", \"hash_bytes_effective\": " << dataset.labels.hash_bytes_effective
          << ", \"workers_requested\": " << dataset.labels.workers_requested
-         << ", \"target_selection\": \"" << json_escape(dataset.labels.target_selection) << "\"}\n"
+         << ", \"target_selection\": \"" << json_escape(dataset.labels.target_selection)
+         << "\", \"evaluator\": \"" << json_escape(dataset.labels.evaluator) << '"';
+  if (!dataset.labels.model_header_sha256.empty()) {
+    output << ", \"model_header_sha256\": \"" << json_escape(dataset.labels.model_header_sha256)
+           << '"';
+  }
+  output << "}\n"
          << "  },\n"
          << "  \"exporter_build\": {\n"
          << "    \"git_commit\": \"" << json_escape(labeling::build::kGitCommit) << "\",\n"

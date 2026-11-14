@@ -425,3 +425,61 @@ TEST_CASE("only one concurrent writer can reserve a dataset directory",
   REQUIRE_FALSE(fs::exists(output_path / poe2::minimax::labeling::kCompleteMarkerName));
   fs::remove_all(root);
 }
+
+TEST_CASE("teacher labels can use the compiled pattern-gain model and record its digest",
+          "[minimax][labeling][teacher][evaluator]") {
+  const poe2::Position position = position_with_empty_squares(
+      poe2::square_bit({0, 0}) | poe2::square_bit({0, 1}) | poe2::square_bit({0, 2}) |
+      poe2::square_bit({0, 3}) | poe2::square_bit({0, 4}) | poe2::square_bit({1, 0}));
+  poe2::minimax::Search control{poe2::minimax::SearchOptions{
+      .hash_bytes = 0,
+      .use_symmetry = true,
+      .evaluator = poe2::minimax::Evaluator::kPatternGain,
+  }};
+  const poe2::engine::EngineResult depth_two =
+      control.run(position, poe2::engine::EngineLimits{.depth = 2}, {});
+  REQUIRE(depth_two.depth == 2);
+  if (!depth_two.score.has_value()) {
+    FAIL("depth-two pattern-gain search should return a score");
+    return;
+  }
+  const poe2::Score depth_two_score = *depth_two.score;
+
+  const std::vector<poe2::minimax::labeling::LabelInput> inputs{{
+      .position = position,
+      .source_id = 23,
+      .source_line = 4,
+  }};
+  poe2::minimax::labeling::LabelingOptions options{
+      .mode = poe2::minimax::labeling::LabelMode::kTeacher,
+      .node_limit = depth_two.completed_nodes,
+      .hash_bytes = 0,
+      .require_all = true,
+      .evaluator = poe2::minimax::Evaluator::kPatternGain,
+  };
+  const poe2::minimax::labeling::LabelDataset dataset =
+      poe2::minimax::labeling::generate_labels(inputs, options, label_source("pattern fixture"));
+  REQUIRE(dataset.records.size() == 1);
+  REQUIRE(dataset.records.front().deepest_completed_depth == 2);
+  REQUIRE(dataset.records.front().deepest_value == depth_two_score);
+
+  const std::string_view model_digest = poe2::minimax::labeling::compiled_model_header_sha256();
+  REQUIRE(model_digest.size() == 64);
+  const std::string manifest = poe2::minimax::labeling::serialize_manifest(
+      dataset, poe2::minimax::labeling::sha256("pattern binary"));
+  REQUIRE(manifest.find("\"evaluator\": \"pattern-gain\"") != std::string::npos);
+  REQUIRE(manifest.find("\"model_header_sha256\": \"" + std::string{model_digest} + "\"") !=
+          std::string::npos);
+
+  options.evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
+  const std::string closure_manifest = poe2::minimax::labeling::serialize_manifest(
+      poe2::minimax::labeling::generate_labels(inputs, options, label_source("closure fixture")),
+      poe2::minimax::labeling::sha256("closure binary"));
+  REQUIRE(closure_manifest.find("\"evaluator\": \"two-ply-closure\"") != std::string::npos);
+  REQUIRE(closure_manifest.find("model_header_sha256") == std::string::npos);
+
+  options.evaluator = poe2::minimax::Evaluator::kStatic;
+  REQUIRE_THROWS_AS(
+      poe2::minimax::labeling::generate_labels(inputs, options, label_source("static fixture")),
+      std::invalid_argument);
+}

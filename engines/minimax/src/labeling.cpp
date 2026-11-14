@@ -237,6 +237,13 @@ std::string_view label_mode_name(LabelMode mode) noexcept {
   return "unknown";
 }
 
+std::string_view compiled_model_header_sha256() noexcept { return build::kModelHeaderSha256; }
+
+bool is_data_evaluator(Evaluator evaluator) noexcept {
+  // Label targets and terminal depths assume the two-empty closure that both of these share.
+  return evaluator == Evaluator::kTwoPlyClosure || evaluator == Evaluator::kPatternGain;
+}
+
 std::string_view dataset_split_name(DatasetSplit split) noexcept {
   switch (split) {
     case DatasetSplit::kUnspecified:
@@ -272,6 +279,9 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
   if (options.workers == 0) {
     throw std::invalid_argument{"label generation requires at least one worker"};
   }
+  if (!is_data_evaluator(options.evaluator)) {
+    throw std::invalid_argument{"labels require the two-ply-closure or pattern-gain evaluator"};
+  }
   if (inputs.empty()) {
     throw std::invalid_argument{"label generation requires at least one input position"};
   }
@@ -306,7 +316,7 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
     Search sized_search{SearchOptions{
         .hash_bytes = options.hash_bytes,
         .use_symmetry = true,
-        .evaluator = Evaluator::kTwoPlyClosure,
+        .evaluator = options.evaluator,
     }};
     dataset.hash_capacity = sized_search.transposition_table().capacity();
     dataset.hash_storage_bytes = sized_search.transposition_table().storage_bytes();
@@ -356,7 +366,7 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
       Search search{SearchOptions{
           .hash_bytes = options.hash_bytes,
           .use_symmetry = true,
-          .evaluator = Evaluator::kTwoPlyClosure,
+          .evaluator = options.evaluator,
       }};
       while (!stop.load(std::memory_order_relaxed)) {
         const std::size_t input_index = next_input.fetch_add(1, std::memory_order_relaxed);
@@ -517,8 +527,12 @@ std::string serialize_manifest(const LabelDataset& dataset, const Sha256Digest& 
          << "\n"
          << "  },\n"
          << "  \"search\": {\n"
-         << "    \"evaluator\": \"two-ply-closure\",\n"
-         << "    \"mode\": \"" << label_mode_name(dataset.options.mode) << "\",\n"
+         << "    \"evaluator\": \"" << evaluator_name(dataset.options.evaluator) << "\",\n";
+  if (dataset.options.evaluator == Evaluator::kPatternGain) {
+    output << "    \"model_header_sha256\": \"" << json_escape(build::kModelHeaderSha256)
+           << "\",\n";
+  }
+  output << "    \"mode\": \"" << label_mode_name(dataset.options.mode) << "\",\n"
          << "    \"node_limit\": " << dataset.options.node_limit << ",\n"
          << "    \"hash_bytes_requested\": " << dataset.options.hash_bytes << ",\n"
          << "    \"hash_bytes_effective\": " << dataset.hash_storage_bytes << ",\n"

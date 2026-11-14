@@ -48,6 +48,7 @@ struct PositionSourceOptions {
   std::size_t search_hash_bytes = 8 * kMebibyte;
   std::uint8_t noise_percent = 15;
   PolicyWeights policy_weights;
+  Evaluator evaluator = Evaluator::kTwoPlyClosure;
 };
 
 struct PositionSourceRecord {

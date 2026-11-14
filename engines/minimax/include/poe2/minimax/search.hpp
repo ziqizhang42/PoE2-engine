@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include "poe2/engine.hpp"
@@ -21,6 +22,8 @@ enum class Evaluator : std::uint8_t {
   kTwoPlyClosure,
   kPatternGain,
 };
+
+[[nodiscard]] std::string_view evaluator_name(Evaluator evaluator) noexcept;
 
 struct SearchOptions {
   std::size_t hash_bytes = kDefaultHashBytes;

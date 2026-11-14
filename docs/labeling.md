@@ -28,7 +28,9 @@ The required mode is one of:
 - `exact`: requests the remaining terminal depth and emits a record only when that entire search finishes. Add `--require-all` when any unsolved input should fail the job.
 - `teacher`: uses the requested node budget as a hard cap and selects the deepest completed result whose depth parity matches the known terminal depth. The deepest and immediately previous completed results are retained alongside that training target. A teacher record remains identified as a teacher record even if it reaches terminal depth.
 
-Both modes require a positive `--nodes` budget. Every position starts with cleared transposition and history state. Search uses board-symmetry canonicalization and the production two-ply-closure evaluator. No clock, random seed, scheduling decision, progress message, path to the output directory, or wall-clock timestamp enters the artifacts.
+Both modes require a positive `--nodes` budget. Every position starts with cleared transposition and history state. Search uses board-symmetry canonicalization and, by default, the two-ply-closure evaluator. No clock, random seed, scheduling decision, progress message, path to the output directory, or wall-clock timestamp enters the artifacts.
+
+`--evaluator pattern-gain` labels with the learned evaluator instead, using the model header the binary was built with (`-DPOE2_MINIMAX_MODEL_HEADER`). Both evaluators share the exact terminal and two-empty closure, so targets and terminal depths keep the same meaning. The manifest's `search.evaluator` names the evaluator; a pattern-gain manifest also records `search.model_header_sha256`, the SHA-256 of the compiled model header. Two-ply-closure manifests are unchanged.
 
 `--workers` defaults to one. Each worker owns an isolated search, history, and transposition table; inputs are scheduled dynamically but restored to source order before serialization. Binary records are therefore independent of worker count. The manifest records requested and effective worker counts, so manifests made with different worker settings intentionally differ. `--hash-mb` is per worker.
 

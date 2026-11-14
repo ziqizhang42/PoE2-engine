@@ -41,6 +41,7 @@ struct LabelCommandOptions {
   bool has_mode = false;
   bool has_opening_shard = false;
   bool require_all = false;
+  poe2::minimax::Evaluator evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
 };
 
 struct SourceCommandOptions {
@@ -67,6 +68,7 @@ void print_usage(std::ostream& output) {
          << "                            [--random-weight <n>] [--greedy-weight <n>]\n"
          << "                            [--opponent-weight <n>] [--search-weight <n>]\n"
          << "                            [--progress-every <n>]\n"
+         << "                            [--evaluator two-ply-closure|pattern-gain]\n"
          << "\n"
          << "  poe2_minimax_data features --source <position-source-directory>\n"
          << "                              --labels <label-corpus-directory>\n"
@@ -77,7 +79,8 @@ void print_usage(std::ostream& output) {
          << "                            --nodes <n> [--hash-mb <n>] [--workers <n>]\n"
          << "                            [--corpus-id <id>] [--source-shard <zero-based>]\n"
          << "                            [--shard-index <zero-based>] [--shard-count <n>]\n"
-         << "                            [--progress-every <n>] [--require-all]\n";
+         << "                            [--progress-every <n>] [--require-all]\n"
+         << "                            [--evaluator two-ply-closure|pattern-gain]\n";
 }
 
 [[nodiscard]] FeatureCommandOptions parse_feature_options(int argc, char* argv[]) {
@@ -150,6 +153,16 @@ template <typename Integer>
   return static_cast<Integer>(value);
 }
 
+[[nodiscard]] poe2::minimax::Evaluator parse_data_evaluator(std::string_view value) {
+  if (value == "two-ply-closure") {
+    return poe2::minimax::Evaluator::kTwoPlyClosure;
+  }
+  if (value == "pattern-gain") {
+    return poe2::minimax::Evaluator::kPatternGain;
+  }
+  throw std::invalid_argument{"--evaluator must be two-ply-closure or pattern-gain"};
+}
+
 [[nodiscard]] std::size_t checked_mebibytes(std::uint64_t value, std::string_view option) {
   if (value > std::numeric_limits<std::size_t>::max() / poe2::minimax::kMebibyte) {
     throw std::invalid_argument{std::string{option} + " is too large"};
@@ -203,6 +216,8 @@ template <typename Integer>
           checked_integer<std::uint32_t>(require_positive_u64(value, argument), argument);
     } else if (argument == "--source-shard") {
       options.source_shard = checked_integer<std::uint32_t>(require_u64(value, argument), argument);
+    } else if (argument == "--evaluator") {
+      options.evaluator = parse_data_evaluator(value);
     } else {
       throw std::invalid_argument{"unknown argument: " + std::string{argument}};
     }
@@ -274,6 +289,8 @@ template <typename Integer>
           checked_integer<std::uint32_t>(require_u64(value, argument), argument);
     } else if (argument == "--progress-every") {
       options.progress_interval = require_positive_u64(value, argument);
+    } else if (argument == "--evaluator") {
+      options.source.evaluator = parse_data_evaluator(value);
     } else {
       throw std::invalid_argument{"unknown argument: " + std::string{argument}};
     }
@@ -383,6 +400,7 @@ int run_labels(const LabelCommandOptions& options) {
           .hash_bytes = options.hash_bytes,
           .workers = options.workers,
           .require_all = options.require_all,
+          .evaluator = options.evaluator,
       },
       std::move(source),
       [](const labeling::LabelProgress& progress) {

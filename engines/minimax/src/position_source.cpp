@@ -268,6 +268,10 @@ void validate_options(const PositionSourceOptions& options, bool has_progress,
   if (options.policy_weights.noisy_search != 0 && options.search_nodes == 0) {
     throw std::invalid_argument{"noisy-search trajectories require a positive node limit"};
   }
+  if (!labeling::is_data_evaluator(options.evaluator)) {
+    throw std::invalid_argument{
+        "position sources require the two-ply-closure or pattern-gain evaluator"};
+  }
   if (options.trajectory_count >
       std::numeric_limits<std::uint32_t>::max() / options.samples_per_trajectory) {
     throw std::invalid_argument{"position source would exceed the source-ordinal range"};
@@ -888,7 +892,7 @@ PositionSourceCorpus generate_position_source(const PositionSourceOptions& optio
         search.emplace(SearchOptions{
             .hash_bytes = options.search_hash_bytes,
             .use_symmetry = true,
-            .evaluator = Evaluator::kTwoPlyClosure,
+            .evaluator = options.evaluator,
         });
       }
       while (!stop.load(std::memory_order_relaxed)) {
@@ -1081,7 +1085,12 @@ std::string serialize_source_manifest(const PositionSourceCorpus& corpus,
          << "    \"search_hash_bytes\": " << corpus.options.search_hash_bytes << ",\n"
          << "    \"noise_percent\": " << static_cast<unsigned>(corpus.options.noise_percent)
          << ",\n"
-         << "    \"policy_weights\": {\"random\": " << corpus.options.policy_weights.random
+         << "    \"evaluator\": \"" << evaluator_name(corpus.options.evaluator) << "\",\n";
+  if (corpus.options.evaluator == Evaluator::kPatternGain) {
+    output << "    \"model_header_sha256\": \""
+           << json_escape(labeling::compiled_model_header_sha256()) << "\",\n";
+  }
+  output << "    \"policy_weights\": {\"random\": " << corpus.options.policy_weights.random
          << ", \"immediate_gain\": " << corpus.options.policy_weights.immediate_gain
          << ", \"opponent_aware\": " << corpus.options.policy_weights.opponent_aware
          << ", \"noisy_search\": " << corpus.options.policy_weights.noisy_search << "}\n"

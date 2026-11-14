@@ -63,6 +63,7 @@ struct LabelingOptions {
   std::size_t hash_bytes = kDefaultHashBytes;
   std::size_t workers = 1;
   bool require_all = false;
+  Evaluator evaluator = Evaluator::kTwoPlyClosure;
 };
 
 struct LabelRecord {
@@ -143,6 +144,8 @@ class DatasetOutput final {
 };
 
 [[nodiscard]] std::string_view label_mode_name(LabelMode mode) noexcept;
+[[nodiscard]] std::string_view compiled_model_header_sha256() noexcept;
+[[nodiscard]] bool is_data_evaluator(Evaluator evaluator) noexcept;
 [[nodiscard]] std::string_view dataset_split_name(DatasetSplit split) noexcept;
 [[nodiscard]] std::uint64_t stable_digest(std::string_view bytes) noexcept;
 [[nodiscard]] LabelDataset generate_labels(std::span<const LabelInput> inputs,

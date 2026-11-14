@@ -267,3 +267,41 @@ TEST_CASE("only one concurrent writer can reserve a position source",
   REQUIRE_FALSE(fs::exists(output_path / position_source::kSourceCompleteMarkerName));
   fs::remove_all(root);
 }
+
+TEST_CASE("noisy-search sources can use the compiled pattern-gain model",
+          "[minimax][position-source][evaluator]") {
+  position_source::PositionSourceOptions options = random_options(1);
+  options.trajectory_count = 4;
+  options.samples_per_trajectory = 2;
+  options.shard_count = 1;
+  options.noise_percent = 0;
+  options.policy_weights = position_source::PolicyWeights{
+      .random = 0,
+      .immediate_gain = 0,
+      .opponent_aware = 0,
+      .noisy_search = 1,
+  };
+  options.evaluator = poe2::minimax::Evaluator::kPatternGain;
+  const position_source::PositionSourceCorpus serial =
+      position_source::generate_position_source(options);
+  options.workers = 3;
+  REQUIRE(position_source::generate_position_source(options).records == serial.records);
+
+  const std::string manifest = position_source::serialize_source_manifest(
+      serial, position_source::serialize_source_shards(serial));
+  REQUIRE(manifest.find("\"evaluator\": \"pattern-gain\"") != std::string::npos);
+  REQUIRE(manifest.find("\"model_header_sha256\": \"" +
+                        std::string{labeling::compiled_model_header_sha256()} + "\"") !=
+          std::string::npos);
+
+  options.evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
+  const position_source::PositionSourceCorpus closure =
+      position_source::generate_position_source(options);
+  const std::string closure_manifest = position_source::serialize_source_manifest(
+      closure, position_source::serialize_source_shards(closure));
+  REQUIRE(closure_manifest.find("\"evaluator\": \"two-ply-closure\"") != std::string::npos);
+  REQUIRE(closure_manifest.find("model_header_sha256") == std::string::npos);
+
+  options.evaluator = poe2::minimax::Evaluator::kStatic;
+  REQUIRE_THROWS_AS(position_source::generate_position_source(options), std::invalid_argument);
+}
