@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -45,19 +46,25 @@ from poe2_training.workflow_adapters import (
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
     authenticate_candidate,
+    authenticate_features,
     authenticate_gate,
     authenticate_label_shard,
     authenticate_training,
     candidate_build_id,
     data_binary,
+    data_build_directory,
     engine_gate_command,
     gate_build_directory,
+    label_command,
     label_shard_path,
     resolve_eval_binary,
+    source_command,
 )
 from poe2_training.workflow_config import (
     WorkflowConfigError,
+    fingerprint,
     load_workflow_config,
+    stage_definitions,
     stage_fingerprints,
 )
 from poe2_training.workflow_state import RunState, StateError
@@ -255,8 +262,156 @@ class WorkflowConfigTest(unittest.TestCase):
 
         manifest["search"]["evaluator"] = "two-ply"
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "search semantics"):
+        with self.assertRaisesRegex(ValueError, "evaluator is unsupported"):
             authenticate_label_shard(dataset, 0)
+
+    def _teacher_repository(self) -> tuple[Path, str]:
+        repository = self.root / "teacher-repository"
+        (repository / ".git").mkdir(parents=True)
+        (repository / "CMakePresets.json").write_bytes(
+            (REPOSITORY / "CMakePresets.json").read_bytes())
+        header = b"// teacher model fixture\n"
+        model_id = f"candidate-sha256-{hashlib.sha256(header).hexdigest()}"
+        (repository / "models").mkdir()
+        (repository / "models" / f"{model_id}.hpp").write_bytes(header)
+        (repository / "models" / f"{model_id}.json").write_text("{}\n", encoding="utf-8")
+        return repository, model_id
+
+    @staticmethod
+    def _teacher_text(repository: Path, model_id: str, *, teacher: str = "g000") -> str:
+        return _managed_config(repository).replace(
+            '[datasets.main]\nkind = "managed"',
+            f'[models]\ng000 = "{model_id}"\n\n'
+            f'[datasets.main]\nkind = "managed"\nteacher = "{teacher}"')
+
+    @staticmethod
+    def _label_manifest(dataset, *, evaluator: str = "two-ply-closure",
+                        model: str | None = None) -> dict[str, object]:
+        return {
+            "schema": "poe2-minimax-labels",
+            "corpus": {"id": dataset.source.corpus_id, "shard_index": 0,
+                       "shard_count": dataset.source.shards},
+            "search": {
+                "mode": dataset.labels.mode, "node_limit": dataset.labels.nodes,
+                "hash_bytes_requested": dataset.labels.hash_mb * 1024 * 1024,
+                "workers_requested": dataset.labels.workers,
+                "workers_used": dataset.labels.workers,
+                "require_all": dataset.labels.require_all,
+                "target_selection": "deepest_terminal_parity", "evaluator": evaluator,
+                **({} if model is None else {"model_header_sha256": model}),
+                "symmetry": True, "two_ply_closure": True,
+            },
+            "build": {"git_commit": "1" * 40, "git_dirty": False},
+            "results": {"records": 1, "unsolved": 0},
+            "binary_digest": "sha256:" + "2" * 64,
+        }
+
+    def test_teacher_dataset_uses_an_archived_model_and_changes_only_its_stages(self) -> None:
+        repository, model_id = self._teacher_repository()
+        digest = model_id.removeprefix("candidate-sha256-")
+        taught = load_workflow_config(_write(
+            repository, self._teacher_text(repository, model_id), "taught.toml"))
+        plain = load_workflow_config(_write(repository, _managed_config(repository), "plain.toml"))
+        dataset, plain_dataset = taught.dataset("main"), plain.dataset("main")
+        self.assertEqual(dataset.teacher.model_id, model_id)
+        self.assertEqual(dataset.teacher.header, repository / "models" / f"{model_id}.hpp")
+        self.assertIsNone(plain_dataset.teacher)
+
+        taught_stages, plain_stages = stage_definitions(taught), stage_definitions(plain)
+        for stage in ("dataset:main:source", "dataset:main:labels"):
+            self.assertEqual(taught_stages[stage]["teacher"], model_id)
+            self.assertNotIn("teacher", plain_stages[stage])
+            self.assertNotEqual(fingerprint(taught_stages[stage]), fingerprint(plain_stages[stage]))
+
+        self.assertEqual(
+            data_binary(taught, dataset),
+            taught.output_directory / f"build/teacher-{digest[:12]}/debug/runner/poe2_minimax_data")
+        self.assertEqual(data_binary(plain, plain_dataset), data_binary(plain))
+        for command in (source_command(taught, dataset), label_command(taught, dataset, 0)):
+            self.assertEqual(command[0], str(data_binary(taught, dataset)))
+            self.assertEqual(command[command.index("--evaluator") + 1], "pattern-gain")
+        for command in (source_command(plain, plain_dataset),
+                        label_command(plain, plain_dataset, 0)):
+            self.assertNotIn("--evaluator", command)
+
+    def test_teacher_must_name_an_intact_archived_model(self) -> None:
+        repository, model_id = self._teacher_repository()
+        with self.assertRaisesRegex(WorkflowConfigError, "must name an entry"):
+            load_workflow_config(_write(repository, self._teacher_text(
+                repository, model_id, teacher="g001"), "unknown.toml"))
+        with self.assertRaisesRegex(WorkflowConfigError, "archived model ID"):
+            load_workflow_config(_write(repository, self._teacher_text(
+                repository, "v0.2"), "malformed.toml"))
+        (repository / "models" / f"{model_id}.json").unlink()
+        with self.assertRaisesRegex(WorkflowConfigError, "is not archived"):
+            load_workflow_config(_write(repository, self._teacher_text(
+                repository, model_id), "unarchived.toml"))
+        (repository / "models" / f"{model_id}.json").write_text("{}\n", encoding="utf-8")
+        (repository / "models" / f"{model_id}.hpp").write_text("changed\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowConfigError, "does not match its digest"):
+            load_workflow_config(_write(repository, self._teacher_text(
+                repository, model_id), "changed.toml"))
+
+    def test_label_and_feature_authentication_require_the_configured_teacher(self) -> None:
+        repository, model_id = self._teacher_repository()
+        digest = model_id.removeprefix("candidate-sha256-")
+        taught = load_workflow_config(_write(
+            repository, self._teacher_text(repository, model_id), "taught.toml"))
+        plain = load_workflow_config(_write(repository, _managed_config(repository), "plain.toml"))
+        dataset = taught.dataset("main")
+        shard = label_shard_path(dataset, 0)
+        shard.mkdir(parents=True)
+        manifest_path = shard / "manifest.json"
+
+        manifest_path.write_text(json.dumps(self._label_manifest(
+            dataset, evaluator="pattern-gain", model=digest)) + "\n", encoding="utf-8")
+        self.assertEqual(authenticate_label_shard(dataset, 0)["teacher"], model_id)
+        with self.assertRaisesRegex(ValueError, "teacher differs"):
+            authenticate_label_shard(plain.dataset("main"), 0)
+        for manifest in (self._label_manifest(dataset),
+                         self._label_manifest(dataset, evaluator="pattern-gain", model="f" * 64)):
+            manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "teacher differs"):
+                authenticate_label_shard(dataset, 0)
+
+        dataset.feature_directory.parent.mkdir(parents=True, exist_ok=True)
+        write_feature_fixture(dataset.feature_directory, teacher_sha256=digest)
+        self.assertEqual(authenticate_features(dataset)["teacher"], model_id)
+        with self.assertRaisesRegex(ValueError, "teacher differs"):
+            authenticate_features(plain.dataset("main"))
+
+    def test_teacher_data_binary_is_built_from_the_archived_header(self) -> None:
+        repository, model_id = self._teacher_repository()
+        digest = model_id.removeprefix("candidate-sha256-")
+        config = load_workflow_config(_write(
+            repository, self._teacher_text(repository, model_id), "taught.toml"))
+        dataset = config.dataset("main")
+        commit = "3" * 40
+        binary = data_binary(config, dataset)
+        commands: list[list[str]] = []
+
+        def build(contents: bytes):
+            def run(_stage: str, operation: str, command, **_options) -> None:
+                commands.append(list(command))
+                if operation == "build-data":
+                    binary.parent.mkdir(parents=True, exist_ok=True)
+                    binary.write_bytes(contents)
+            return run
+
+        workflow = WorkflowRunner(config, RunState(config), commit)
+        with mock.patch.object(workflow, "_command", side_effect=build(
+                b"fixture\0" + commit.encode() + b"\0" + digest.encode())):
+            workflow._ensure_data_binary("dataset:main:source", 1, dataset)
+        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={dataset.teacher.header}", commands[0])
+        self.assertIn(str(data_build_directory(config, dataset)), commands[0])
+        self.assertEqual(workflow._data_commits[binary], commit)
+
+        binary.unlink()
+        other = WorkflowRunner(config, RunState(config), commit)
+        with mock.patch.object(other, "_command",
+                               side_effect=build(b"fixture\0" + commit.encode())):
+            with self.assertRaisesRegex(WorkflowError, "teacher model"):
+                other._ensure_data_binary("dataset:main:source", 1, dataset)
 
     def test_partial_label_resume_reuses_binary_with_original_commit(self) -> None:
         config = load_workflow_config(_write(self.root, _managed_config(self.root)))
@@ -270,10 +425,11 @@ class WorkflowConfigTest(unittest.TestCase):
 
         with mock.patch.object(workflow, "_command") as command:
             workflow._ensure_data_binary(
-                "dataset:main:labels", 2, required_commit=original_commit)
+                "dataset:main:labels", 2, config.dataset("main"),
+                required_commit=original_commit)
 
         command.assert_not_called()
-        self.assertEqual(workflow._data_commit, original_commit)
+        self.assertEqual(workflow._data_commits[binary], original_commit)
 
     def test_pattern_suite_report_remains_authenticatable_after_shared_refactor(self) -> None:
         feature = write_feature_fixture(self.root / "suite-features")
@@ -1089,6 +1245,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "path": "promotion.toml", "run": "promotion-test", "iteration": "candidate"})
         self.assertEqual(metrics["metrics"]["quantized"]["validation"]["mae"], 1.25)
         self.assertEqual(metrics["corpus_id"], "training-loader-test")
+        self.assertEqual(metrics["teacher"], {"evaluator": "two-ply-closure"})
         with (repository / "models" / "index.csv").open(newline="", encoding="utf-8") as source:
             index = list(csv.DictReader(source))
         self.assertEqual(index, [{

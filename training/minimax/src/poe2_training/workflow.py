@@ -43,6 +43,7 @@ from .workflow_adapters import (
     authenticate_training,
     candidate_build_id,
     data_binary,
+    data_build_directory,
     engine_gate_command,
     evaluation_command,
     export_command,
@@ -61,6 +62,7 @@ from .workflow_adapters import (
     training_command,
 )
 from .workflow_config import (
+    MODEL_ARCHIVE_DIRECTORY,
     ImportedDatasetConfig,
     IterationConfig,
     ManagedDatasetConfig,
@@ -80,7 +82,6 @@ from .workflow_ui import (
     status_symbol,
 )
 
-MODEL_ARCHIVE_DIRECTORY = Path("models")
 MODEL_ARCHIVE_SCHEMA = "poe2-archived-model"
 MODEL_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "index.csv"
 MODEL_INDEX_HEADER = (
@@ -626,8 +627,8 @@ class WorkflowRunner:
         self.commit = commit
         self.commands = CommandRunner(config.repository)
         self.progress = progress
-        self._data_ready = False
-        self._data_commit: str | None = None
+        # Commit each run-local data binary was built or authenticated at, keyed by binary path.
+        self._data_commits: dict[Path, str] = {}
 
     def _paths(self, stage: str, operation: str, attempt: int) -> tuple[Path, Path]:
         safe = stage.replace(":", "-")
@@ -651,61 +652,64 @@ class WorkflowRunner:
                 if self.progress is not None else None),
         )
 
-    def _ensure_data_binary(self, stage: str, attempt: int, *,
+    def _ensure_data_binary(self, stage: str, attempt: int, dataset: ManagedDatasetConfig, *,
                             required_commit: str | None = None) -> None:
-        binary = data_binary(self.config)
+        binary = data_binary(self.config, dataset)
+        teacher = dataset.teacher
         if required_commit is not None and re.fullmatch(
                 r"[0-9a-f]{40}", required_commit) is None:
             raise WorkflowError(
                 f"label shards have invalid build commit {required_commit!r}")
         target_commit = required_commit or self.commit
-        if self._data_ready and binary.is_file():
-            if self._data_commit == target_commit:
+        ready_commit = self._data_commits.get(binary)
+        if ready_commit is not None and binary.is_file():
+            if ready_commit == target_commit:
                 return
             if required_commit is not None:
                 raise WorkflowError(
-                    f"run-local data binary is from commit {self._data_commit}, but the "
+                    f"run-local data binary is from commit {ready_commit}, but the "
                     f"completed label shards require {required_commit}")
 
+        def binary_contains(*values: str) -> bool:
+            try:
+                contents = binary.read_bytes()
+            except OSError as error:
+                raise WorkflowError(
+                    f"could not authenticate data binary {binary}: {error}") from error
+            return all(value.encode() in contents for value in values)
+
+        identity = (teacher.sha256,) if teacher is not None else ()
         # A partially completed label corpus must continue with the exact
         # run-local binary that created its earlier shards. Reconfiguring this
         # tree at a later source commit would silently embed a different build
         # identity, which the native feature reader correctly rejects.
         if required_commit is not None and binary.is_file():
-            try:
-                contains_commit = required_commit.encode() in binary.read_bytes()
-            except OSError as error:
-                raise WorkflowError(
-                    f"could not authenticate data binary {binary}: {error}") from error
-            if contains_commit:
-                self._data_ready = True
-                self._data_commit = required_commit
+            if binary_contains(required_commit, *identity):
+                self._data_commits[binary] = required_commit
                 return
         if required_commit is not None and required_commit != self.commit:
             raise WorkflowError(
                 f"cannot resume label artifacts created by commit {required_commit}: restore "
                 f"their run-local data binary at {binary}; the current commit is {self.commit}")
 
-        build = self.config.output_directory / "build" / self.config.build_preset
-        self._command(stage, "configure", [
-            "cmake", "--preset", self.config.build_preset, "-B", str(build)],
-            attempt=attempt)
+        build = data_build_directory(self.config, dataset)
+        configure = ["cmake", "--preset", self.config.build_preset, "-B", str(build)]
+        if teacher is not None:
+            if not teacher.header.is_file() or sha256_file(teacher.header) != teacher.sha256:
+                raise WorkflowError(
+                    f"teacher model {teacher.name} is missing or changed: {teacher.header}")
+            configure.append(f"-DPOE2_MINIMAX_MODEL_HEADER={teacher.header}")
+        self._command(stage, "configure", configure, attempt=attempt)
         self._command(stage, "build-data", [
             "cmake", "--build", str(build),
             "--target", "poe2_minimax_data"], attempt=attempt)
         if not binary.is_file():
             raise WorkflowError(f"data binary was not built: {binary}")
-        try:
-            contains_commit = self.commit.encode() in binary.read_bytes()
-        except OSError as error:
-            raise WorkflowError(
-                f"could not authenticate data binary {binary}: {error}") from error
-        if not contains_commit:
+        if not binary_contains(self.commit, *identity):
             raise WorkflowError(
                 f"data binary does not contain the configured build commit "
-                f"{self.commit}: {binary}")
-        self._data_ready = True
-        self._data_commit = self.commit
+                f"{self.commit}{' and teacher model' if teacher is not None else ''}: {binary}")
+        self._data_commits[binary] = self.commit
 
     def _begin(self, stage: str, action: str, input_value: Any) -> int:
         input_fingerprint = fingerprint(input_value)
@@ -813,7 +817,7 @@ class WorkflowRunner:
         stage = f"dataset:{dataset.name}:source"
 
         def create(attempt: int) -> None:
-            self._ensure_data_binary(stage, attempt)
+            self._ensure_data_binary(stage, attempt, dataset)
             self._command(stage, "create", source_command(self.config, dataset), attempt=attempt)
 
         def authenticate(attempt: int) -> dict[str, Any]:
@@ -869,7 +873,7 @@ class WorkflowRunner:
                         ", ".join(sorted(build_commits)))
                 required_commit = next(iter(build_commits), None)
                 self._ensure_data_binary(
-                    stage, attempt, required_commit=required_commit)
+                    stage, attempt, dataset, required_commit=required_commit)
                 create_started = time.perf_counter()
 
                 def run_shard(index: int) -> tuple[int, dict[str, Any], float]:
@@ -935,7 +939,7 @@ class WorkflowRunner:
         def create(attempt: int) -> None:
             label_commit = authenticate_label_shard(dataset, 0)["git_commit"]
             self._ensure_data_binary(
-                stage, attempt, required_commit=str(label_commit))
+                stage, attempt, dataset, required_commit=str(label_commit))
             self._command(
                 stage, "create", feature_command(self.config, dataset), attempt=attempt)
 
@@ -1405,6 +1409,8 @@ def _archive_entry(config: WorkflowConfig, iteration: IterationConfig,
         "git_commit": candidate["git_commit"],
         "validated_at_utc": candidate["created_at_utc"],
         "corpus_id": candidate["corpus_id"],
+        "teacher": ({"evaluator": "two-ply-closure"} if candidate["teacher"] is None else
+                    {"evaluator": "pattern-gain", "model_id": candidate["teacher"]}),
         "provenance": {
             "feature_binary_sha256": candidate["feature_binary_sha256"],
             "training_report_sha256": candidate["training_report_sha256"],

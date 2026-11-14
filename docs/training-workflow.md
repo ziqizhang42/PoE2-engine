@@ -109,6 +109,23 @@ kind = "imported"
 path = "build/data/features/example/b-primitives"
 ```
 
+### Teachers and generations
+
+A managed dataset can name a teacher: an archived model whose learned evaluator drives the noisy-search positions and the labels. Without one, both use the two-ply-closure evaluator.
+
+```toml
+[models]
+g000 = "candidate-sha256-<header digest>"
+
+[datasets.g001]
+kind = "managed"
+teacher = "g000"
+```
+
+Each `[models]` entry gives a recipe-local name to a model archived under `models/`. Loading the recipe requires the archived `.hpp` and `.json` to exist and the header to match its digest. The workflow builds a private data tool for each teacher under `<run>/build/teacher-<digest prefix>/`, with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the archived header, and passes `--evaluator pattern-gain` to position generation and labeling. Source, label, and feature authentication require the recorded evaluator and model digest to match the recipe. A teacher is part of the source and label stage fingerprints, so it cannot change once those stages start. Datasets without a teacher keep the fingerprints they had before teachers existed.
+
+A run trains one architecture over successive generations named `g000`, `g001`, …. `g000` is the run's starting model, either imported or trained inside the run. Each later generation `gNNN` has a dataset taught by the generation before it, and its gate plays that generation. To start the next generation, promote the current one's gate so its model is archived, add it to `[models]`, and append the new dataset and iteration in a compatible recipe revision. A new run starts only when the architecture or a major setting changes. Offline metrics compare models only within one generation, because each generation's labels come from a different teacher; games compare generations.
+
 Baseline training uses `type = "baseline"` and accepts `device`, `seed`, `close_margin`, and `ridge_lambdas`. Pattern suites are `default`, `frozen-pattern-gain`, and `line-pattern-audit`.
 
 Iteration dependencies enforce ordering and authentication only; they never copy a selected model or settings into a later iteration. The exploratory suites report their own validation winner, while `frozen-pattern-gain` always trains the fixed engine-compatible deployment contract. A recipe containing both roles is therefore a reproducibility and audit pipeline, not an automatic nested model-selection pipeline.

@@ -25,7 +25,8 @@ class FixtureRecord:
 
 
 def write_feature_fixture(directory: Path, *, dirty: bool = False,
-                          rows: Sequence[FixtureRecord] | None = None) -> Path:
+                          rows: Sequence[FixtureRecord] | None = None,
+                          teacher_sha256: str | None = None) -> Path:
     directory.mkdir()
     corpus_id = "training-loader-test"
     corpus_digest = hashlib.sha256(corpus_id.encode()).digest()
@@ -92,6 +93,15 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False,
             "label_build": {
                 "git_commit": "1" * 40,
                 "git_dirty": dirty,
+            },
+            "label_search": {
+                "mode": "teacher",
+                "node_limit": 100,
+                "hash_bytes_effective": 0,
+                "workers_requested": 1,
+                "target_selection": "deepest_terminal_parity",
+                **({} if teacher_sha256 is None else
+                   {"evaluator": "pattern-gain", "model_header_sha256": teacher_sha256}),
             },
         },
         "exporter_build": {

@@ -13,13 +13,15 @@ from typing import Any, Literal
 
 from .model_metrics import DEFAULT_RIDGE_LAMBDAS
 from .pattern_suites import SUITE_NAMES
-from .shared import find_repository_root
+from .shared import find_repository_root, sha256_file
 
 
 SCHEMA_VERSION = 1
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CANDIDATE_ENGINE = "minimax/poe2_minimax"
 CANDIDATE_ENGINE_ARGS = "--evaluator pattern-gain"
+MODEL_ARCHIVE_DIRECTORY = Path("models")
+MODEL_ID_PATTERN = re.compile(r"^candidate-sha256-([0-9a-f]{64})$")
 
 
 class WorkflowConfigError(ValueError):
@@ -60,6 +62,19 @@ class FeatureConfig:
 
 
 @dataclass(frozen=True)
+class ModelReference:
+    """A recipe-local name for one model archived under the repository's models/ folder."""
+
+    name: str
+    model_id: str
+    header: Path
+
+    @property
+    def sha256(self) -> str:
+        return self.model_id.removeprefix("candidate-sha256-")
+
+
+@dataclass(frozen=True)
 class ManagedDatasetConfig:
     name: str
     kind: Literal["managed"]
@@ -67,6 +82,8 @@ class ManagedDatasetConfig:
     source: SourceConfig
     labels: LabelConfig
     features: FeatureConfig
+    # The model that drives noisy-search sampling and labels; None means two-ply closure.
+    teacher: ModelReference | None = None
 
     @property
     def source_directory(self) -> Path:
@@ -187,6 +204,7 @@ class WorkflowConfig:
     label_concurrency: int | None
     datasets: tuple[DatasetConfig, ...]
     iterations: tuple[IterationConfig, ...]
+    models: tuple[ModelReference, ...] = ()
 
     def dataset(self, name: str) -> DatasetConfig:
         for dataset in self.datasets:
@@ -240,6 +258,24 @@ def _name(value: str, field: str) -> str:
              f"{field} must match {NAME_PATTERN.pattern}")
     _require(value not in {".", ".."}, f"{field} is unsafe")
     return value
+
+
+def _parse_models(repository: Path, value: Any) -> tuple[ModelReference, ...]:
+    table = _table(value, "config.models")
+    models: list[ModelReference] = []
+    for raw_name, model_id in table.items():
+        name = _name(raw_name, f"config.models.{raw_name}")
+        field = f"config.models.{name}"
+        match = MODEL_ID_PATTERN.fullmatch(model_id) if isinstance(model_id, str) else None
+        _require(match is not None, f"{field} must be an archived model ID: candidate-sha256-<digest>")
+        directory = repository / MODEL_ARCHIVE_DIRECTORY
+        header = directory / f"{model_id}.hpp"
+        _require(header.is_file() and (directory / f"{model_id}.json").is_file(),
+                 f"{field} is not archived under {MODEL_ARCHIVE_DIRECTORY}/: {model_id}")
+        _require(sha256_file(header) == match.group(1),
+                 f"{field} archived header does not match its digest: {header}")
+        models.append(ModelReference(name=name, model_id=model_id, header=header))
+    return tuple(models)
 
 
 def _binary_name(value: str, field: str) -> str:
@@ -471,7 +507,7 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         raise WorkflowConfigError(f"could not read workflow config {config_path}: {error}") from error
     repository = find_repository_root(config_path.parent)
     _require(repository is not None, f"config is not inside a Git repository: {config_path}")
-    _unknown(document, {"schema_version", "run", "datasets", "iterations"}, "config")
+    _unknown(document, {"schema_version", "run", "models", "datasets", "iterations"}, "config")
     _require(document.get("schema_version") == SCHEMA_VERSION,
              f"config.schema_version must be {SCHEMA_VERSION}")
 
@@ -501,6 +537,9 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
     label_concurrency = (None if "label_concurrency" not in run else
                          _integer(run, "label_concurrency", "config.run", minimum=1))
 
+    models = _parse_models(repository, document.get("models", {}))
+    models_by_name = {model.name: model for model in models}
+
     dataset_values = _table(document.get("datasets"), "config.datasets")
     _require(bool(dataset_values), "config.datasets must contain at least one named dataset")
     datasets: list[DatasetConfig] = []
@@ -510,12 +549,19 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         table = _table(raw_value, field)
         kind = _string(table, "kind", field)
         if kind == "managed":
-            _unknown(table, {"kind", "source", "labels", "features"}, field)
+            _unknown(table, {"kind", "teacher", "source", "labels", "features"}, field)
+            teacher = None
+            if "teacher" in table:
+                teacher_name = _string(table, "teacher", field)
+                _require(teacher_name in models_by_name,
+                         f"{field}.teacher must name an entry in config.models: {teacher_name}")
+                teacher = models_by_name[teacher_name]
             datasets.append(ManagedDatasetConfig(
                 name=dataset_name, kind="managed", root=output / "datasets" / dataset_name,
                 source=_parse_source(_value(table, "source", field), f"{field}.source"),
                 labels=_parse_labels(_value(table, "labels", field), f"{field}.labels"),
                 features=_parse_features(table.get("features", {}), f"{field}.features"),
+                teacher=teacher,
             ))
         elif kind == "imported":
             _unknown(table, {"kind", "path"}, field)
@@ -598,7 +644,7 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         path=config_path, contents=contents, digest=hashlib.sha256(contents).hexdigest(),
         repository=repository, name=run_name, output_directory=output,
         build_preset=preset, label_concurrency=label_concurrency,
-        datasets=tuple(datasets), iterations=tuple(iterations),
+        datasets=tuple(datasets), iterations=tuple(iterations), models=models,
     )
 
 
@@ -626,13 +672,17 @@ def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
     for dataset in config.datasets:
         if isinstance(dataset, ManagedDatasetConfig):
             source_id = f"dataset:{dataset.name}:source"
+            # Teachers are added only when present so stages recorded before teachers existed
+            # keep their fingerprints.
+            teacher = ({} if dataset.teacher is None else
+                       {"teacher": dataset.teacher.model_id})
             result[source_id] = {"adapter": "source", "preset": config.build_preset,
-                                 "settings": dataset.source}
+                                 "settings": dataset.source, **teacher}
             labels_id = f"dataset:{dataset.name}:labels"
             result[labels_id] = {
                 "adapter": "labels", "preset": config.build_preset,
                 "source": fingerprint(result[source_id]), "settings": dataset.labels,
-                "label_concurrency": config.label_concurrency,
+                "label_concurrency": config.label_concurrency, **teacher,
             }
             features_id = f"dataset:{dataset.name}:features"
             result[features_id] = {

@@ -65,9 +65,21 @@ def _require_report_layout(directory: Path, label: str,
              f"{label} has unexpected output files: {directory}")
 
 
-def data_binary(config: WorkflowConfig) -> Path:
-    return (config.output_directory / "build" / config.build_preset / "runner" /
-            "poe2_minimax_data")
+def data_build_directory(config: WorkflowConfig,
+                         dataset: ManagedDatasetConfig | None = None) -> Path:
+    """Return the run-local build tree, private to the dataset's teacher model when it has one."""
+    root = config.output_directory / "build"
+    if dataset is not None and dataset.teacher is not None:
+        root = root / f"teacher-{dataset.teacher.sha256[:12]}"
+    return root / config.build_preset
+
+
+def data_binary(config: WorkflowConfig, dataset: ManagedDatasetConfig | None = None) -> Path:
+    return data_build_directory(config, dataset) / "runner" / "poe2_minimax_data"
+
+
+def _evaluator_arguments(dataset: ManagedDatasetConfig) -> list[str]:
+    return [] if dataset.teacher is None else ["--evaluator", "pattern-gain"]
 
 
 def candidate_build_id(candidate: dict[str, Any]) -> str:
@@ -110,7 +122,8 @@ def resolve_eval_binary(config: WorkflowConfig, value: str, engine: str) -> Path
 def source_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> list[str]:
     source = dataset.source
     return [
-        str(data_binary(config)), "source", "--output-dir", str(dataset.source_directory),
+        str(data_binary(config, dataset)), "source",
+        "--output-dir", str(dataset.source_directory),
         "--corpus-id", source.corpus_id, "--seed", str(source.seed),
         "--trajectories", str(source.trajectories),
         "--samples-per-trajectory", str(source.samples_per_trajectory),
@@ -123,6 +136,7 @@ def source_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> lis
         "--opponent-weight", str(source.opponent_weight),
         "--search-weight", str(source.search_weight),
         "--progress-every", str(source.progress_every),
+        *_evaluator_arguments(dataset),
     ]
 
 
@@ -154,11 +168,12 @@ def label_command(config: WorkflowConfig, dataset: ManagedDatasetConfig,
                   index: int) -> list[str]:
     labels = dataset.labels
     command = [
-        str(data_binary(config)), "labels", "--input", str(dataset.source_directory),
+        str(data_binary(config, dataset)), "labels", "--input", str(dataset.source_directory),
         "--source-shard", str(index), "--output-dir", str(label_shard_path(dataset, index)),
         "--mode", labels.mode, "--nodes", str(labels.nodes),
         "--hash-mb", str(labels.hash_mb), "--workers", str(labels.workers),
         "--progress-every", str(labels.progress_every),
+        *_evaluator_arguments(dataset),
     ]
     if labels.require_all:
         command.append("--require-all")
@@ -184,7 +199,8 @@ def label_preflight_command(python: str, config: WorkflowConfig,
 
 def feature_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> list[str]:
     return [
-        str(data_binary(config)), "features", "--source", str(dataset.source_directory),
+        str(data_binary(config, dataset)), "features",
+        "--source", str(dataset.source_directory),
         "--labels", str(dataset.labels_directory), "--output-dir",
         str(dataset.feature_directory),
     ]
@@ -304,6 +320,23 @@ def _manifest(path: Path) -> dict[str, Any]:
     return value
 
 
+def recorded_teacher(search: dict[str, Any], label: str) -> str | None:
+    """Return the archived model ID a manifest's search used, or None for two-ply closure."""
+    evaluator = search.get("evaluator", "two-ply-closure")
+    model = search.get("model_header_sha256")
+    if evaluator in {"two-ply-closure", "b"}:
+        _require(model is None, f"{label} records a model without a learned evaluator")
+        return None
+    _require(evaluator == "pattern-gain" and isinstance(model, str) and
+             re.fullmatch(r"[0-9a-f]{64}", model) is not None,
+             f"{label} search evaluator is unsupported")
+    return f"candidate-sha256-{model}"
+
+
+def _expected_teacher(dataset: ManagedDatasetConfig) -> str | None:
+    return None if dataset.teacher is None else dataset.teacher.model_id
+
+
 def authenticate_source(dataset: ManagedDatasetConfig) -> dict[str, Any]:
     manifest_path = dataset.source_directory / "manifest.json"
     manifest = _manifest(manifest_path)
@@ -328,10 +361,12 @@ def authenticate_source(dataset: ManagedDatasetConfig) -> dict[str, Any]:
         "random": expected.random_weight, "immediate_gain": expected.greedy_weight,
         "opponent_aware": expected.opponent_weight, "noisy_search": expected.search_weight,
     }, "position source policy mixture differs from configuration")
+    _require(recorded_teacher(generator, "position source") == _expected_teacher(dataset),
+             "position source teacher differs from configuration")
     build = manifest.get("build")
     _require(isinstance(build, dict) and build.get("git_dirty") is False,
              "position source was produced from a dirty build")
-    return {
+    stats = {
         "manifest_sha256": sha256_file(manifest_path), "corpus_id": corpus.get("id"),
         "records": results.get("records"), "trajectories": expected.trajectories,
         "shards": expected.shards, "duplicates": results.get("duplicate_positions"),
@@ -339,6 +374,10 @@ def authenticate_source(dataset: ManagedDatasetConfig) -> dict[str, Any]:
         "workers_requested": generator.get("workers_requested"),
         "workers_used": generator.get("workers_used"),
     }
+    # Stage statistics feed later stages' input fingerprints, so teacher-less runs keep their shape.
+    if dataset.teacher is not None:
+        stats["teacher"] = dataset.teacher.model_id
+    return stats
 
 
 def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[str, Any]:
@@ -366,10 +405,11 @@ def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[
     # "b".  The authoritative producer now writes "two-ply-closure", and the
     # native feature reader intentionally accepts both spellings.
     _require(search.get("target_selection") == "deepest_terminal_parity" and
-             search.get("evaluator") in {"two-ply-closure", "b"} and
              search.get("symmetry") is True and
              search.get("two_ply_closure") is True,
              f"label shard {index} search semantics are unsupported")
+    _require(recorded_teacher(search, f"label shard {index}") == _expected_teacher(dataset),
+             f"label shard {index} teacher differs from configuration")
     _require(build.get("git_dirty") is False and
              isinstance(build.get("git_commit"), str) and
              re.fullmatch(r"[0-9a-f]{40}", build["git_commit"]) is not None,
@@ -383,6 +423,7 @@ def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[
         "workers_requested": search.get("workers_requested"),
         "workers_used": search.get("workers_used"),
         "git_commit": build["git_commit"],
+        **({} if dataset.teacher is None else {"teacher": dataset.teacher.model_id}),
     }
 
 
@@ -402,6 +443,12 @@ def aggregate_label_stats(shards: list[dict[str, Any]]) -> dict[str, Any]:
 def authenticate_features(dataset: DatasetConfig, *, require_clean: bool = True) -> dict[str, Any]:
     artifact: FeatureArtifact = open_feature_artifact(
         dataset.feature_directory, verify_digest=True, require_clean=require_clean)
+    label_search = artifact.manifest.get("inputs", {}).get("label_search")
+    _require(isinstance(label_search, dict), "feature manifest has no label search record")
+    teacher = recorded_teacher(label_search, "feature artifact")
+    if isinstance(dataset, ManagedDatasetConfig):
+        _require(teacher == _expected_teacher(dataset),
+                 "feature artifact teacher differs from configuration")
     return {
         "binary_sha256": artifact.binary_digest,
         "manifest_sha256": artifact.manifest_digest,
@@ -410,6 +457,7 @@ def authenticate_features(dataset: DatasetConfig, *, require_clean: bool = True)
         "split_counts": {"train": artifact.split_counts[0],
                          "validation": artifact.split_counts[1], "test": artifact.split_counts[2]},
         "corpus_id": artifact.manifest["corpus"]["id"],
+        **({} if teacher is None else {"teacher": teacher}),
     }
 
 
@@ -619,6 +667,7 @@ def authenticate_candidate(config: WorkflowConfig,
         "report_sha256": report_digest, "promotable": report["promotable"],
         "git_commit": report["git_commit"], "created_at_utc": report.get("created_at_utc"),
         "corpus_id": feature["corpus_id"],
+        "teacher": feature.get("teacher"),
         "feature_binary_sha256": feature["binary_sha256"],
         "training_report_sha256": report["training_report_sha256"],
         "sealed_evaluation_report_sha256": report["sealed_evaluation_report_sha256"],
