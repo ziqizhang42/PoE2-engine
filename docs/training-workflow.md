@@ -53,8 +53,8 @@ The candidate promotion sequence is:
 
 1. Commit a recipe whose candidate iteration includes an `engine_gate` table. A gate can also be added later in a compatible recipe revision, as long as that stage has not started.
 2. Run the iteration: training, candidate validation, and the gate. The gate builds the candidate's model header privately, so nothing in the source tree changes.
-3. Preview and apply gate promotion. This appends the ledger row and archives the model under `models/`, whatever the decision.
-4. Review and commit the ledger row and archive.
+3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision.
+4. Review and commit the ledger row, archive, and index.
 5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed model header.
 
 ## Configuration
@@ -207,7 +207,22 @@ models/
 └── candidate-sha256-<header digest>.json   offline metrics and provenance
 ```
 
-The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so every gated row leads to its model. The JSON records the architecture, recipe and iteration, Git commit, corpus, report digests, float and quantized validation and sealed-test metrics, parity, and benchmarks. It contains only fields fixed by the authenticated candidate, so it is byte-identical on every promotion attempt. An archive is written before the ledger row, so an interrupted promotion can be retried. Existing archive files are reused only if they match exactly; otherwise promotion stops.
+The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so every gated row leads to its model. The JSON records the architecture, recipe and iteration, Git commit, corpus, report digests, float and quantized validation and sealed-test metrics, parity, and benchmarks. It contains only fields fixed by the authenticated candidate, so it is byte-identical on every promotion attempt.
+
+`models/index.csv` gives one readable row per promoted gate, in promotion order, so progress across runs shows without opening the archive:
+
+| Column | Meaning |
+|---|---|
+| `recorded_utc` | When the gate started, from its manifest |
+| `run`, `iteration` | The recipe run and iteration that produced the model |
+| `model` | The first 12 hex digits of the model header digest; the archive files and the ledger's `new_id` carry the full digest |
+| `base` | The build the candidate played against |
+| `decision` | The gate's sequential decision, such as `accept_alt` or `accept_null` |
+| `games`, `score_pct` | Games played and the candidate's score, counting a no-winner game as half |
+| `sealed_mae` | Exported quantized sealed-test MAE, empty without a sealed evaluation |
+| `gate_run_id` | The ledger row's `run_id` |
+
+The archive and the index row are written before the ledger row, so an interrupted promotion can be retried. Existing archive files and index rows are reused only if they match exactly; otherwise promotion stops.
 
 An archived model can be rebuilt for analysis or a later re-gate by configuring a build with `-DPOE2_MINIMAX_MODEL_HEADER=models/candidate-sha256-<header digest>.hpp`.
 

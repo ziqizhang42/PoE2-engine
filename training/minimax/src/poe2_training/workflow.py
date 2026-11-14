@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -81,6 +82,11 @@ from .workflow_ui import (
 
 MODEL_ARCHIVE_DIRECTORY = Path("models")
 MODEL_ARCHIVE_SCHEMA = "poe2-archived-model"
+MODEL_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "index.csv"
+MODEL_INDEX_HEADER = (
+    "recorded_utc", "run", "iteration", "model", "base", "decision", "games", "score_pct",
+    "sealed_mae", "gate_run_id",
+)
 
 
 class WorkflowError(ValueError):
@@ -1445,6 +1451,60 @@ def _write_archived_model(entry: ArchiveEntry) -> None:
         raise WorkflowError(f"could not archive model {entry.header_path.stem}: {error}") from error
 
 
+def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
+                     candidate: dict[str, Any], gate: dict[str, Any],
+                     saved: dict[str, str]) -> list[str]:
+    """Return one readable index row built only from authenticated gate and candidate fields."""
+    games = int(saved["games_played"])
+    if games <= 0:
+        raise WorkflowError("authenticated gate played no games")
+    score = 100.0 * (int(saved["engine_one_wins"]) + 0.5 * int(saved["no_winner"])) / games
+    sealed = candidate["model"]["quantized"].get("sealed_test")
+    sealed_mae = f"{sealed['mae']:.3f}" if isinstance(sealed, dict) else ""
+    model_digest = candidate["artifacts"]["model_header"]["sha256"]
+    return [
+        saved["created_at_utc"], config.name, iteration.name, model_digest[:12],
+        saved["base_id"], gate["sequential_decision"], str(games), f"{score:.1f}",
+        sealed_mae, gate["run_id"],
+    ]
+
+
+def _model_index_has_row(path: Path, row: list[str]) -> bool:
+    """Return whether the index already records this gate; reject conflicting records."""
+    if not path.exists():
+        return False
+    try:
+        with path.open(newline="", encoding="utf-8") as source:
+            rows = list(csv.reader(source))
+    except (OSError, UnicodeDecodeError, csv.Error) as error:
+        raise WorkflowError(f"could not read model index {path}: {error}") from error
+    if not rows or tuple(rows[0]) != MODEL_INDEX_HEADER:
+        raise WorkflowError(f"model index has an unexpected header: {path}")
+    run_index = MODEL_INDEX_HEADER.index("gate_run_id")
+    matches = [item for item in rows[1:] if len(item) > run_index and item[run_index] == row[run_index]]
+    if any(item != row for item in matches):
+        raise WorkflowError(
+            f"model index already records gate {row[run_index]} with different values: {path}")
+    return bool(matches)
+
+
+def _append_model_index(path: Path, row: list[str]) -> None:
+    if _model_index_has_row(path, row):
+        return
+    try:
+        if not path.exists():
+            contents = io.StringIO()
+            csv.writer(contents, lineterminator="\n").writerows([MODEL_INDEX_HEADER, row])
+            atomic_write_bytes(path, contents.getvalue().encode("utf-8"))
+            return
+        with path.open("a", newline="", encoding="utf-8") as destination:
+            csv.writer(destination, lineterminator="\n").writerow(row)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except (OSError, csv.Error) as error:
+        raise WorkflowError(f"could not append model index {path}: {error}") from error
+
+
 def _master_ledger_path(config: WorkflowConfig) -> Path:
     return config.repository / "eval" / "results.csv"
 
@@ -1643,6 +1703,8 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
             ", ".join(sorted(set(mismatches))))
     master = _master_ledger_path(config)
     archive = _archive_entry(config, iteration, candidate)
+    model_index = config.repository / MODEL_INDEX_PATH
+    index_row = _model_index_row(config, iteration, candidate, gate, saved)
 
     def inspect_master() -> bool:
         existing = _read_master_ledger(master)
@@ -1659,6 +1721,9 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
                "archived_header": str(archive.header_path),
                "archived_metrics": str(archive.metrics_path),
                "archived": _archived_model_state(archive),
+               "model_index": str(model_index),
+               "index_row": dict(zip(MODEL_INDEX_HEADER, index_row, strict=True)),
+               "indexed": _model_index_has_row(model_index, index_row),
                "duplicate": False, "applied": False}
     if not apply:
         preview["duplicate"] = inspect_master()
@@ -1672,10 +1737,12 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
             preview["duplicate"] = inspect_master()
             if preview["duplicate"]:
                 raise WorkflowError(f"master ledger already contains run ID {run_id}")
-            # Archive before appending so an interrupted promotion retries cleanly: the
-            # archive is content-addressed and idempotent, while the ledger rejects duplicates.
+            # Archive and index before appending so an interrupted promotion retries cleanly:
+            # both are idempotent for the same gate, while the ledger rejects duplicates.
             _write_archived_model(archive)
             preview["archived"] = True
+            _append_model_index(model_index, index_row)
+            preview["indexed"] = True
             with master.open("a", newline="", encoding="utf-8") as destination:
                 writer = csv.writer(destination, lineterminator="\n")
                 writer.writerow(row)

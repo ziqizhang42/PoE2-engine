@@ -25,6 +25,7 @@ from poe2_training.shared import (
     write_report_attachment,
 )
 from poe2_training.workflow import (
+    MODEL_INDEX_HEADER,
     CommandExecutionError,
     CommandResult,
     CommandRunner,
@@ -1088,24 +1089,60 @@ class WorkflowPromotionTest(unittest.TestCase):
             "path": "promotion.toml", "run": "promotion-test", "iteration": "candidate"})
         self.assertEqual(metrics["metrics"]["quantized"]["validation"]["mae"], 1.25)
         self.assertEqual(metrics["corpus_id"], "training-loader-test")
+        with (repository / "models" / "index.csv").open(newline="", encoding="utf-8") as source:
+            index = list(csv.DictReader(source))
+        self.assertEqual(index, [{
+            "recorded_utc": "20260819T000000Z", "run": "promotion-test",
+            "iteration": "candidate", "model": sha256_file(candidate_header)[:12],
+            "base": "fixture-base", "decision": "accept_null", "games": "2",
+            "score_pct": "100.0", "sealed_mae": "",
+            "gate_run_id": "workflow-promotion-test-run",
+        }])
+        self.assertTrue(applied["indexed"])
         status = subprocess.run(
             ["git", "status", "--short", "--untracked-files=all"], cwd=repository,
             check=True, capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(sorted(status), [
-            " M eval/results.csv", f"?? models/{model_id}.hpp", f"?? models/{model_id}.json"])
+            " M eval/results.csv", f"?? models/{model_id}.hpp", f"?? models/{model_id}.json",
+            "?? models/index.csv"])
 
     def test_promotion_reuses_an_identical_archive_after_an_interruption(self) -> None:
         self._candidate()
         ledger_header, _ = self._gate()
         repository, isolated = self._isolated_repository(
             "retry-repository", ledger_header=ledger_header)
-        with mock.patch("poe2_training.workflow.csv.writer",
-                        side_effect=OSError("fixture interruption")):
+        real_writer = csv.writer
+
+        def fail_on_ledger(destination, *arguments, **options):
+            if getattr(destination, "name", "").endswith("results.csv"):
+                raise OSError("fixture interruption")
+            return real_writer(destination, *arguments, **options)
+
+        with mock.patch("poe2_training.workflow.csv.writer", side_effect=fail_on_ledger):
             with self.assertRaisesRegex(WorkflowError, "fixture interruption"):
                 promote_gate(isolated, "candidate", apply=True)
         self._commit_all(repository, "keep interrupted archive")
-        self.assertTrue(promote_gate(isolated, "candidate")["archived"])
+        preview = promote_gate(isolated, "candidate")
+        self.assertTrue(preview["archived"])
+        self.assertTrue(preview["indexed"])
         self.assertTrue(promote_gate(isolated, "candidate", apply=True)["applied"])
+        with (repository / "models" / "index.csv").open(newline="", encoding="utf-8") as source:
+            self.assertEqual(len(list(csv.DictReader(source))), 1)
+
+    def test_promotion_rejects_a_conflicting_index_row(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate()
+        repository, isolated = self._isolated_repository(
+            "index-conflict-repository", ledger_header=ledger_header)
+        (repository / "models").mkdir()
+        with (repository / "models" / "index.csv").open(
+                "w", newline="", encoding="utf-8") as destination:
+            writer = csv.writer(destination, lineterminator="\n")
+            writer.writerow(MODEL_INDEX_HEADER)
+            writer.writerow(["other"] * (len(MODEL_INDEX_HEADER) - 1) +
+                            ["workflow-promotion-test-run"])
+        with self.assertRaisesRegex(WorkflowError, "different values"):
+            promote_gate(isolated, "candidate")
 
     def test_promotion_rejects_a_conflicting_archive(self) -> None:
         self._candidate()
