@@ -154,13 +154,18 @@ def gain_summaries(own_gains: np.ndarray, opponent_gains: np.ndarray) -> np.ndar
     return result
 
 
-def fit_standardization(values: np.ndarray) -> Standardization:
-    """Fit deterministic population moments using training records only."""
+def fit_standardization(values: np.ndarray,
+                        weights: np.ndarray | None = None) -> Standardization:
+    """Fit deterministic, optionally weighted, population moments using training records only."""
     matrix = np.asarray(values, dtype=np.float64)
     if matrix.ndim != 2 or matrix.shape[0] == 0:
         raise ValueError("standardization requires a nonempty matrix")
-    center = matrix.mean(axis=0, dtype=np.float64)
-    scale = matrix.std(axis=0, dtype=np.float64)
+    if weights is None:
+        center = matrix.mean(axis=0, dtype=np.float64)
+        scale = matrix.std(axis=0, dtype=np.float64)
+    else:
+        center = np.average(matrix, axis=0, weights=weights)
+        scale = np.sqrt(np.average(np.square(matrix - center), axis=0, weights=weights))
     scale[scale < 1.0e-12] = 1.0
     return Standardization(
         center=np.ascontiguousarray(center),

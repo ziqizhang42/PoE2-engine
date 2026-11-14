@@ -93,6 +93,8 @@ uv run --frozen poe2-train-patterns \
   --suite frozen-pattern-gain
 ```
 
+Training can also use other artifacts' train records: repeat `--extra-dataset PATH WEIGHT` newest first, cap the total with `--max-records N`, and pass `--piece-records N` to expand the dense 1,716-count line features N records at a time instead of all at once. Validation, model selection, and the sealed test still use `--dataset` only, extra records whose positions are in its validation or test split are dropped, and the report's `training_data` lists every contributing artifact. Without these options the command and its report are unchanged. In a workflow recipe, a generation's `window`, `age_weight`, `refresh`, and `extra` settings produce these options; see [training data](../../docs/training-workflow.md#training-data).
+
 After the training report is complete and no further model choice remains, open the sealed test split once with:
 
 ```bash

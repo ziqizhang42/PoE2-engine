@@ -13,10 +13,8 @@ class PatternEvaluationTest(unittest.TestCase):
     def test_predicts_with_validation_selected_phase_line_model(self) -> None:
         import numpy as np
 
-        from poe2_training.dataset import MappedFeatureDataset
+        from poe2_training.dataset import KEY_DTYPE, MappedFeatureDataset, key_membership
         from poe2_training.pattern_evaluation import (
-            KEY_DTYPE,
-            _known_key_mask,
             _predict_model,
             _predict_quantized_model,
             _selected_model,
@@ -66,7 +64,7 @@ class PatternEvaluationTest(unittest.TestCase):
             candidates = np.array([(1, 2), (2, 1), (3, 4)], dtype=KEY_DTYPE)
             known = np.array([(1, 2), (3, 3), (3, 4)], dtype=KEY_DTYPE)
             np.testing.assert_array_equal(
-                _known_key_mask(candidates, known),
+                key_membership(candidates, known),
                 np.array([True, False, True]),
             )
 

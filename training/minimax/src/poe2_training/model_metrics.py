@@ -33,8 +33,9 @@ class RidgeFit:
 def fit_ridge(train_x: np.ndarray, train_y: np.ndarray,
               validation_x: np.ndarray, validation_y: np.ndarray,
               lambdas: Sequence[float], device: Any,
-              *, error_type: type[ValueError] = ValueError) -> RidgeFit:
-    """Fit and select deterministic float64 ridge regression."""
+              *, error_type: type[ValueError] = ValueError,
+              weights: np.ndarray | None = None) -> RidgeFit:
+    """Fit and select deterministic float64 ridge regression, optionally weighting records."""
     import torch
 
     def require(condition: bool, message: str) -> None:
@@ -49,17 +50,40 @@ def fit_ridge(train_x: np.ndarray, train_y: np.ndarray,
     require(train_y.shape == (train_x.shape[0],) and
             validation_y.shape == (validation_x.shape[0],),
             "ridge targets have incompatible shapes")
-    require(bool(lambdas) and all(math.isfinite(value) and value > 0.0 for value in lambdas),
-            "ridge lambdas must be finite and positive")
 
     train_design = torch.as_tensor(train_x, dtype=torch.float64, device=device)
     train_target = torch.as_tensor(train_y, dtype=torch.float64, device=device)
+    if weights is None:
+        count = float(train_x.shape[0])
+        gram = (train_design.T @ train_design) / count
+        right_hand = (train_design.T @ train_target) / count
+    else:
+        weight = torch.as_tensor(weights, dtype=torch.float64, device=device)
+        total = weight.sum()
+        gram = (train_design.T @ (train_design * weight[:, None])) / total
+        right_hand = (train_design.T @ (train_target * weight)) / total
+    return fit_ridge_moments(gram, right_hand, validation_x, validation_y, lambdas, device,
+                             error_type=error_type)
+
+
+def fit_ridge_moments(gram: Any, right_hand: Any,
+                      validation_x: np.ndarray, validation_y: np.ndarray,
+                      lambdas: Sequence[float], device: Any,
+                      *, error_type: type[ValueError] = ValueError) -> RidgeFit:
+    """Select ridge regression from normalized moments XᵀWX/ΣW and XᵀWy/ΣW."""
+    import torch
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise error_type(message)
+
+    require(bool(lambdas) and all(math.isfinite(value) and value > 0.0 for value in lambdas),
+            "ridge lambdas must be finite and positive")
+    gram = torch.as_tensor(gram, dtype=torch.float64, device=device)
+    right_hand = torch.as_tensor(right_hand, dtype=torch.float64, device=device)
     validation_design = torch.as_tensor(validation_x, dtype=torch.float64, device=device)
     validation_target = torch.as_tensor(validation_y, dtype=torch.float64, device=device)
-    count = float(train_x.shape[0])
-    gram = (train_design.T @ train_design) / count
-    right_hand = (train_design.T @ train_target) / count
-    identity = torch.eye(train_x.shape[1], dtype=torch.float64, device=device)
+    identity = torch.eye(gram.shape[0], dtype=torch.float64, device=device)
     candidates: list[tuple[tuple[float, float, float], Any, dict[str, float]]] = []
     for ridge_lambda in lambdas:
         weights = torch.linalg.solve(gram + ridge_lambda * identity, right_hand)

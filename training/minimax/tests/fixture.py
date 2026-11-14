@@ -5,11 +5,24 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from poe2_training.artifact import CELL_COUNT, HEADER, LINE_COUNT, MAGIC, RECORD_BYTES
+
+
+REPOSITORY = Path(__file__).resolve().parents[3]
+
+
+def repository_temporary_directory() -> tempfile.TemporaryDirectory:
+    """Return a temporary directory in the repository's ignored build folder.
+
+    Recipes must live inside the repository, and a fresh checkout has no build folder yet.
+    """
+    (REPOSITORY / "build").mkdir(exist_ok=True)
+    return tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
 
 
 @dataclass(frozen=True)
@@ -22,13 +35,15 @@ class FixtureRecord:
     own_gains: tuple[int, ...] = (1,) * CELL_COUNT
     opponent_gains: tuple[int, ...] = (1,) * CELL_COUNT
     flags: int = 0
+    family: int = 0
+    line_patterns: tuple[int, ...] = (0,) * LINE_COUNT
 
 
 def write_feature_fixture(directory: Path, *, dirty: bool = False,
                           rows: Sequence[FixtureRecord] | None = None,
-                          teacher_sha256: str | None = None) -> Path:
+                          teacher_sha256: str | None = None,
+                          corpus_id: str = "training-loader-test") -> Path:
     directory.mkdir()
-    corpus_id = "training-loader-test"
     corpus_digest = hashlib.sha256(corpus_id.encode()).digest()
     label_digest = hashlib.sha256(b"labels").digest()
 
@@ -46,6 +61,8 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False,
             raise ValueError("fixture gain arrays must have 49 values")
         record = bytearray(RECORD_BYTES)
         struct.pack_into("<Q", record, 16, row.key)  # canonical key low
+        struct.pack_into("<Q", record, 40, row.family)
+        struct.pack_into("<36H", record, 160, *row.line_patterns)
         struct.pack_into("<i", record, 112, row.teacher_value)
         struct.pack_into("<i", record, 128, row.two_ply_closure_value)
         struct.pack_into("<i", record, 132,

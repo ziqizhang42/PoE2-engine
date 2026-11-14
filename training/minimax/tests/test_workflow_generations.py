@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import io
 import json
-import tempfile
 import textwrap
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from fixture import repository_temporary_directory
 from poe2_training.workflow import (
     WorkflowError,
     WorkflowRunner,
@@ -23,6 +23,7 @@ from poe2_training.workflow import (
 )
 from poe2_training.workflow_adapters import data_binary, label_command, source_chunk_command
 from poe2_training.workflow_config import (
+    ImportedDatasetConfig,
     WorkflowConfigError,
     fingerprint,
     load_workflow_config,
@@ -37,8 +38,9 @@ from poe2_training.workflow_ui import WorkflowProgress
 REPOSITORY = Path(__file__).resolve().parents[3]
 RECIPES = REPOSITORY / "training/minimax/recipes"
 V02 = "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3"
-# Stage fingerprints of the long-form run1 recipe before the compact form existed. Finished
-# runs are tied to these, so neither form may change them.
+# Stage fingerprints of the long-form run1 recipe as the committed code computes them, with
+# the repository relocated to /repository so they hold at any checkout path. Finished runs are
+# tied to these, so neither form may change them.
 RUN1_FINGERPRINTS = {
     "dataset:g001:source": "dd37bbd5caf89213a81b5f533151ae4d767c3b3cb31fa5c5673069e259381259",
     "dataset:g001:labels": "0ae64cafbc93bc101d42d923123159a857cf144f6ef5f6105f6e37c07b250a7b",
@@ -48,10 +50,33 @@ RUN1_FINGERPRINTS = {
     "iteration:g001:sealed-evaluation":
         "668a696e5e802e40399131c5aa7f5aebae7bb7957dc46e7393a3e35cadecd1ae",
     "iteration:g001:candidate-validation":
-        "03a9c86d6d017800916f660f7ffae1c2a2a46db83d1330a0e367423a9836cb8c",
+        "8e21dd2187ab9413a8784fd617d2d9b5fab3ffd257c3133394cada7e1dbe6663",
     "iteration:g001:engine-gate":
-        "1379d1abb9a1b6b769a2c48e93312163f206250951b9f9eb7e5ab2a9cb943612",
+        "1bbafb0e336cc71b6cd778f2f08498b6fedf3a5fb25ec007fd3fb4cfd62b7102",
 }
+
+
+def relocated(config):
+    """Return the config with its repository paths rebased on /repository."""
+    def move(path: Path) -> Path:
+        return Path("/repository") / path.relative_to(config.repository)
+
+    iterations = tuple(replace(
+        iteration,
+        candidate_validation=(None if iteration.candidate_validation is None else replace(
+            iteration.candidate_validation,
+            opening_book=move(iteration.candidate_validation.opening_book))),
+        engine_gate=(None if iteration.engine_gate is None else replace(
+            iteration.engine_gate, opening_book=move(iteration.engine_gate.opening_book))))
+        for iteration in config.iterations)
+    datasets = tuple(replace(dataset, feature_directory=move(dataset.feature_directory))
+                     if isinstance(dataset, ImportedDatasetConfig) else dataset
+                     for dataset in config.datasets)
+    comparisons = tuple(replace(comparison, opening_book=move(comparison.opening_book))
+                        for comparison in config.comparisons)
+    return replace(config, iterations=iterations, datasets=datasets, comparisons=comparisons)
+
+
 DEFAULTS = textwrap.dedent("""
     [defaults.source]
     trajectories = 4
@@ -97,7 +122,7 @@ CHAIN = textwrap.dedent("""
 
 class ChainFixture(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
+        self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
 
     def tearDown(self) -> None:
@@ -123,8 +148,9 @@ class CompactRecipeTest(ChainFixture):
         compact = load_workflow_config(RECIPES / "run1.toml")
         long_form = load_workflow_config(
             REPOSITORY / "training/minimax/tests/recipes/run1-long-form.toml")
-        self.assertEqual(stage_fingerprints(long_form), RUN1_FINGERPRINTS)
-        self.assertEqual(stage_fingerprints(compact), RUN1_FINGERPRINTS)
+        self.assertEqual(stage_fingerprints(relocated(long_form)), RUN1_FINGERPRINTS)
+        self.assertEqual(stage_fingerprints(relocated(compact)), RUN1_FINGERPRINTS)
+        self.assertEqual(stage_fingerprints(compact), stage_fingerprints(long_form))
         self.assertEqual(stage_definitions(compact), stage_definitions(long_form))
         self.assertEqual(compact.datasets, long_form.datasets)
         self.assertEqual(compact.iterations, long_form.iterations)
@@ -153,7 +179,8 @@ class CompactRecipeTest(ChainFixture):
         pinned = f'[[generations]]\nname = "g000"\nmodel = "{V02}"\n'
         cases = [
             (pinned + trained + '[datasets.extra]\nkind = "managed"\n', DEFAULTS,
-             "either long-form"),
+             "must be imported"),
+            (pinned + trained + '[[iterations]]\nname = "x"\n', DEFAULTS, "either long-form"),
             (pinned + '[[generations]]\nname = "g001"\nseed = 1\n', DEFAULTS, "parent is required"),
             (trained + pinned, DEFAULTS, "earlier generation: g000"),
             (pinned + trained.replace('"g000"', '"g001"'), DEFAULTS, "earlier generation"),
@@ -229,7 +256,7 @@ class CompactRecipeTest(ChainFixture):
 
 class LongFormTrainedModelTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
+        self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
 
     def tearDown(self) -> None:

@@ -91,6 +91,10 @@ class ManagedDatasetConfig:
     features: FeatureConfig
     # The model that drives noisy-search sampling and labels; None means two-ply closure.
     teacher: ModelReference | None = None
+    # Set for a dataset that relabels another dataset's positions: it has no source stage and
+    # keeps that source's settings and splits.
+    positions: str | None = None
+    positions_root: Path | None = None
 
     @property
     def taught_in_run(self) -> bool:
@@ -98,7 +102,7 @@ class ManagedDatasetConfig:
 
     @property
     def source_directory(self) -> Path:
-        return self.root / "source"
+        return (self.positions_root or self.root) / "source"
 
     @property
     def labels_directory(self) -> Path:
@@ -129,14 +133,54 @@ class BaselineTrainingConfig:
 
 
 @dataclass(frozen=True)
+class TrainingDataset:
+    """Another dataset whose train records a pattern iteration also learns from."""
+
+    dataset: str
+    weight: float = 1.0
+
+
+@dataclass(frozen=True)
 class PatternTrainingConfig:
     type: Literal["pattern"]
     device: Literal["cpu", "cuda"] = "cuda"
     seed: int = 20260818
     suite: str = "default"
+    # Newest first: the order decides which copy of a repeated position is kept.
+    extra_datasets: tuple[TrainingDataset, ...] = ()
+    max_records: int | None = None
+    piece_records: int | None = None
+
+    @property
+    def uses_training_data_options(self) -> bool:
+        return bool(self.extra_datasets) or self.max_records is not None or (
+            self.piece_records is not None)
+
+
+TRAINING_DATA_OPTIONS = ("extra_datasets", "max_records", "piece_records")
+
+
+def recorded_training_settings(training: TrainingConfig) -> dict[str, Any]:
+    """Return training settings as fingerprinted; unused data options are left out.
+
+    Stages recorded before these options existed therefore keep their fingerprints.
+    """
+    settings = asdict(training)
+    for name in TRAINING_DATA_OPTIONS:
+        if name in settings and not settings[name]:
+            del settings[name]
+    return settings
 
 
 TrainingConfig = BaselineTrainingConfig | PatternTrainingConfig
+
+
+def extra_training_datasets(config: WorkflowConfig,
+                            iteration: IterationConfig) -> tuple[DatasetConfig, ...]:
+    training = iteration.training
+    if not isinstance(training, PatternTrainingConfig):
+        return ()
+    return tuple(config.dataset(item.dataset) for item in training.extra_datasets)
 
 
 @dataclass(frozen=True)
@@ -289,14 +333,30 @@ class WorkflowConfig:
         raise WorkflowConfigError(f"no config.models entry names iteration {iteration}'s model")
 
 
+def datasets_used(config: WorkflowConfig, iteration: IterationConfig) -> tuple[str, ...]:
+    """Return every dataset an iteration reads, each after the dataset its positions come from.
+
+    This is what ordering, blocking, and stage definitions follow.
+    """
+    names = [iteration.dataset]
+    names.extend(dataset.name for dataset in extra_training_datasets(config, iteration))
+    if iteration.sealed_evaluation is not None:
+        names.extend(iteration.sealed_evaluation.exclude_datasets)
+    used: list[str] = []
+    for name in names:
+        dataset = config.dataset(name)
+        positions = dataset.positions if isinstance(dataset, ManagedDatasetConfig) else None
+        for item in (positions, name):
+            if item is not None and item not in used:
+                used.append(item)
+    return tuple(used)
+
+
 def trained_models_used(config: WorkflowConfig,
                         iteration: IterationConfig) -> tuple[ModelReference, ...]:
     """Return the models this recipe trains that an iteration's datasets or gate base use."""
-    names = [iteration.dataset]
-    if iteration.sealed_evaluation is not None:
-        names.extend(iteration.sealed_evaluation.exclude_datasets)
     used: dict[str, ModelReference] = {}
-    for name in names:
+    for name in datasets_used(config, iteration):
         dataset = config.dataset(name)
         if isinstance(dataset, ManagedDatasetConfig) and dataset.taught_in_run:
             used.setdefault(dataset.teacher.name, dataset.teacher)
@@ -485,6 +545,21 @@ def _parse_features(value: Any, field: str) -> FeatureConfig:
     return FeatureConfig(gain_samples=_integer(table, "gain_samples", field, 256))
 
 
+def _parse_training_datasets(value: Any, field: str) -> tuple[TrainingDataset, ...]:
+    _require(isinstance(value, list), f"{field} must be an array of tables")
+    result: list[TrainingDataset] = []
+    for index, item in enumerate(value):
+        table = _table(item, f"{field}[{index}]")
+        _unknown(table, {"dataset", "weight"}, f"{field}[{index}]")
+        weight = _number(table, "weight", f"{field}[{index}]", 1.0)
+        _require(weight > 0.0, f"{field}[{index}].weight must be positive")
+        result.append(TrainingDataset(
+            dataset=_string(table, "dataset", f"{field}[{index}]"), weight=weight))
+    names = [item.dataset for item in result]
+    _require(len(set(names)) == len(names), f"{field} names a dataset twice")
+    return tuple(result)
+
+
 def _parse_training(value: Any, field: str) -> TrainingConfig:
     table = _table(value, field)
     kind = _string(table, "type", field)
@@ -505,7 +580,7 @@ def _parse_training(value: Any, field: str) -> TrainingConfig:
             ridge_lambdas=tuple(float(item) for item in raw_lambdas),
         )
     if kind == "pattern":
-        _unknown(table, {"type", "device", "seed", "suite"}, field)
+        _unknown(table, {"type", "device", "seed", "suite", *TRAINING_DATA_OPTIONS}, field)
         device = _string(table, "device", field, "cuda")
         suite = _string(table, "suite", field, "default")
         _require(device in {"cpu", "cuda"}, f"{field}.device must be cpu or cuda")
@@ -514,6 +589,12 @@ def _parse_training(value: Any, field: str) -> TrainingConfig:
         return PatternTrainingConfig(
             type="pattern", device=device,
             seed=_integer(table, "seed", field, 20260818), suite=suite,
+            extra_datasets=_parse_training_datasets(table.get("extra_datasets", []),
+                                                    f"{field}.extra_datasets"),
+            max_records=(_integer(table, "max_records", field, minimum=1)
+                         if "max_records" in table else None),
+            piece_records=(_integer(table, "piece_records", field, minimum=1)
+                           if "piece_records" in table else None),
         )
     raise WorkflowConfigError(f"{field}.type must be baseline or pattern")
 
@@ -670,13 +751,68 @@ def _generation_sections(defaults: dict[str, Any], generation: dict[str, Any],
     return sections
 
 
+# Compact training settings that choose a generation's data; they expand into extra_datasets.
+GENERATION_DATA_SETTINGS = {"window", "age_weight", "refresh", "extra"}
+
+
+def _imported_datasets(document: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact recipe's datasets, which may only be imported ones."""
+    datasets = _table(document.get("datasets", {}), "config.datasets")
+    for name, table in datasets.items():
+        _require(_table(table, f"config.datasets.{name}").get("kind") == "imported",
+                 f"config.datasets.{name} must be imported; generations make managed datasets")
+    return dict(datasets)
+
+
+def _generation_data(name: str, parent: str, training: dict[str, Any],
+                     dataset: dict[str, Any], lineage: dict[str, str | None],
+                     available: set[str], field: str) -> tuple[list[Any], dict[str, Any]]:
+    """Expand window, age_weight, refresh, and extra into extra datasets, newest first.
+
+    The window holds the datasets of up to window - 1 trained ancestors; a pinned ancestor
+    ends it. The refresh newest of those are replaced by copies of their positions labeled by
+    this generation's parent, the teacher of its own dataset.
+    """
+    window = _integer(training, "window", f"{field}.training", 1, minimum=1)
+    refresh = _integer(training, "refresh", f"{field}.training", 0, maximum=window - 1)
+    age_weight = _number(training, "age_weight", f"{field}.training", 1.0)
+    _require(age_weight > 0.0, f"{field}.training.age_weight must be positive")
+    extra = training.get("extra", [])
+    _require(isinstance(extra, list), f"{field}.training.extra must be an array of tables")
+    ancestors: list[str] = []
+    ancestor = parent
+    while len(ancestors) < window - 1 and lineage.get(ancestor) is not None:
+        ancestors.append(ancestor)
+        ancestor = lineage[ancestor]
+    extras: list[Any] = []
+    relabeled: dict[str, Any] = {}
+    for age, ancestor in enumerate(ancestors, 1):
+        weight = age_weight ** age
+        if age <= refresh:
+            copy = f"{name}-refresh-{ancestor}"
+            relabeled[copy] = {"kind": "managed", "teacher": parent, "positions": ancestor,
+                               **{key: dataset[key] for key in ("labels", "features")
+                                  if key in dataset}}
+            extras.append({"dataset": copy, "weight": weight})
+        else:
+            extras.append({"dataset": ancestor, "weight": weight})
+    for index, item in enumerate(extra):
+        entry = _table(item, f"{field}.training.extra[{index}]")
+        _require(entry.get("dataset") in available,
+                 f"{field}.training.extra[{index}].dataset must name a trained generation or "
+                 f"an imported dataset: {entry.get('dataset')}")
+        extras.append(entry)
+    return extras, relabeled
+
+
 def expand_generations(document: dict[str, Any]) -> dict[str, Any]:
     """Return the long-form document that a compact [[generations]] recipe stands for."""
-    mixed = sorted(LONG_FORM_KEYS & set(document))
+    mixed = sorted((LONG_FORM_KEYS - {"datasets"}) & set(document))
     _require(not mixed,
              "a recipe is either long-form ([models], [datasets], [[iterations]]) or compact "
              f"([defaults], [[generations]]); this one also sets {', '.join(mixed)}")
-    _unknown(document, {"schema_version", "run", "comparisons", *COMPACT_KEYS}, "config")
+    _unknown(document, {"schema_version", "run", "comparisons", "datasets", *COMPACT_KEYS},
+             "config")
     run = _table(document.get("run"), "config.run")
     run_name = _string(run, "name", "config.run")
     defaults = _table(document.get("defaults", {}), "config.defaults")
@@ -691,15 +827,20 @@ def expand_generations(document: dict[str, Any]) -> dict[str, Any]:
              all(isinstance(item, dict) for item in generations),
              "config.generations must be a nonempty array of tables")
     models: dict[str, Any] = {}
-    datasets: dict[str, Any] = {}
+    datasets: dict[str, Any] = _imported_datasets(document)
+    imported = set(datasets)
+    # Each generation's parent, or None for a pinned generation, which has no dataset.
+    lineage: dict[str, str | None] = {}
     iterations: list[dict[str, Any]] = []
     for index, generation in enumerate(generations):
         field = f"config.generations[{index}]"
         name = _string(generation, "name", field)
         _require(name not in models, f"generation name is repeated: {name}")
+        _require(name not in datasets, f"{field}.name is already a dataset name: {name}")
         if "model" in generation:
             _unknown(generation, {"name", "model"}, field)
             models[name] = _string(generation, "model", field)
+            lineage[name] = None
             continue
         _unknown(generation, {"name", "parent", "seed", *GENERATION_SECTIONS}, field)
         parent = _string(generation, "parent", field)
@@ -714,12 +855,23 @@ def expand_generations(document: dict[str, Any]) -> dict[str, Any]:
         for section in ("labels", "features"):
             if section in sections:
                 dataset[section] = sections.pop(section)
-        iteration = {"name": name, "dataset": name,
-                     "training": {"seed": seed, **sections.pop("training", {})},
+        training = sections.pop("training", {})
+        extras, relabeled = _generation_data(
+            name, parent, training, dataset, lineage,
+            {item for item, owner in lineage.items() if owner is not None} | imported, field)
+        training = {key: value for key, value in training.items()
+                    if key not in GENERATION_DATA_SETTINGS}
+        if extras:
+            training["extra_datasets"] = extras
+        iteration = {"name": name, "dataset": name, "training": {"seed": seed, **training},
                      **sections}
         iteration["engine_gate"] = {**iteration["engine_gate"], "base_model": parent}
         models[name] = {"iteration": name}
+        lineage[name] = parent
         datasets[name] = dataset
+        for copy, value in relabeled.items():
+            _require(copy not in datasets, f"{field} relabels into an existing name: {copy}")
+            datasets[copy] = value
         iterations.append(iteration)
     _require(bool(iterations), "config.generations must include a generation with a parent")
     return {"schema_version": document.get("schema_version"), "run": run,
@@ -739,6 +891,22 @@ def _generation_comparisons(document: dict[str, Any], defaults: dict[str, Any],
             _require(name in generations,
                      f"config.comparisons[{index}].{side} must name a generation: {name}")
     return [{**defaults.get("engine_gate", {}), **entry} for entry in entries]
+
+
+def _with_positions(datasets: list[DatasetConfig]) -> list[DatasetConfig]:
+    """Give each relabeling dataset the source settings and location of its positions."""
+    by_name = {dataset.name: dataset for dataset in datasets}
+    result: list[DatasetConfig] = []
+    for dataset in datasets:
+        if isinstance(dataset, ManagedDatasetConfig) and dataset.positions is not None:
+            origin = by_name.get(dataset.positions)
+            _require(isinstance(origin, ManagedDatasetConfig) and origin.positions is None and
+                     origin.name != dataset.name,
+                     f"config.datasets.{dataset.name}.positions must name another managed "
+                     f"dataset with its own source: {dataset.positions}")
+            dataset = replace(dataset, source=origin.source, positions_root=origin.root)
+        result.append(dataset)
+    return result
 
 
 def _check_trained_models(config: WorkflowConfig) -> None:
@@ -822,19 +990,26 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         table = _table(raw_value, field)
         kind = _string(table, "kind", field)
         if kind == "managed":
-            _unknown(table, {"kind", "teacher", "source", "labels", "features"}, field)
+            _unknown(table, {"kind", "teacher", "source", "positions", "labels", "features"},
+                     field)
             teacher = None
             if "teacher" in table:
                 teacher_name = _string(table, "teacher", field)
                 _require(teacher_name in models_by_name,
                          f"{field}.teacher must name an entry in config.models: {teacher_name}")
                 teacher = models_by_name[teacher_name]
+            _require(("source" in table) != ("positions" in table),
+                     f"{field} must set exactly one of source and positions")
+            positions = (_name(_string(table, "positions", field), f"{field}.positions")
+                         if "positions" in table else None)
             datasets.append(ManagedDatasetConfig(
                 name=dataset_name, kind="managed", root=output / "datasets" / dataset_name,
-                source=_parse_source(_value(table, "source", field), f"{field}.source"),
+                # A relabeling dataset takes its source settings from its positions dataset.
+                source=(_parse_source(table["source"], f"{field}.source")
+                        if positions is None else None),
                 labels=_parse_labels(_value(table, "labels", field), f"{field}.labels"),
                 features=_parse_features(table.get("features", {}), f"{field}.features"),
-                teacher=teacher,
+                teacher=teacher, positions=positions,
             ))
         elif kind == "imported":
             _unknown(table, {"kind", "path"}, field)
@@ -847,6 +1022,7 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
                 name=dataset_name, kind="imported", feature_directory=feature_path))
         else:
             raise WorkflowConfigError(f"{field}.kind must be managed or imported")
+    datasets = _with_positions(datasets)
 
     raw_iterations = document.get("iterations")
     _require(isinstance(raw_iterations, list) and raw_iterations and
@@ -868,6 +1044,11 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         _require(all(item in seen for item in dependencies),
                  f"{field}.depends_on may only name earlier iterations")
         training = _parse_training(_value(table, "training", field), f"{field}.training")
+        if isinstance(training, PatternTrainingConfig):
+            for item in training.extra_datasets:
+                _require(item.dataset in dataset_names and item.dataset != dataset_name,
+                         f"{field}.training.extra_datasets must name other datasets: "
+                         f"{item.dataset}")
         sealed = (_parse_sealed(table["sealed_evaluation"], f"{field}.sealed_evaluation")
                   if "sealed_evaluation" in table else None)
         candidate = (_parse_candidate(repository, table["candidate_validation"],
@@ -913,6 +1094,13 @@ def load_workflow_config(path: Path | str) -> WorkflowConfig:
         name for iteration in iterations
         if iteration.sealed_evaluation is not None
         for name in iteration.sealed_evaluation.exclude_datasets)
+    referenced_datasets.update(
+        item.dataset for iteration in iterations
+        if isinstance(iteration.training, PatternTrainingConfig)
+        for item in iteration.training.extra_datasets)
+    referenced_datasets.update(
+        dataset.positions for dataset in datasets
+        if isinstance(dataset, ManagedDatasetConfig) and dataset.positions is not None)
     unreferenced = sorted(dataset_names - referenced_datasets)
     _require(not unreferenced,
              "config.datasets contains unreferenced dataset(s): " + ", ".join(unreferenced))
@@ -972,7 +1160,7 @@ def _dataset_definitions(config: WorkflowConfig, dataset: DatasetConfig,
             "adapter": "imported-features", "path": dataset.feature_directory,
         }
         return
-    source_id = f"dataset:{dataset.name}:source"
+    source_id = f"dataset:{dataset.positions or dataset.name}:source"
     # Teachers are added only when present so stages recorded before teachers existed
     # keep their fingerprints.
     teacher: dict[str, Any] = {}
@@ -980,8 +1168,9 @@ def _dataset_definitions(config: WorkflowConfig, dataset: DatasetConfig,
         teacher["teacher"] = (
             dataset.teacher.model_id if dataset.teacher.iteration is None else
             _trained_model_definition(result, dataset.teacher.iteration))
-    result[source_id] = {"adapter": "source", "preset": config.build_preset,
-                         "settings": dataset.source, **teacher}
+    if dataset.positions is None:
+        result[source_id] = {"adapter": "source", "preset": config.build_preset,
+                             "settings": dataset.source, **teacher}
     labels_id = f"dataset:{dataset.name}:labels"
     result[labels_id] = {
         "adapter": "labels", "preset": config.build_preset,
@@ -1001,10 +1190,15 @@ def _iteration_definitions(config: WorkflowConfig, iteration: IterationConfig,
     dataset_id = f"dataset:{iteration.dataset}:features"
     result[training_id] = {
         "adapter": f"training-{iteration.training.type}",
-        "dataset": fingerprint(result[dataset_id]), "settings": iteration.training,
+        "dataset": fingerprint(result[dataset_id]),
+        "settings": recorded_training_settings(iteration.training),
         "dependencies": [fingerprint(result[f"iteration:{name}:training"])
                          for name in iteration.depends_on],
     }
+    extras = extra_training_datasets(config, iteration)
+    if extras:
+        result[training_id]["extra_datasets"] = [
+            fingerprint(result[f"dataset:{dataset.name}:features"]) for dataset in extras]
     if iteration.sealed_evaluation is not None:
         stage_id = f"iteration:{iteration.name}:sealed-evaluation"
         result[stage_id] = {
@@ -1055,19 +1249,27 @@ def _model_identity(config: WorkflowConfig, result: dict[str, dict[str, Any]],
 def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
     """Return normalized settings and upstream config fingerprints for every stage."""
     result: dict[str, dict[str, Any]] = {}
-    # A dataset taught by a model this recipe trains is defined once that model's gate is.
-    deferred = {dataset.name: dataset for dataset in config.datasets
-                if isinstance(dataset, ManagedDatasetConfig) and dataset.taught_in_run}
-    for dataset in config.datasets:
-        if dataset.name not in deferred:
+
+    def deferred(dataset: DatasetConfig) -> bool:
+        """A dataset that needs a model this recipe trains is defined once that model's gate is."""
+        if not isinstance(dataset, ManagedDatasetConfig):
+            return False
+        return dataset.taught_in_run or (
+            dataset.positions is not None and deferred(config.dataset(dataset.positions)))
+
+    defined: set[str] = set()
+
+    def define(dataset: DatasetConfig) -> None:
+        if dataset.name not in defined:
+            defined.add(dataset.name)
             _dataset_definitions(config, dataset, result)
+
+    for dataset in config.datasets:
+        if not deferred(dataset):
+            define(dataset)
     for iteration in config.iterations:
-        names = [iteration.dataset]
-        if iteration.sealed_evaluation is not None:
-            names.extend(iteration.sealed_evaluation.exclude_datasets)
-        for name in names:
-            if name in deferred:
-                _dataset_definitions(config, deferred.pop(name), result)
+        for name in datasets_used(config, iteration):
+            define(config.dataset(name))
         _iteration_definitions(config, iteration, result)
     for comparison in config.comparisons:
         result[comparison_stage(comparison)] = {

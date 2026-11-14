@@ -83,4 +83,15 @@ The manifest's `inputs.label_search` carries the label evaluator. Every shard mu
 
 The independent auditor verifies framing and digests, canonical uniqueness and ordering, split and multiplicity accounting, line-pattern encoding, normalized static scores, two-ply-closure arithmetic, and a deterministic sample of marginal gains recomputed from the game rules.
 
+## Training selection
+
+`poe2_training.dataset.TrainingSelection` reads the records a pattern model trains on from one primary artifact and an ordered list of weighted extra artifacts, newest first. It applies the one leak rule for multi-dataset training:
+
+1. Only train-split records are read; no extra artifact's validation or test records are used.
+2. An extra record whose D4-canonical key is in the primary's validation or test split is dropped.
+3. A key present in several artifacts is kept only in the first: the primary, then the list order.
+4. An optional record cap takes whole artifacts in order, then a deterministic subset of whole families (games) of the first artifact that does not fit, in SplitMix64 order of family ID, and nothing after it.
+
+It reports, per artifact, the train records, the records dropped by each rule, and the records used. It can materialize every selected record at once, or yield pieces of at most a given number of records with their weights, so a consumer never holds more than one piece of wide columns. Key membership uses the same sorted canonical-key search as the sealed-test overlap exclusion.
+
 The isolated offline consumer and its manual uv/PyTorch setup are documented in [`training/minimax/README.md`](../training/minimax/README.md).

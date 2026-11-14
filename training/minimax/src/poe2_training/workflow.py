@@ -48,6 +48,7 @@ from .workflow_adapters import (
     authenticate_source,
     authenticate_training,
     candidate_build_id,
+    candidate_training_datasets,
     comparison_command,
     comparison_side,
     data_binary,
@@ -86,6 +87,7 @@ from .workflow_config import (
     ModelReference,
     WorkflowConfig,
     comparison_stage,
+    extra_training_datasets,
     fingerprint,
     match_settings,
     recorded_gate_settings,
@@ -694,11 +696,15 @@ def print_plan(config: WorkflowConfig) -> None:
             continue
         if dataset.teacher is not None:
             print(f"  teacher: {_describe_model(config, dataset.teacher)}")
-        chunks = source_chunk_ranges(dataset)
-        print(f"  source: {dataset.source_directory} ({len(chunks)} chunks of up to "
-              f"{SOURCE_CHUNK_TRAJECTORIES} trajectories)")
-        print(f"    {_format_command(source_chunk_command(config, dataset, *chunks[0]))}")
-        print(f"    {_format_command(source_assemble_command(config, dataset))}")
+        if dataset.positions is not None:
+            print(f"  positions: relabeled from dataset {dataset.positions}'s source "
+                  f"{dataset.source_directory}")
+        else:
+            chunks = source_chunk_ranges(dataset)
+            print(f"  source: {dataset.source_directory} ({len(chunks)} chunks of up to "
+                  f"{SOURCE_CHUNK_TRAJECTORIES} trajectories)")
+            print(f"    {_format_command(source_chunk_command(config, dataset, *chunks[0]))}")
+            print(f"    {_format_command(source_assemble_command(config, dataset))}")
         print(f"  labels: {dataset.labels_directory} "
               f"({dataset.source.shards} shards, concurrency "
               f"{resolved_label_concurrency(config, dataset)})")
@@ -712,7 +718,8 @@ def print_plan(config: WorkflowConfig) -> None:
                     f"depends_on={','.join(iteration.depends_on) or '-'}", "bold", "magenta"))
         if iteration.name in blocked:
             print(f"  not started: {blocked[iteration.name].reason}")
-        print(f"  training: {_format_command(training_command(sys.executable, dataset, iteration))}")
+        print(f"  training: {_format_command(training_command(
+            sys.executable, dataset, iteration, extra_training_datasets(config, iteration)))}")
         if iteration.sealed_evaluation is not None:
             print(f"  sealed evaluation: "
                   f"{_format_command(evaluation_command(sys.executable, config, iteration))}")
@@ -868,14 +875,15 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
             authenticated[f"dataset:{dataset.name}:features"] = stats
             continue
         source_state = _path_state(dataset.source_directory)
-        if source_state in {"incomplete", "unexpected"}:
-            raise _blocked_path(dataset.source_directory, "position source")
-        if source_state == "missing":
-            _pending_source_chunks(dataset)
-        if source_state == "complete":
-            _direct_audit(
-                source_audit_command(sys.executable, config, dataset), config.repository)
-            authenticated[f"dataset:{dataset.name}:source"] = authenticate_source(dataset)
+        if dataset.positions is None:
+            if source_state in {"incomplete", "unexpected"}:
+                raise _blocked_path(dataset.source_directory, "position source")
+            if source_state == "missing":
+                _pending_source_chunks(dataset)
+            if source_state == "complete":
+                _direct_audit(
+                    source_audit_command(sys.executable, config, dataset), config.repository)
+                authenticated[f"dataset:{dataset.name}:source"] = authenticate_source(dataset)
         complete_shards = 0
         for index in range(dataset.source.shards):
             shard_path = label_shard_path(dataset, index)
@@ -921,7 +929,8 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
             continue
         stages = [
             ("training", iteration.training_directory,
-             lambda: authenticate_training(config.dataset(iteration.dataset), iteration)),
+             lambda: authenticate_training(config.dataset(iteration.dataset), iteration,
+                                           extra_training_datasets(config, iteration))),
         ]
         if iteration.sealed_evaluation is not None:
             stages.append(("sealed-evaluation", iteration.evaluation_directory,
@@ -1174,7 +1183,8 @@ class WorkflowRunner:
         if dataset.teacher is not None:
             # The teacher's iteration may have finished earlier in this same invocation.
             check_model_lineage(self.config, dataset.teacher)
-        source_stats = self._prepare_source(dataset)
+        source = dataset if dataset.positions is None else self.config.dataset(dataset.positions)
+        source_stats = self._prepare_source(source)
         label_stats = self._prepare_labels(dataset, source_stats)
         return self._prepare_features(dataset, source_stats, label_stats)
 
@@ -1250,7 +1260,12 @@ class WorkflowRunner:
             if unexpected:
                 raise WorkflowError(
                     f"label corpus has unexpected output; move it aside explicitly: {unexpected[0]}")
-        attempt = self._begin(stage, "resume-or-create", source_stats)
+        label_input = source_stats
+        if dataset.positions is not None:
+            # The source statistics name the positions' teacher; lock the one relabeling them.
+            label_input = {"source": source_stats, "teacher": (
+                None if dataset.teacher is None else dataset.teacher.model_id)}
+        attempt = self._begin(stage, "resume-or-create", label_input)
         stage_started = time.perf_counter()
         creation = 0.0
         authentication = 0.0
@@ -1380,7 +1395,10 @@ class WorkflowRunner:
                     "rerun with --with-dependencies or run that iteration first")
             dependency_stats[name] = self._authenticate_iteration_outputs(dependency)
         dataset_stats = self.prepare_dataset(iteration.dataset)
-        training_stats = self._run_training(iteration, dataset_stats, dependency_stats)
+        extra_stats = [self.prepare_dataset(dataset.name)
+                       for dataset in extra_training_datasets(self.config, iteration)]
+        training_stats = self._run_training(
+            iteration, dataset_stats, dependency_stats, extra_stats)
         evaluation_stats = None
         if iteration.sealed_evaluation is not None:
             for name in iteration.sealed_evaluation.exclude_datasets:
@@ -1397,7 +1415,8 @@ class WorkflowRunner:
                                         iteration: IterationConfig) -> dict[str, Any]:
         """Authenticate every configured output before a dependency is reused."""
         training = authenticate_training(
-            self.config.dataset(iteration.dataset), iteration)
+            self.config.dataset(iteration.dataset), iteration,
+            extra_training_datasets(self.config, iteration))
         if iteration.sealed_evaluation is not None:
             authenticate_evaluation(self.config, iteration)
         if iteration.candidate_validation is not None:
@@ -1407,20 +1426,24 @@ class WorkflowRunner:
         return training
 
     def _run_training(self, iteration: IterationConfig, dataset_stats: dict[str, Any],
-                      dependencies: dict[str, Any]) -> dict[str, Any]:
+                      dependencies: dict[str, Any],
+                      extra_stats: Sequence[dict[str, Any]] = ()) -> dict[str, Any]:
         stage = f"iteration:{iteration.name}:training"
         dataset = self.config.dataset(iteration.dataset)
+        extras = extra_training_datasets(self.config, iteration)
 
         def create(attempt: int) -> None:
             self._command(stage, "create", training_command(
-                sys.executable, dataset, iteration), attempt=attempt)
+                sys.executable, dataset, iteration, extras), attempt=attempt)
 
         def authenticate(_attempt: int) -> dict[str, Any]:
-            return authenticate_training(dataset, iteration)
+            return authenticate_training(dataset, iteration, extras)
 
-        return self._run_simple(
-            stage, iteration.training_directory, "training report",
-            {"dataset": dataset_stats, "dependencies": dependencies}, create, authenticate)
+        inputs: dict[str, Any] = {"dataset": dataset_stats, "dependencies": dependencies}
+        if extra_stats:
+            inputs["extra_datasets"] = list(extra_stats)
+        return self._run_simple(stage, iteration.training_directory, "training report",
+                                inputs, create, authenticate)
 
     def _run_evaluation(self, iteration: IterationConfig,
                         training_stats: dict[str, Any]) -> dict[str, Any]:
@@ -1545,6 +1568,9 @@ class WorkflowRunner:
                     "log_sha256": sha256_file(item.log_path), "resources": item.metrics,
                 } for item in command_results],
             }
+            training_datasets = candidate_training_datasets(iteration)
+            if training_datasets is not None:
+                report["training_datasets"] = training_datasets
             complete_json_report(root, CANDIDATE_SCHEMA, report)
 
         def authenticate(_attempt: int) -> dict[str, Any]:
@@ -1994,6 +2020,8 @@ def _archive_entry(config: WorkflowConfig, iteration: IterationConfig,
             "candidate_report_sha256": candidate["report_sha256"],
         },
         "metrics": {"float": model["float"], "quantized": model["quantized"]},
+        **({"training_datasets": candidate["training_datasets"]}
+           if "training_datasets" in candidate else {}),
         "parity": candidate["parity"],
         "benchmarks": {"evaluator": candidate["evaluator_benchmark"],
                        "search": candidate["search_benchmark"]},

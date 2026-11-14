@@ -14,6 +14,7 @@ from test_workflow_generations import (
     ChainFixture,
     _complete,
     _record_gate,
+    relocated,
 )
 from poe2_training.shared import sha256_file
 from poe2_training.workflow import (
@@ -78,7 +79,7 @@ class ComparisonConfigTest(ChainFixture):
             new = "g001"
             base = "g000"
             """), encoding="utf-8")
-        fingerprints = stage_fingerprints(load_workflow_config(compared))
+        fingerprints = stage_fingerprints(relocated(load_workflow_config(compared)))
         self.assertIn("comparison:g001-vs-g000:match", fingerprints)
         del fingerprints["comparison:g001-vs-g000:match"]
         self.assertEqual(fingerprints, RUN1_FINGERPRINTS)

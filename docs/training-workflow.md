@@ -57,7 +57,7 @@ The candidate promotion sequence is:
 
 1. Commit a recipe whose candidate iteration includes an `engine_gate` table. A gate can also be added later in a compatible recipe revision, as long as that stage has not started.
 2. Run the iteration: training, candidate validation, and the gate. The gate builds the candidate's model header privately, so nothing in the source tree changes.
-3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision. A generation taught by or gated against a model trained in the same recipe can be promoted only after that model is archived, so promote a chain's generations in order.
+3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision. A generation that is gated against a model trained in the same recipe, or reads data taught by one, can be promoted only after that model is archived, so promote a chain's generations in order.
 4. Review and commit the ledger row, archive, and index.
 5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed model header.
 
@@ -232,6 +232,79 @@ Baseline training uses `type = "baseline"` and accepts `device`, `seed`, `close_
 
 Iteration dependencies enforce ordering and authentication only; they never copy a selected model or settings into a later iteration. The exploratory suites report their own validation winner, while `frozen-pattern-gain` always trains the fixed engine-compatible deployment contract. A recipe containing both roles is therefore a reproducibility and audit pipeline, not an automatic nested model-selection pipeline.
 
+### Training data
+
+A pattern iteration trains on its own dataset, the primary, and can also learn from the train records of other datasets of the recipe. Model selection, the sealed test, candidate parity, and every reported validation metric use the primary only.
+
+In a compact recipe, these settings go in `[defaults.training]` or a generation's own `[generations.training]`:
+
+```toml
+[datasets.v02-corpus]
+kind = "imported"
+path = "build/data/features/pattern-scale-320k-s20260818/b-primitives"
+
+[defaults.training]
+type = "pattern"
+device = "cuda"
+suite = "frozen-pattern-gain"
+window = 3
+age_weight = 0.5
+
+[[generations]]
+name = "g004"
+parent = "g003"
+seed = 20261117
+[generations.training]
+refresh = 1
+extra = [{ dataset = "g003b", weight = 0.3 }, { dataset = "v02-corpus", weight = 0.2 }]
+max_records = 2000000
+piece_records = 250000
+```
+
+- `window = N` (default 1) adds the datasets of the previous N - 1 ancestors along the parent chain that this recipe trained. A pinned ancestor has no dataset and ends the window. A growing window is just larger values on later generations.
+- `age_weight` (default 1) multiplies the weight per generation of age: the parent's data counts `age_weight`, the grandparent's `age_weight²`, and so on.
+- `refresh = K` (less than `window`) replaces the datasets of the K newest ancestors in the window with copies of their positions relabeled by this generation's parent, the teacher of its own new data. A copy is a dataset named `GENERATION-refresh-ANCESTOR` with the same positions and splits and this generation's label settings, at the weight of the dataset it replaces.
+- `extra` names more datasets, each with a weight (default 1): any trained generation, such as a sibling that lost its gate, or an imported dataset. A compact recipe may declare imported datasets under `[datasets]`; generations make every managed one.
+- `max_records` and `piece_records` are described below.
+
+These expand into the long form's `extra_datasets`, newest first: the window by age, then `extra` in order. In the long form:
+
+```toml
+[datasets.g001-relabeled]
+kind = "managed"
+teacher = "g002"
+positions = "g001"
+
+[datasets.g001-relabeled.labels]
+mode = "teacher"
+nodes = 5000000
+
+[iterations.training]
+type = "pattern"
+suite = "frozen-pattern-gain"
+extra_datasets = [{ dataset = "g001-relabeled", weight = 0.5 },
+                  { dataset = "v02-corpus", weight = 0.2 }]
+max_records = 2000000
+piece_records = 250000
+```
+
+A managed dataset with `positions` instead of `source` labels another managed dataset's position source with its own teacher. It has only labels and features stages, keeps that source's settings and train, validation, and test splits, and its labels stage depends on that source stage. The actual teacher digest is locked as an input of its labels stage. The baseline training type does not take these options.
+
+The training set is built in one place, the training selection in `poe2_training/dataset.py` (see [feature data](feature-data.md#training-selection)):
+
+1. It starts from the primary's train split and each extra dataset's train split, in order. No extra dataset's validation or test records are ever used.
+2. An extra record whose canonical position is in the primary's validation or test split is dropped, so those splits stay unseen by the model.
+3. A position present in several datasets is kept only in the first, newest one: the primary, then the list order.
+4. `max_records` caps the total. Whole datasets are taken newest first; the first one that does not fit contributes a deterministic subset of whole games (families, in a fixed hashed order); later ones contribute nothing. The cap counts the primary too.
+
+The training report's `training_data` lists every dataset that contributed: its corpus ID, feature digests, teacher, weight, train records, the records dropped by the holdout rule, by a newer copy, and by the cap, and the records used. The candidate report and the archived model's JSON carry the same list as `training_datasets` when more than one dataset contributed. None of these fields appear, and no stage fingerprint changes, unless an option is set.
+
+Each record's loss is weighted by its dataset's weight, the primary's being 1, and the weights are normalized to sum to one, so the data term stays a weighted average. The L2 term is then exactly as strong relative to the data as with one dataset: adding older data at a low weight neither weakens nor strengthens regularization, and scaling every weight changes nothing. Feature standardization, the gain-control ridge fit that initializes the model, and the per-ply means of gain-free models use the same weighted moments. Standardization therefore matches the distribution the loss sees, and the L2 penalty on standardized weights treats each feature consistently with it. Export folds standardization away, so the deployed tables do not depend on it. When every used record has the same weight, as with `age_weight = 1`, training uses the plain mean and unweighted moments.
+
+Without `piece_records`, training expands every record's 36 line patterns into 1,716 dense float32 counts, about 6.9 KB per record, in host memory and on the device. With `piece_records = N`, it keeps compact data on the device for each record (the pattern IDs, 19 standardized gain summaries, ply, target, and weight) and expands dense counts N records at a time. Standardization comes from streaming sums, the gain-control fit from accumulated normal equations, and each full-batch Adam step accumulates its gradient over the pieces, so it is the same optimisation, not mini-batch training. Floating-point terms are added in a different order, and Adam can magnify that where a gradient is nearly zero. On test data, standardization was identical and gain-control weights agreed to 1e-15, but after about 1,300 steps line weights differed by up to 0.01, early stopping picked a step up to 50 later, and validation MAE differed by at most about 0.02%. That is about as much as the same in-memory run differs between CPU and GPU. The exported fixed-point tables can differ in individual entries, so keep one mode for a run. On the 303,599-record v0.2 corpus (189,246 train records), pieces of 50,000 cut peak host memory from 5.4 to 2.1 GiB and peak GPU allocation from 1.8 to 1.1 GiB, and took 3.2 times as long. The dense counts that pieces avoid grow by about 6.9 KB per record, so the saving matters once a window holds millions of records.
+
+An iteration that needs a dataset which can never be produced, because that dataset's teacher did not win its gate, is not started and shows the reason, as under [chains](#chains).
+
 ### Comparisons
 
 A comparison plays two models of the recipe against each other, separately from any gate. Typical uses are the newest generation against the starting model, and a generation that lost to its parent against an older generation. Each side names a `[models]` entry, archived or trained by the recipe; in a compact recipe, each names a generation.
@@ -327,7 +400,7 @@ Every mutating command holds `<run>/.orchestrator.lock`. Accepted TOML revisions
 ├── summary.json
 ├── logs/<stage>/attempt-...
 ├── build/<preset>/
-├── datasets/<name>/{source-chunks,source,labels/shards,features}
+├── datasets/<name>/{source-chunks,source,labels/shards,features}   relabeled: labels, features
 ├── iterations/<name>/{training/{report.json,training-metrics.svg},sealed-evaluation,candidate,engine-gate}
 └── comparisons/<name>/{builds/<model ID>,runs}
 ```
@@ -351,7 +424,7 @@ uv run --frozen poe2-train promote-gate --config "$CONFIG" "$ITERATION" --apply
 
 Promotion requires a clean tree and the run lock. It authenticates the saved row against the gate manifest and summary, validates the master schema, coordinates with native ledger writers, and rejects duplicate run IDs before appending to `eval/results.csv`.
 
-A generation whose teacher or gate base is a model trained by the same recipe is promoted only after that model is archived, so every archived model's teacher is archived too. Promote a chain in generation order, committing each result before the next. Recording stays manual: a chain that ran unattended is promoted afterwards, one generation at a time.
+A generation whose gate base, or the teacher of any dataset it reads, is a model trained by the same recipe is promoted only after that model is archived, so every archived model's teachers are archived too. Promote a chain in generation order, committing each result before the next. Recording stays manual: a chain that ran unattended is promoted afterwards, one generation at a time.
 
 Promotion also archives the gated model, whether it won or not, in two files named by its build identity:
 

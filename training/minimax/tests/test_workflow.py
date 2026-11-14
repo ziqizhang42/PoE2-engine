@@ -18,7 +18,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest import mock
 
-from fixture import write_feature_fixture
+from fixture import repository_temporary_directory, write_feature_fixture
 from test_workflow_generations import V02
 from poe2_training.pattern_suites import pattern_suite
 from poe2_training.shared import (
@@ -137,7 +137,7 @@ def _write(root: Path, contents: str, name: str = "run.toml") -> Path:
 
 class WorkflowConfigTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
+        self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
 
     def tearDown(self) -> None:
@@ -614,7 +614,7 @@ class WorkflowConfigTest(unittest.TestCase):
 
 class WorkflowStateTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
+        self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
         self.path = _write(self.root, _managed_config(self.root))
         self.config = load_workflow_config(self.path)
@@ -952,7 +952,7 @@ class WorkflowStateTest(unittest.TestCase):
 
 class WorkflowPromotionTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
+        self.temporary = repository_temporary_directory()
         self.root = Path(self.temporary.name)
         (self.root / "base-engine").write_text("base\n", encoding="utf-8")
         self.config = self._config()

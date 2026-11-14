@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from .artifact import FeatureArtifact, open_feature_artifact
 from .baseline import open_baseline_report
@@ -26,6 +26,7 @@ from .workflow_config import (
     ManagedDatasetConfig,
     MatchConfig,
     ModelReference,
+    PatternTrainingConfig,
     WorkflowConfig,
     match_settings,
     recorded_gate_settings,
@@ -324,8 +325,8 @@ def feature_audit_command(python: str, config: WorkflowConfig,
     ]
 
 
-def training_command(python: str, dataset: DatasetConfig,
-                     iteration: IterationConfig) -> list[str]:
+def training_command(python: str, dataset: DatasetConfig, iteration: IterationConfig,
+                     extras: Sequence[DatasetConfig] = ()) -> list[str]:
     feature_directory = dataset.feature_directory
     training = iteration.training
     if isinstance(training, BaselineTrainingConfig):
@@ -335,11 +336,18 @@ def training_command(python: str, dataset: DatasetConfig,
             "--ridge-lambdas", ",".join(str(value) for value in training.ridge_lambdas),
             "--close-margin", str(training.close_margin), "--seed", str(training.seed),
         ]
-    return [
+    command = [
         python, "-m", "poe2_training.pattern_experiment", "--dataset",
         str(feature_directory), "--output-dir", str(iteration.training_directory),
         "--device", training.device, "--seed", str(training.seed), "--suite", training.suite,
     ]
+    for extra, item in zip(extras, training.extra_datasets, strict=True):
+        command.extend(("--extra-dataset", str(extra.feature_directory), repr(item.weight)))
+    if training.max_records is not None:
+        command.extend(("--max-records", str(training.max_records)))
+    if training.piece_records is not None:
+        command.extend(("--piece-records", str(training.piece_records)))
+    return command
 
 
 def evaluation_command(python: str, config: WorkflowConfig,
@@ -593,8 +601,28 @@ def authenticate_features(dataset: DatasetConfig, *, require_clean: bool = True)
     }
 
 
-def authenticate_training(dataset: DatasetConfig,
-                          iteration: IterationConfig) -> dict[str, Any]:
+def _authenticate_training_data(report: dict[str, Any], training: PatternTrainingConfig,
+                                features: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Check that a report trained on exactly the configured datasets, weights, and options."""
+    data = report.get("training_data")
+    _require(isinstance(data, dict) and data.get("max_records") == training.max_records and
+             data.get("piece_records") == training.piece_records and
+             isinstance(data.get("datasets"), list),
+             "pattern report training data options differ from configuration")
+    weights = [1.0, *(item.weight for item in training.extra_datasets)]
+    datasets = data["datasets"]
+    _require(len(datasets) == len(features) and all(
+        isinstance(entry, dict) and
+        entry.get("feature_binary_sha256") == feature["binary_sha256"] and
+        entry.get("feature_manifest_sha256") == feature["manifest_sha256"] and
+        entry.get("weight") == weight
+        for entry, feature, weight in zip(datasets, features, weights)),
+        "pattern report trained on different datasets or weights than configured")
+    return datasets
+
+
+def authenticate_training(dataset: DatasetConfig, iteration: IterationConfig,
+                          extras: Sequence[DatasetConfig] = ()) -> dict[str, Any]:
     feature = authenticate_features(dataset)
     training = iteration.training
     if isinstance(training, BaselineTrainingConfig):
@@ -643,13 +671,20 @@ def authenticate_training(dataset: DatasetConfig,
                  quantization.get("scale") ==
                  1 << FROZEN_PATTERN_GAIN_FRACTIONAL_BITS,
                  "candidate training report does not use deployment scale-32 quantization")
-    return {
+    result = {
         "report_sha256": sha256_file(iteration.training_directory / "report.json"),
         "kind": training.type, "selected_model": selected.get("name"),
         "selected_validation": selected.get("validation", {}).get("overall"),
         "selected_quantized_validation": quantized_validation,
         "input": metadata, "attachments": report.get("attachments", {}),
     }
+    if isinstance(training, PatternTrainingConfig) and training.uses_training_data_options:
+        result["training_datasets"] = _authenticate_training_data(
+            report, training, [feature, *(authenticate_features(item) for item in extras)])
+    else:
+        _require("training_data" not in report,
+                 "pattern report used training data options that are not configured")
+    return result
 
 
 def authenticate_evaluation(config: WorkflowConfig,
@@ -795,6 +830,9 @@ def authenticate_candidate(config: WorkflowConfig,
         _require(config.output_directory in log.parents and log.is_file() and
                  sha256_file(log) == command["log_sha256"],
                  f"candidate command log {index} is missing, unsafe, or changed")
+    training_datasets = candidate_training_datasets(iteration)
+    _require(report.get("training_datasets") == training_datasets,
+             "candidate lists different training datasets than its training report")
     return {
         "report_sha256": report_digest, "promotable": report["promotable"],
         "git_commit": report["git_commit"], "created_at_utc": report.get("created_at_utc"),
@@ -807,7 +845,17 @@ def authenticate_candidate(config: WorkflowConfig,
         "evaluator_benchmark": report.get("evaluator_benchmark"),
         "search_benchmark": report.get("search_benchmark"),
         "artifacts": artifacts,
+        **({} if training_datasets is None else {"training_datasets": training_datasets}),
     }
+
+
+def candidate_training_datasets(iteration: IterationConfig) -> list[dict[str, Any]] | None:
+    """Return the datasets a candidate's model learned from, when there was more than one."""
+    if not isinstance(iteration.training, PatternTrainingConfig):
+        return None
+    data = open_pattern_report(iteration.training_directory).get("training_data")
+    datasets = data.get("datasets") if isinstance(data, dict) else None
+    return datasets if isinstance(datasets, list) and len(datasets) > 1 else None
 
 
 def _authenticate_build_artifacts(root: Path, report: dict[str, Any],

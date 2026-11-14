@@ -9,7 +9,13 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .dataset import MappedFeatureDataset, NumpyFeatureBatch, subset_batch
+from .dataset import (
+    MappedFeatureDataset,
+    NumpyFeatureBatch,
+    canonical_keys,
+    key_membership,
+    subset_batch,
+)
 from .model_metrics import model_metrics
 from .pattern_experiment import GAIN_KNOTS, open_pattern_report
 from .patterns import line_pattern_counts, phase_basis
@@ -34,7 +40,6 @@ from .shared import (
 SCHEMA = "poe2-minimax-pattern-evaluation"
 SCHEMA_VERSION = 1
 COMPLETE_HEADER = SCHEMA
-KEY_DTYPE = np.dtype([("low", "<u8"), ("high", "<u8")])
 
 
 class PatternEvaluationError(ValueError):
@@ -184,28 +189,6 @@ def _reduction(reference: float, candidate: float) -> float | None:
     return None if reference == 0.0 else float(100.0 * (reference - candidate) / reference)
 
 
-def _canonical_keys(dataset: MappedFeatureDataset,
-                    indices: np.ndarray | None = None) -> np.ndarray:
-    records = dataset.records if indices is None else dataset.records[indices]
-    keys = np.empty(records.shape[0], dtype=KEY_DTYPE)
-    keys["low"] = records["key_low"]
-    keys["high"] = records["key_high"]
-    return keys
-
-
-def _known_key_mask(keys: np.ndarray, known: np.ndarray) -> np.ndarray:
-    """Return membership in a sorted unique canonical-key array."""
-    candidates = np.asarray(keys, dtype=KEY_DTYPE)
-    reference = np.asarray(known, dtype=KEY_DTYPE)
-    if reference.size == 0:
-        return np.zeros(candidates.size, dtype=np.bool_)
-    offsets = np.searchsorted(reference, candidates)
-    in_range = offsets < reference.size
-    result = np.zeros(candidates.size, dtype=np.bool_)
-    result[in_range] = reference[offsets[in_range]] == candidates[in_range]
-    return result
-
-
 def run_pattern_evaluation(
     dataset_directory: Path | str,
     experiment_directory: Path | str,
@@ -241,7 +224,7 @@ def run_pattern_evaluation(
         known_keys: list[np.ndarray] = []
         for exclusion_directory in exclude_dataset_directories:
             with MappedFeatureDataset(exclusion_directory, verify_digest=True) as exclusion:
-                known_keys.append(_canonical_keys(exclusion))
+                known_keys.append(canonical_keys(exclusion.records))
                 exclusions.append({
                     "corpus_id": exclusion.artifact.manifest["corpus"]["id"],
                     "feature_binary_sha256": exclusion.artifact.binary_digest,
@@ -251,7 +234,7 @@ def run_pattern_evaluation(
         excluded_records = 0
         if known_keys:
             known = np.unique(np.concatenate(known_keys))
-            overlap = _known_key_mask(_canonical_keys(dataset, test.indices), known)
+            overlap = key_membership(canonical_keys(dataset.records[test.indices]), known)
             excluded_records = int(overlap.sum())
             test = subset_batch(test, ~overlap)
         _require(test.records > 0, "sealed test split is empty after overlap exclusion")
