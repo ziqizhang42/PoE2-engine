@@ -1,0 +1,89 @@
+{
+  "architecture": "frozen_c_line_0_28_49_gain_phase_5_huber8",
+  "corpus_id": "poe2-pattern-scale-320k-s20260818",
+  "gate": {
+    "base_id": "000053-96a4b598a45e",
+    "decision": "accept_alt",
+    "games": 84,
+    "new_id": "000072-1f8162e8fd16",
+    "run_id": "20260818T201537Z__000072-1f8162e8fd16__minimax_poe2_minimax__vs__000053-96a4b598a45e__minimax_poe2_minimax",
+    "score_pct": 91.667
+  },
+  "metrics": {
+    "float": {
+      "sealed_test": {
+        "close_margin": 8,
+        "close_records": 8086,
+        "close_sign_accuracy": 0.7499381647291615,
+        "mae": 4.946101602535141,
+        "maximum_absolute_error": 44.01727256911505,
+        "mean_error": -0.03927608091480477,
+        "p95_absolute_error": 13.732417956087126,
+        "records": 39979,
+        "rmse": 6.634083488646052,
+        "sign_accuracy": 0.941369218839891
+      },
+      "validation": {
+        "close_margin": 8,
+        "close_records": 12175,
+        "close_sign_accuracy": 0.746776180698152,
+        "mae": 4.442830541236879,
+        "maximum_absolute_error": 42.95418739318848,
+        "mean_error": 0.19534059883665833,
+        "p95_absolute_error": 12.512338256835937,
+        "records": 74157,
+        "rmse": 6.028203116294868,
+        "sign_accuracy": 0.9517914694499507
+      }
+    },
+    "quantized": {
+      "sealed_test": {
+        "close_margin": 8,
+        "close_records": 8086,
+        "close_sign_accuracy": 0.7222359633935197,
+        "mae": 4.940468746091698,
+        "maximum_absolute_error": 44.0,
+        "mean_error": -0.17851872232922283,
+        "p95_absolute_error": 14.0,
+        "records": 39979,
+        "rmse": 6.64253262700628,
+        "sign_accuracy": 0.9343405287776082
+      },
+      "validation": {
+        "close_margin": 8,
+        "close_records": 12175,
+        "close_sign_accuracy": 0.7159753593429158,
+        "mae": 4.429251452998368,
+        "maximum_absolute_error": 43.0,
+        "mean_error": 0.0514583923297868,
+        "p95_absolute_error": 12.0,
+        "records": 74157,
+        "rmse": 6.03040781922973,
+        "sign_accuracy": 0.9459120514583923
+      }
+    }
+  },
+  "model_header_sha256": "633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3",
+  "model_id": "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3",
+  "origin": {
+    "installed_commit": "3d35d51daade800cf21723f4f6690ecf94cafc09",
+    "kind": "release",
+    "note": "Trained by hand before the training workflow existed. Shipped as engines/minimax/src/frozen_pattern_gain_model.hpp.",
+    "training_git": {
+      "commit": "d3c0fad316c7fe47fd48cb96cd2cfd232194afac",
+      "dirty": true
+    },
+    "version": "0.2.0"
+  },
+  "provenance": {
+    "corpus_digest": "sha256:2022d2e3f8a34056d001d65d59980171b134c5a06e869aeabb4134f36cdb8228",
+    "feature_binary_sha256": "aba1893d33dbbc55556a20120977b5f58fe9432184da8a525a182ba39202665c",
+    "sealed_evaluation_report_sha256": "82429620f20a23a75c945c099e66c837cbf358d573f99171fcefe161213fede3",
+    "training_report_sha256": "18e2fc8d74890b8184b851ebf881ad4680b8da4424705b9e40d6b3334dd7c266"
+  },
+  "schema": "poe2-archived-model",
+  "schema_version": 1,
+  "teacher": {
+    "evaluator": "two-ply-closure"
+  }
+}

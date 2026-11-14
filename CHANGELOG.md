@@ -5,6 +5,7 @@
 - 2026-08-20: A pipeline reproduction of v0.2 (`training/minimax/recipes/run1.toml` at `4198145`) matched it offline, with sealed-test MAE 4.929 vs 4.940.
 - 2026-11-14: Engine gates build candidates privately. Every gated model is archived in `models/` with its metrics and listed in `models/index.csv`, and only gate winners can be installed.
 - 2026-11-14: The reproduction played even with `000074` (49.8% over 1,308 games, no difference), and its recipe was retired. v0.2 is generation `g000` of the next run.
+- 2026-11-14: Datasets can name an archived teacher model, which drives position sampling and labels and is recorded in every data manifest. v0.2 is archived as `g000`, and `run1` trains `g001` from it.
 
 ## 0.2.0 - 2026-08-18
 
