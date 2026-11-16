@@ -36,6 +36,7 @@ from poe2_training.workflow_ui import WorkflowProgress
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 RECIPES = REPOSITORY / "training/minimax/recipes"
+RECIPE_FIXTURES = REPOSITORY / "training/minimax/tests/recipes"
 V02 = "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3"
 # Stage fingerprints of the long-form run1 recipe. They name paths relative to the repository,
 # so they hold at any checkout path, and runs are tied to them, so neither form may change them.
@@ -136,10 +137,16 @@ class ChainFixture(unittest.TestCase):
 
 
 class CompactRecipeTest(ChainFixture):
+    def test_every_repository_recipe_loads(self) -> None:
+        recipes = sorted(RECIPES.glob("*.toml"))
+        self.assertTrue(recipes)
+        for recipe in recipes:
+            with self.subTest(recipe=recipe.name):
+                self.assertTrue(stage_fingerprints(load_workflow_config(recipe)))
+
     def test_compact_run1_has_the_long_form_stage_fingerprints(self) -> None:
-        compact = load_workflow_config(RECIPES / "run1.toml")
-        long_form = load_workflow_config(
-            REPOSITORY / "training/minimax/tests/recipes/run1-long-form.toml")
+        compact = load_workflow_config(RECIPE_FIXTURES / "run1-compact.toml")
+        long_form = load_workflow_config(RECIPE_FIXTURES / "run1-long-form.toml")
         self.assertEqual(stage_fingerprints(long_form), RUN1_FINGERPRINTS)
         self.assertEqual(stage_fingerprints(compact), RUN1_FINGERPRINTS)
         absolute = stage_fingerprints(relocated(compact), absolute_paths=True)

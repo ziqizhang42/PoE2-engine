@@ -32,6 +32,7 @@ require_all = true
 type = "pattern"
 device = "cuda"
 suite = "frozen-pattern-gain"
+method = "lookup"
 
 [defaults.sealed_evaluation]
 

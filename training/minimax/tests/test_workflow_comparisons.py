@@ -8,7 +8,7 @@ from unittest import mock
 
 from test_workflow_generations import (
     CHAIN,
-    RECIPES,
+    RECIPE_FIXTURES,
     REPOSITORY,
     RUN1_FINGERPRINTS,
     V02,
@@ -73,7 +73,7 @@ class ComparisonConfigTest(ChainFixture):
 
     def test_adding_a_comparison_changes_no_other_fingerprint(self) -> None:
         compared = self.root / "run1-compared.toml"
-        compared.write_text((RECIPES / "run1.toml").read_text(encoding="utf-8") + textwrap.dedent(
+        compared.write_text((RECIPE_FIXTURES / "run1-compact.toml").read_text(encoding="utf-8") + textwrap.dedent(
             """
             [[comparisons]]
             new = "g001"
