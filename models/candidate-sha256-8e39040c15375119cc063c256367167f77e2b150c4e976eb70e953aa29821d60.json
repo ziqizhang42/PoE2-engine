@@ -1,0 +1,143 @@
+{
+  "architecture": "frozen_c_line_0_28_49_gain_phase_5_huber8",
+  "benchmarks": {
+    "evaluator": {
+      "pattern-gain": {
+        "checksum": 71006838,
+        "elapsed_ns": 102765396,
+        "evaluations": 409600,
+        "evaluator": "pattern-gain",
+        "iterations": 100,
+        "ns_per_evaluation": 250.892,
+        "positions": 4096
+      },
+      "two-ply-closure": {
+        "checksum": -55137920,
+        "elapsed_ns": 29935150,
+        "evaluations": 409600,
+        "evaluator": "two-ply-closure",
+        "iterations": 100,
+        "ns_per_evaluation": 73.084,
+        "positions": 4096
+      }
+    },
+    "search": {
+      "comparison": {
+        "depth_mean_delta": -0.438,
+        "depth_median_delta": -1.0,
+        "pattern_gain_to_two_ply_closure_nps": 0.6538
+      },
+      "evaluators": {
+        "pattern-gain": {
+          "depth_mean": 6.125,
+          "depth_median": 6.0,
+          "depth_range": "6-7",
+          "evaluator": "pattern-gain",
+          "modelevals": 6435719,
+          "movetime_ms": 100,
+          "nodes": 16835072,
+          "nps": 5260960,
+          "positions": 32,
+          "staticevals": 6435719,
+          "wall_nps": 4235613
+        },
+        "two-ply-closure": {
+          "depth_mean": 6.562,
+          "depth_median": 7.0,
+          "depth_range": "6-8",
+          "evaluator": "two-ply-closure",
+          "modelevals": 0,
+          "movetime_ms": 100,
+          "nodes": 25749760,
+          "nps": 8046800,
+          "positions": 32,
+          "staticevals": 7779156,
+          "wall_nps": 6504527
+        }
+      }
+    }
+  },
+  "corpus_id": "poe2-run1-g001-v1",
+  "git_commit": "cf1d58033f98f7d57565a49feb259bea5a8854c9",
+  "metrics": {
+    "float": {
+      "sealed_test": {
+        "close_margin": 8,
+        "close_records": 8140,
+        "close_sign_accuracy": 0.771990171990172,
+        "mae": 3.913070706339144,
+        "maximum_absolute_error": 40.547669607257035,
+        "mean_error": -0.03874267703386901,
+        "p95_absolute_error": 10.697378601669142,
+        "records": 40789,
+        "rmse": 5.296568385307652,
+        "sign_accuracy": 0.9511387874181765
+      },
+      "validation": {
+        "close_margin": 8,
+        "close_records": 8085,
+        "close_sign_accuracy": 0.7725417439703154,
+        "mae": 3.9637728981381173,
+        "maximum_absolute_error": 60.166046142578125,
+        "mean_error": -0.03311128498615472,
+        "p95_absolute_error": 10.822064399719238,
+        "records": 40036,
+        "rmse": 5.368780439423553,
+        "sign_accuracy": 0.9513188130682386
+      }
+    },
+    "quantized": {
+      "sealed_test": {
+        "close_margin": 8,
+        "close_records": 8140,
+        "close_sign_accuracy": 0.745945945945946,
+        "mae": 3.9092647527519673,
+        "maximum_absolute_error": 40.0,
+        "mean_error": 0.03763269508936233,
+        "p95_absolute_error": 11.0,
+        "records": 40789,
+        "rmse": 5.307765528449697,
+        "sign_accuracy": 0.9454264630169898
+      },
+      "validation": {
+        "close_margin": 8,
+        "close_records": 8085,
+        "close_sign_accuracy": 0.75139146567718,
+        "mae": 3.9608102707563195,
+        "maximum_absolute_error": 60.0,
+        "mean_error": 0.04653312019182736,
+        "p95_absolute_error": 11.0,
+        "records": 40036,
+        "rmse": 5.38262478864598,
+        "sign_accuracy": 0.9464981516635028
+      }
+    }
+  },
+  "model_header_sha256": "8e39040c15375119cc063c256367167f77e2b150c4e976eb70e953aa29821d60",
+  "model_id": "candidate-sha256-8e39040c15375119cc063c256367167f77e2b150c4e976eb70e953aa29821d60",
+  "parity": {
+    "base_positions": 4096,
+    "exact_endgames": 0,
+    "feature_binary_sha256": "9611a2698f0d3c09bd1ca6418e5e2079604d2d40ce8fbcfbc1e6d48b222361f1",
+    "passed": true,
+    "transformed_positions": 3584
+  },
+  "provenance": {
+    "candidate_report_sha256": "21bd0f5a5bb09a0514786995520621488af28c2dd723608666f521db36afc641",
+    "feature_binary_sha256": "9611a2698f0d3c09bd1ca6418e5e2079604d2d40ce8fbcfbc1e6d48b222361f1",
+    "sealed_evaluation_report_sha256": "b72715362ec0c70a5532d6b1060342cb8e68379e94704f62e1f108839ebd780a",
+    "training_report_sha256": "e02fa0297be8cddc5b3791d18ef7d1676acdc238b2b3c496000fbcc241808f10"
+  },
+  "recipe": {
+    "iteration": "g001",
+    "path": "training/minimax/recipes/run1.toml",
+    "run": "run1"
+  },
+  "schema": "poe2-archived-model",
+  "schema_version": 1,
+  "teacher": {
+    "evaluator": "pattern-gain",
+    "model_id": "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3"
+  },
+  "validated_at_utc": "2026-11-16T20:16:32.778Z"
+}
