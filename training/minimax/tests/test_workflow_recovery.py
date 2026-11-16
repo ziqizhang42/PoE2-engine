@@ -236,6 +236,32 @@ class CrashLeftoverTest(RecoveryFixture):
         self.assertLess(types.index("crash_artifact_removed"), types.index("stage_abandoned"))
         self.assertLess(types.index("stage_abandoned"), types.index("run_started"))
 
+    def test_a_run_warns_when_commands_cannot_be_memory_limited(self) -> None:
+        self._runner()
+        stream = io.StringIO()
+        limits = []
+
+        def run_iteration(runner: WorkflowRunner, _iteration) -> None:
+            limits.append(runner.commands.scope_limit)
+
+        for problem in ("systemd-run is not usable: missing", None):
+            with mock.patch("poe2_training.workflow.require_clean_committed",
+                            return_value=COMMIT), \
+                    mock.patch("poe2_training.workflow.probe_scope_limit", return_value=problem), \
+                    mock.patch.object(WorkflowRunner, "run_iteration", autospec=True,
+                                      side_effect=run_iteration), \
+                    mock.patch("poe2_training.workflow.WorkflowProgress",
+                               lambda config, state: WorkflowProgress(config, state,
+                                                                      stream=stream)):
+                run_workflow(self.config, iteration_name="one")
+        self.assertIn("warning: workflow commands run without a memory limit (systemd-run is "
+                      "not usable: missing); they may use swap", stream.getvalue())
+        self.assertIsNone(limits[0])
+        self.assertIsNotNone(limits[1])
+        warnings = [event for event in RunState(self.config).events
+                    if event["type"] == "memory_limit_unavailable"]
+        self.assertEqual(len(warnings), 1)
+
     def test_mutating_commands_recover_under_the_lock(self) -> None:
         runner = self._runner()
         gate = self.config.iteration("one").gate_directory

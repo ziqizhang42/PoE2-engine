@@ -23,6 +23,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Sequence
 
+from .memory_guard import (
+    GIB,
+    LIMIT_VARIABLE,
+    ScopeLimit,
+    command_memory_limit,
+    probe_scope_limit,
+    scope_unit,
+)
 from .shared import (
     atomic_write_bytes,
     canonical_json,
@@ -147,9 +155,15 @@ class CommandResult:
 class CommandExecutionError(WorkflowError):
     def __init__(self, result: CommandResult) -> None:
         self.result = result
-        super().__init__(
-            f"command exited {result.exit_code}; inspect {result.log_path}: "
-            f"{shlex.join(result.command)}")
+        if result.metrics.get("memory_limit_exceeded"):
+            limit = result.metrics["memory_limit_bytes"] / GIB
+            cause = (f"command was stopped for using more than its {limit:.1f} GiB memory limit "
+                     f"(workflow commands never use swap; {LIMIT_VARIABLE} sets the limit)")
+        else:
+            last = next((line.strip() for line in reversed(result.output.splitlines())
+                         if line.strip()), "")
+            cause = f"command exited {result.exit_code}{f' ({last[:400]})' if last else ''}"
+        super().__init__(f"{cause}; inspect {result.log_path}: {shlex.join(result.command)}")
 
 
 class CommandRunner:
@@ -160,9 +174,23 @@ class CommandRunner:
         # Commands inherit the run lock, so a command that outlives a killed orchestrator keeps
         # the next one from treating its unfinished artifact as a crash leftover.
         self.lock_descriptors: tuple[int, ...] = ()
+        self.scope_limit: ScopeLimit | None = None
         self._active: dict[int, subprocess.Popen[str]] = {}
         self._lock = threading.Lock()
         self._print_lock = threading.Lock()
+
+    def limit_memory(self) -> str | None:
+        """Run later commands under a memory limit and without swap; return why not, if not."""
+        limit = command_memory_limit()
+        if limit is None:
+            return (f"{LIMIT_VARIABLE}=off: workflow commands run without a memory limit and "
+                    "may use swap")
+        problem = probe_scope_limit(limit)
+        if problem is not None:
+            return (f"workflow commands run without a memory limit ({problem}); they may use "
+                    "swap, and only the trainer's own memory estimate guards them")
+        self.scope_limit = ScopeLimit(limit)
+        return None
 
     @staticmethod
     def _parse_time(path: Path) -> dict[str, float | int | None]:
@@ -199,6 +227,9 @@ class CommandRunner:
                 "user_seconds=%U\nsystem_seconds=%S\npeak_rss_kb=%M",
                 "-o", str(raw_time), "--", *wrapped,
             ]
+        scope, unit = self.scope_limit, scope_unit()
+        if scope is not None:
+            wrapped = scope.command(unit, wrapped)
         started = time.perf_counter()
         started_utc = now_utc()
         output_parts: list[str] = []
@@ -242,6 +273,10 @@ class CommandRunner:
             "wall_seconds": wall, "exit_code": exit_code,
             **self._parse_time(raw_time),
         }
+        if scope is not None:
+            metrics["memory_limit_bytes"] = scope.limit
+            metrics["memory_limit_exceeded"] = (exit_code not in accepted and
+                                                scope.exceeded(unit))
         try:
             atomic_write_bytes(metrics_path, canonical_json(metrics))
             if raw_time.exists():
@@ -2023,6 +2058,9 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
         progress = WorkflowProgress(config, state)
         runner = WorkflowRunner(config, state, commit, progress)
         runner.commands.lock_descriptors = (lock_descriptor,)
+        if (warning := runner.commands.limit_memory()) is not None:
+            state.append("memory_limit_unavailable", warning=warning)
+            progress.note(f"warning: {warning}")
         not_started: list[Blocked] = []
         pending = list(comparisons)
         success = False

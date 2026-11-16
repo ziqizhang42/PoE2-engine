@@ -21,6 +21,7 @@ from .model_metrics import (
     model_metrics,
 )
 from .dataset import MappedFeatureDataset, NumpyFeatureBatch, TrainingSelection
+from .memory_guard import GIB, check_memory, training_estimate
 from .pattern_suites import SUITE_NAMES, pattern_suite
 from .patterns import (
     LINE_COUNT,
@@ -850,6 +851,25 @@ def _prepare_pieces(selection: TrainingSelection, validation: NumpyFeatureBatch,
     )
 
 
+def _check_training_memory(method: str, piece_records: int | None, records: int,
+                           validation_records: int, device: Any) -> None:
+    def described(method: str, pieces: int | None = None) -> str:
+        needed = training_estimate(method, records, validation_records, pieces)
+        gpu = f", {needed.device / GIB:.1f} GiB GPU" if device.type == "cuda" else ""
+        return f"about {needed.host / GIB:.1f} GiB host{gpu}"
+
+    remedies = [*([f'method = "lookup" ({described("lookup")})'] if method != "lookup" else []),
+                *([f"piece_records = 50000 ({described('dense', 50_000)})"]
+                  if method == "dense" and piece_records is None else []),
+                "max_records", "a smaller window", "more free memory"]
+    check_memory(
+        f"pattern training ({method}"
+        f"{f' in pieces of {piece_records:,}' if piece_records else ''}, {records:,} train and "
+        f"{validation_records:,} validation records)",
+        training_estimate(method, records, validation_records, piece_records), device=device,
+        remedies=f"Ways out: {', '.join(remedies[:-1])}, or {remedies[-1]}.")
+
+
 def run_pattern_experiment(
     dataset_directory: Path | str,
     output_directory: Path | str,
@@ -893,6 +913,10 @@ def run_pattern_experiment(
                   for path, weight in extra_datasets]
         selection = (TrainingSelection(dataset, extras, max_records=max_records)
                      if extras or max_records is not None or piece_records is not None else None)
+        _check_training_memory(
+            method, piece_records,
+            selection.records if selection is not None else int(dataset.indices("train").size),
+            int(dataset.indices("validation").size), device)
         reserve_report_directory(output, SCHEMA, error_type=PatternExperimentError)
         validation = dataset.materialize("validation")
         if piece_records is not None:

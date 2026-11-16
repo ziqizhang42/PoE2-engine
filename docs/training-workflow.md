@@ -321,6 +321,19 @@ With `method = "lookup"` (the default is `"dense"`), training never builds the d
 
 The larger sets repeat the v0.2 train split, and each step includes the evaluation every 25 steps. Dense needs about 21 KB of host memory per record while it standardizes and so stops fitting this machine between 1 and 1.5 million records. Lookup needs about 3.3 KB of host memory and 1.2 KB of GPU memory per record. On v0.2 the ten-model default suite trained in 86 s with lookup and 281 s dense. Lookup and dense results differ only by rounding, but Adam magnifies rounding late in training, so the selected step can move a long way: on v0.2 dense selected step 1,050 and lookup step 1,925. Validation MAE was 4.4280 and 4.4271, and sealed-test MAE 4.9285 and 4.9268. At the same step, weights agreed within 3e-5 after 100 steps and within 0.005 after 400 to 2,000 steps. Dense on the GPU and dense on the CPU differ as much from each other (steps 1,050 and 1,375). Fixed-point tables differ in most entries between any two of these runs, so keep one method within a run.
 
+The swap file is on the system disk, so a command that runs out of memory must fail rather than swap. Two guards ensure that. Neither is a recipe setting, and neither enters a fingerprint or a record, because both depend on the machine.
+
+- **Estimate.** Before it allocates anything large, the trainer estimates its peak host and GPU memory from the records it is about to use and its method. The per-record figures come from the measurements above. Measured peaks were within 0 to 11% of the estimates on the GPU, and up to 28% below them on the CPU. The trainer compares the estimate with free memory, less a margin: for the host, the smaller of what the machine has available and what its own memory limit leaves, less 5% of physical memory (at least 1 GiB); for the GPU, the card's free memory less 5% of it. Sealed evaluation checks its dense test table the same way. A refusal stops the stage before anything is created, so it is an ordinary recorded failure:
+
+  ```text
+  pattern experiment failed: pattern training (dense, 1,513,968 train and 74,157 validation records) needs about 31.5 GiB of host memory, but 17.9 GiB is free within this command's memory limit after a 1.5 GiB margin; nothing was allocated. Ways out: method = "lookup" (about 6.5 GiB host, 1.8 GiB GPU), piece_records = 50000 (about 2.9 GiB host, 1.3 GiB GPU), max_records, a smaller window, or more free memory.
+  ```
+
+  To continue, change the generation that has not started yet: switch it to `method = "lookup"`, add `piece_records`, cap it with `max_records`, or shrink its window. The trainer run by hand performs the same check.
+- **Hard limit.** The workflow runs every command in its own systemd user scope, with a host memory limit of physical memory less 4 GiB kept for the rest of the system (26 GiB here) and swap switched off: `systemd-run --user --scope -p MemoryMax=… -p MemorySwapMax=0`. The scope adds about 4 ms per command and leaves the process, its signals, its inherited run lock, its log and its exit status unchanged. Every command is wrapped, not only training, because any of them can run away and none may swap. A command that exceeds the limit is killed by the kernel. It is reported as `command was stopped for using more than its 24.0 GiB memory limit` and handled like any recorded failure.
+- **Overrides.** `POE2_TRAINING_MEMORY_LIMIT` sets another limit (for example `20G`) or `off`. `POE2_MEMORY_ESTIMATE=off` skips the estimates; it is meant only for testing the limit.
+- **Where systemd user scopes are unavailable**, or do not apply the limits, a run prints a warning, records a `memory_limit_unavailable` event, and runs its commands without a limit. The estimates still apply.
+
 An iteration that needs a dataset which can never be produced, because that dataset's teacher did not win its gate, is not started and shows the reason, as under [chains](#chains).
 
 ### Comparisons

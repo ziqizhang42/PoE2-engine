@@ -16,6 +16,7 @@ from .dataset import (
     key_membership,
     subset_batch,
 )
+from .memory_guard import EVALUATION_PROFILE, check_memory, estimate
 from .model_metrics import model_metrics
 from .pattern_experiment import GAIN_KNOTS, open_pattern_report
 from .patterns import line_pattern_counts, phase_basis
@@ -217,6 +218,10 @@ def run_pattern_evaluation(
                  dataset.artifact.split_counts[2],
                  "pattern experiment test count differs from the feature artifact")
 
+        test_records = int(dataset.indices("test").size)
+        check_memory(f"sealed evaluation ({test_records:,} test records as dense counts)",
+                     estimate(EVALUATION_PROFILE, test_records),
+                     remedies="It runs on the CPU; free host memory and retry.")
         reserve_report_directory(output, SCHEMA, error_type=PatternEvaluationError)
         test = dataset.materialize("test")
         unfiltered_test_records = test.records
