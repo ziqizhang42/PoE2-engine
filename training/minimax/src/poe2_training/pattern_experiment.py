@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import math
 import sys
 from contextlib import ExitStack
@@ -21,7 +22,13 @@ from .model_metrics import (
 )
 from .dataset import MappedFeatureDataset, NumpyFeatureBatch, TrainingSelection
 from .pattern_suites import SUITE_NAMES, pattern_suite
-from .patterns import REVERSAL_ORBIT_COUNT, REVERSAL_ORBITS, line_pattern_counts, phase_basis
+from .patterns import (
+    LINE_COUNT,
+    REVERSAL_ORBIT_COUNT,
+    REVERSAL_ORBITS,
+    line_pattern_counts,
+    phase_basis,
+)
 from .quantization import (
     fold_pattern_model,
     predict_folded,
@@ -54,6 +61,11 @@ COMPLETE_HEADER = SCHEMA
 GAIN_KNOTS = (0, 12, 24, 36, 49)
 FROZEN_PATTERN_GAIN_MODEL_ID = "frozen_c_line_0_28_49_gain_phase_5_huber8"
 FROZEN_PATTERN_GAIN_FRACTIONAL_BITS = 5
+# How the line term is computed: from dense per-record line counts, or by summing the weights
+# of each record's 36 patterns. Both optimise the same model; only rounding differs.
+TRAINING_METHODS = ("dense", "lookup")
+# Occurrences per block of the lookup gradient's fixed-order reduction.
+LOOKUP_BLOCK = 256
 
 
 class PatternExperimentError(ValueError):
@@ -246,6 +258,72 @@ class _LineMoments:
 
 
 @dataclass(frozen=True)
+class _PatternLookup:
+    """Each record's 36 pattern IDs, and for training data, a plan for summing gradients.
+
+    The plan lists the records of every occurrence grouped by pattern and padded to whole
+    blocks; padding points one past the last record, at a zero gradient row.
+    """
+
+    records: int
+    flat: Any
+    plan: Any | None = None
+    block_patterns: Any | None = None
+
+    def sums(self, values: Any) -> Any:
+        """Return, for each record and column of values, the sum over its 36 patterns."""
+        return _lookup_sum_function().apply(values, self)
+
+
+@functools.cache
+def _lookup_sum_function() -> Any:
+    import torch
+
+    class LookupSum(torch.autograd.Function):
+        # Deterministic scatter backwards sort every occurrence at every step. The plan groups
+        # occurrences once, so a step sums fixed blocks and index_adds only the block sums.
+        @staticmethod
+        def forward(context: Any, values: Any, lookup: _PatternLookup) -> Any:
+            context.lookup = lookup
+            return values.index_select(0, lookup.flat).view(
+                lookup.records, LINE_COUNT, values.shape[1]).sum(dim=1)
+
+        @staticmethod
+        def backward(context: Any, gradient: Any) -> tuple[Any, None]:
+            lookup = context.lookup
+            if lookup.plan is None:
+                raise PatternExperimentError("pattern lookup has no gradient plan")
+            columns = gradient.shape[1]
+            padded = torch.cat((gradient, gradient.new_zeros((1, columns))))
+            blocks = padded.index_select(0, lookup.plan).view(-1, LOOKUP_BLOCK, columns).sum(dim=1)
+            result = gradient.new_zeros((REVERSAL_ORBIT_COUNT, columns))
+            return result.index_add_(0, lookup.block_patterns, blocks), None
+
+    return LookupSum
+
+
+def _pattern_lookup(orbits: np.ndarray, device: Any, *, plan: bool) -> _PatternLookup:
+    import torch
+
+    records = int(orbits.shape[0])
+    flat = orbits.reshape(-1)
+    lookup = _PatternLookup(records, torch.as_tensor(flat.astype(np.int32), device=device))
+    if not plan:
+        return lookup
+    order = np.argsort(flat, kind="stable")
+    counts = np.bincount(flat, minlength=REVERSAL_ORBIT_COUNT)
+    blocks = -(-counts // LOOKUP_BLOCK)
+    starts = (np.cumsum(blocks) - blocks) * LOOKUP_BLOCK
+    rank = np.arange(flat.size) - np.repeat(np.cumsum(counts) - counts, counts)
+    padded = np.full(int(blocks.sum()) * LOOKUP_BLOCK, records, dtype=np.int32)
+    padded[np.repeat(starts, counts) + rank] = (order // LINE_COUNT).astype(np.int32)
+    return _PatternLookup(
+        records, lookup.flat, plan=torch.as_tensor(padded, device=device),
+        block_patterns=torch.as_tensor(
+            np.repeat(np.arange(REVERSAL_ORBIT_COUNT), blocks), device=device))
+
+
+@dataclass(frozen=True)
 class _FitData:
     """One split on the training device: dense line counts, or pattern IDs expanded per piece."""
 
@@ -259,6 +337,7 @@ class _FitData:
     line_center: Any | None = None
     line_scale: Any | None = None
     piece_records: int | None = None
+    lookup: _PatternLookup | None = None
     # Normalized to sum to one; None means the plain mean, as for a single dataset.
     weights: Any | None = None
     host_weights: np.ndarray | None = None
@@ -397,10 +476,17 @@ def _train_model(
         )
         parameters = [line_weights, phase_weights, gain_weights]
 
+    def line_term(data: _FitData, line_phase: Any, piece: slice) -> Any:
+        if data.lookup is None:
+            return ((data.dense_lines(piece) @ line_weights.T) * line_phase[piece]).sum(dim=1)
+        # Standardized counts times weights: each pattern's weight over its scale, summed over
+        # the record's patterns, less a constant per phase component for the centering.
+        values = (line_weights / data.line_scale).T.contiguous()
+        return ((data.lookup.sums(values) - data.line_center @ values) * line_phase).sum(dim=1)
+
     def predict(data: _FitData, line_phase: Any, gain_phase: Any | None,
                 piece: slice = slice(None)) -> Any:
-        result = phase_weights[data.ply_index[piece]] + (
-            (data.dense_lines(piece) @ line_weights.T) * line_phase[piece]).sum(dim=1)
+        result = phase_weights[data.ply_index[piece]] + line_term(data, line_phase, piece)
         if gain_weights is not None:
             result = result + ((data.gains[piece] @ gain_weights.T) * gain_phase[piece]).sum(dim=1)
         return result
@@ -651,6 +737,61 @@ def _prepare_in_memory(train: NumpyFeatureBatch, validation: NumpyFeatureBatch,
     )
 
 
+def _orbit_ids(patterns: np.ndarray) -> np.ndarray:
+    return REVERSAL_ORBITS.raw_to_orbit[patterns].astype(np.int16)
+
+
+def _prepare_lookup(train: NumpyFeatureBatch, validation: NumpyFeatureBatch,
+                    weights: np.ndarray | None, device: Any) -> _Prepared:
+    """Keep 36 pattern IDs per record and look up their weights; never expand line counts."""
+    import torch
+
+    train_orbits = _orbit_ids(train.line_patterns)
+    moments = _LineMoments()
+    step = 65536
+    for start in range(0, train.records, step):
+        piece = slice(start, start + step)
+        moments.add(train_orbits[piece], np.ones(train_orbits[piece].shape[0])
+                    if weights is None else weights[piece])
+    line_center, line_scale = moments.standardization()
+    raw_train_gain = gain_summaries(train.own_gains, train.opponent_gains)
+    raw_validation_gain = gain_summaries(validation.own_gains, validation.opponent_gains)
+    gain_standardization = fit_standardization(raw_train_gain, weights)
+    train_gain_values = gain_standardization.transform(raw_train_gain)
+    validation_gain_values = gain_standardization.transform(raw_validation_gain)
+    gain_control, gain_initial = _fit_gain_control(
+        train, validation, train_gain_values, validation_gain_values, device,
+        DEFAULT_RIDGE_LAMBDAS, weights=weights,
+    )
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    center = torch.as_tensor(line_center, device=device)
+    scale = torch.as_tensor(line_scale, device=device)
+
+    def data(batch: NumpyFeatureBatch, orbits: np.ndarray, gains: np.ndarray,
+             weights: np.ndarray | None, *, plan: bool) -> _FitData:
+        return _FitData(
+            plys=batch.plys, residuals=batch.residuals,
+            ply_index=torch.as_tensor(batch.plys.astype(np.int64), device=device),
+            target=torch.as_tensor(batch.residuals, dtype=torch.float32, device=device),
+            gains=torch.as_tensor(gains.astype(np.float32), device=device),
+            line_center=center, line_scale=scale,
+            lookup=_pattern_lookup(orbits, device, plan=plan),
+            weights=(None if weights is None else
+                     torch.as_tensor(weights, dtype=torch.float32, device=device)),
+            host_weights=weights,
+        )
+
+    return _Prepared(
+        feature_metadata=_feature_metadata(line_center, line_scale, gain_standardization),
+        gain_control=gain_control, gain_initial=gain_initial,
+        train=data(train, train_orbits, train_gain_values, weights, plan=True),
+        validation=data(validation, _orbit_ids(validation.line_patterns),
+                        validation_gain_values, None, plan=False),
+        train_columns=train,
+    )
+
+
 def _prepare_pieces(selection: TrainingSelection, validation: NumpyFeatureBatch,
                     piece_records: int, device: Any) -> _Prepared:
     """Keep 36 pattern IDs per record and expand dense line counts one piece at a time."""
@@ -719,6 +860,7 @@ def run_pattern_experiment(
     extra_datasets: Sequence[tuple[Path | str, float]] = (),
     max_records: int | None = None,
     piece_records: int | None = None,
+    method: str = "dense",
 ) -> dict[str, Any]:
     """Train configured model candidates using train/validation only.
 
@@ -738,6 +880,11 @@ def run_pattern_experiment(
     _require(bool(selected_configs), "pattern experiment requires at least one model")
     _require(max_records is None or max_records > 0, "max_records must be positive")
     _require(piece_records is None or piece_records > 0, "piece_records must be positive")
+    _require(method in TRAINING_METHODS,
+             f"training method must be one of {', '.join(TRAINING_METHODS)}")
+    # Pieces bound the dense line counts, which lookup never builds.
+    _require(method == "dense" or piece_records is None,
+             "piece_records applies only to the dense training method")
 
     output = Path(output_directory).resolve()
     with ExitStack() as stack:
@@ -760,7 +907,8 @@ def run_pattern_experiment(
                 weights = None if selection.uniform else _normalized(raw_weights)
             _require(train.records > 0 and validation.records > 0,
                      "train and validation splits must be nonempty")
-            prepared = _prepare_in_memory(train, validation, weights, device)
+            prepare = _prepare_lookup if method == "lookup" else _prepare_in_memory
+            prepared = prepare(train, validation, weights, device)
 
         models: list[dict[str, Any]] = []
         for config in selected_configs:
@@ -844,6 +992,8 @@ def run_pattern_experiment(
                 "best_vs_gain_control": model_comparison(prepared.gain_control, best),
             },
         }
+        if method != "dense":
+            report["training"]["method"] = method
         if selection is not None:
             report["training_data"] = {
                 "datasets": selection.describe(), "records": selection.records,
@@ -877,6 +1027,8 @@ def main() -> int:
                         help="cap the training records, keeping whole datasets newest first")
     parser.add_argument("--piece-records", type=int,
                         help="expand dense line counts this many records at a time")
+    parser.add_argument("--method", choices=TRAINING_METHODS, default="dense",
+                        help="compute the line term from dense counts or by pattern lookup")
     arguments = parser.parse_args()
     configs = pattern_suite(arguments.suite)
     try:
@@ -890,6 +1042,7 @@ def main() -> int:
                             for path, weight in arguments.extra_dataset],
             max_records=arguments.max_records,
             piece_records=arguments.piece_records,
+            method=arguments.method,
         )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"pattern experiment failed: {error}", file=sys.stderr)

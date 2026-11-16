@@ -438,6 +438,8 @@ def training_command(python: str, dataset: DatasetConfig, iteration: IterationCo
         command.extend(("--max-records", str(training.max_records)))
     if training.piece_records is not None:
         command.extend(("--piece-records", str(training.piece_records)))
+    if training.method != "dense":
+        command.extend(("--method", training.method))
     return command
 
 
@@ -735,7 +737,8 @@ def authenticate_training(dataset: DatasetConfig, iteration: IterationConfig,
         expected_configs = json.loads(json.dumps(
             [asdict(item) for item in pattern_suite(training.suite)]))
         _require(report.get("training", {}).get("seed") == training.seed and
-                 report.get("training", {}).get("configs") == expected_configs,
+                 report.get("training", {}).get("configs") == expected_configs and
+                 report["training"].get("method", "dense") == training.method,
                  "pattern report settings differ from configuration")
         selected_name = report.get("selection", {}).get("best_model")
         matches = [item for item in report.get("models", []) if item.get("name") == selected_name]

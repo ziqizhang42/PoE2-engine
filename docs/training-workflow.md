@@ -265,7 +265,7 @@ piece_records = 250000
 - `age_weight` (default 1) multiplies the weight per generation of age: the parent's data counts `age_weight`, the grandparent's `age_weight²`, and so on.
 - `refresh = K` (less than `window`) replaces the datasets of the K newest ancestors in the window with copies of their positions relabeled by this generation's parent, the teacher of its own new data. A copy is a dataset named `GENERATION-refresh-ANCESTOR` with the same positions and splits and this generation's label settings, at the weight of the dataset it replaces.
 - `extra` names more datasets, each with a weight (default 1): any trained generation, such as a sibling that lost its gate, or an imported dataset. A compact recipe may declare imported datasets under `[datasets]`; generations make every managed one.
-- `max_records` and `piece_records` are described below.
+- `max_records`, `piece_records`, and `method` are described below.
 
 These expand into the long form's `extra_datasets`, newest first: the window by age, then `extra` in order. In the long form:
 
@@ -302,6 +302,24 @@ The training report's `training_data` lists every dataset that contributed: its 
 Each record's loss is weighted by its dataset's weight, the primary's being 1, and the weights are normalized to sum to one, so the data term stays a weighted average. The L2 term is then exactly as strong relative to the data as with one dataset: adding older data at a low weight neither weakens nor strengthens regularization, and scaling every weight changes nothing. Feature standardization, the gain-control ridge fit that initializes the model, and the per-ply means of gain-free models use the same weighted moments. Standardization therefore matches the distribution the loss sees, and the L2 penalty on standardized weights treats each feature consistently with it. Export folds standardization away, so the deployed tables do not depend on it. When every used record has the same weight, as with `age_weight = 1`, training uses the plain mean and unweighted moments.
 
 Without `piece_records`, training expands every record's 36 line patterns into 1,716 dense float32 counts, about 6.9 KB per record, in host memory and on the device. With `piece_records = N`, it keeps compact data on the device for each record (the pattern IDs, 19 standardized gain summaries, ply, target, and weight) and expands dense counts N records at a time. Standardization comes from streaming sums, the gain-control fit from accumulated normal equations, and each full-batch Adam step accumulates its gradient over the pieces, so it is the same optimisation, not mini-batch training. Floating-point terms are added in a different order, and Adam can magnify that where a gradient is nearly zero. On test data, standardization was identical and gain-control weights agreed to 1e-15, but after about 1,300 steps line weights differed by up to 0.01, early stopping picked a step up to 50 later, and validation MAE differed by at most about 0.02%. That is about as much as the same in-memory run differs between CPU and GPU. The exported fixed-point tables can differ in individual entries, so keep one mode for a run. On the 303,599-record v0.2 corpus (189,246 train records), pieces of 50,000 cut peak host memory from 5.4 to 2.1 GiB and peak GPU allocation from 1.8 to 1.1 GiB, and took 3.2 times as long. The dense counts that pieces avoid grow by about 6.9 KB per record, so the saving matters once a window holds millions of records.
+
+With `method = "lookup"` (the default is `"dense"`), training never builds the dense counts. A record's standardized line term is the sum, over its 36 patterns, of each pattern's weight divided by its count scale, minus one constant per phase component for the centering. So training keeps only the 36 pattern IDs per record, plus a fixed plan that groups every pattern occurrence by pattern, and looks the weights up. The parameters, standardization, gain-control fit, loss, L2 term, Adam settings, evaluation schedule, model selection, and record weights are the same as for the dense method. The gradient is summed over the plan in a fixed order instead of scattered with atomics, so runs repeat bit for bit with deterministic algorithms on; two GPU runs on the v0.2 corpus wrote byte-identical reports. `method` is fingerprinted only when it is `"lookup"`, works with every suite and the other training data options, and cannot be combined with `piece_records`, which only bounds the dense counts. Measured on this machine (RX 6800 XT, 16 GB, 30 GB host) with the frozen pattern/gain model and seed 20260818:
+
+| Train records | Method | Time per step | Peak host | Peak GPU |
+| --- | --- | --- | --- | --- |
+| 189,246 (v0.2) | dense | 13.1 ms | 5.4 GiB | 1.8 GiB |
+| 189,246 | pieces of 50,000 | 39.2 ms | 2.1 GiB | 1.1 GiB |
+| 189,246 | lookup | 6.2 ms | 2.4 GiB | 0.3 GiB |
+| 189,246 | lookup on the CPU | 33.4 ms | 1.9 GiB | none |
+| 946,230 | dense | 78 ms | 20.3 GiB | 6.8 GiB |
+| 946,230 | pieces of 50,000 | 208 ms | 2.4 GiB | 1.2 GiB |
+| 946,230 | lookup | 45 ms | 4.3 GiB | 1.1 GiB |
+| 2,081,706 | dense | does not fit: over 20 GiB host | | |
+| 2,081,706 | pieces of 50,000 | 455 ms | 3.0 GiB | 1.4 GiB |
+| 2,081,706 | lookup | 96 ms | 7.7 GiB | 2.4 GiB |
+| 4,163,412 | lookup | 189 ms | 13.9 GiB | 4.6 GiB |
+
+The larger sets repeat the v0.2 train split, and each step includes the evaluation every 25 steps. Dense needs about 21 KB of host memory per record while it standardizes and so stops fitting this machine between 1 and 1.5 million records. Lookup needs about 3.3 KB of host memory and 1.2 KB of GPU memory per record. On v0.2 the ten-model default suite trained in 86 s with lookup and 281 s dense. Lookup and dense results differ only by rounding, but Adam magnifies rounding late in training, so the selected step can move a long way: on v0.2 dense selected step 1,050 and lookup step 1,925. Validation MAE was 4.4280 and 4.4271, and sealed-test MAE 4.9285 and 4.9268. At the same step, weights agreed within 3e-5 after 100 steps and within 0.005 after 400 to 2,000 steps. Dense on the GPU and dense on the CPU differ as much from each other (steps 1,050 and 1,375). Fixed-point tables differ in most entries between any two of these runs, so keep one method within a run.
 
 An iteration that needs a dataset which can never be produced, because that dataset's teacher did not win its gate, is not started and shows the reason, as under [chains](#chains).
 

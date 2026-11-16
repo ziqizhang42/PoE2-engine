@@ -101,6 +101,34 @@ class TrainingDataRecipeTest(ChainFixture):
         settings = recorded_training_settings(self._windowed().iteration("g001").training)
         self.assertEqual(sorted(settings), ["device", "seed", "suite", "type"])
 
+    def test_the_lookup_method_is_fingerprinted_and_passed_only_when_used(self) -> None:
+        plain = self._chain(CHAIN, name="plain.toml")
+        lookup = self._chain(CHAIN.replace('seed = 99', 'seed = 99\nmethod = "lookup"'),
+                             name="lookup.toml")
+        before, after = stage_fingerprints(plain), stage_fingerprints(lookup)
+        self.assertEqual(sorted(stage for stage in before if before[stage] != after[stage]), [
+            "iteration:g003:candidate-validation", "iteration:g003:engine-gate",
+            "iteration:g003:training"])
+        self.assertEqual(recorded_training_settings(lookup.iteration("g003").training)["method"],
+                         "lookup")
+        self.assertNotIn("method", recorded_training_settings(lookup.iteration("g002").training))
+        self.assertNotIn("--method", training_command(
+            "python", lookup.dataset("g002"), lookup.iteration("g002")))
+        command = training_command("python", lookup.dataset("g003"), lookup.iteration("g003"))
+        self.assertEqual(command[command.index("--method") + 1], "lookup")
+        everywhere = self._chain(CHAIN, defaults=DEFAULTS.replace(
+            'suite = "frozen-pattern-gain"', 'suite = "frozen-pattern-gain"\nmethod = "lookup"'),
+            name="everywhere.toml")
+        self.assertEqual({item.training.method for item in everywhere.iterations}, {"lookup"})
+        for body, message in (
+                (CHAIN.replace('seed = 99', 'seed = 99\nmethod = "sparse"'),
+                 "method must be dense or lookup"),
+                (CHAIN.replace('seed = 99', 'seed = 99\nmethod = "lookup"\npiece_records = 10'),
+                 "which lookup never builds")):
+            with self.subTest(message=message), self.assertRaisesRegex(WorkflowConfigError,
+                                                                       message):
+                self._chain(body, name="bad-method.toml")
+
     def test_training_data_settings_are_checked(self) -> None:
         cases = [
             (CHAIN.replace('seed = 99', 'seed = 99\nrefresh = 3'), "refresh is outside"),

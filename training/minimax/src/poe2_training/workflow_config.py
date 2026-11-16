@@ -150,6 +150,8 @@ class PatternTrainingConfig:
     extra_datasets: tuple[TrainingDataset, ...] = ()
     max_records: int | None = None
     piece_records: int | None = None
+    # "lookup" sums the weights of each record's patterns instead of expanding dense counts.
+    method: str = "dense"
 
     @property
     def uses_training_data_options(self) -> bool:
@@ -161,7 +163,7 @@ TRAINING_DATA_OPTIONS = ("extra_datasets", "max_records", "piece_records")
 
 
 def recorded_training_settings(training: TrainingConfig) -> dict[str, Any]:
-    """Return training settings as fingerprinted; unused data options are left out.
+    """Return training settings as fingerprinted, leaving out unused options and the default method.
 
     Stages recorded before these options existed therefore keep their fingerprints.
     """
@@ -169,6 +171,8 @@ def recorded_training_settings(training: TrainingConfig) -> dict[str, Any]:
     for name in TRAINING_DATA_OPTIONS:
         if name in settings and not settings[name]:
             del settings[name]
+    if settings.get("method") == "dense":
+        del settings["method"]
     return settings
 
 
@@ -587,12 +591,17 @@ def _parse_training(value: Any, field: str) -> TrainingConfig:
             ridge_lambdas=tuple(float(item) for item in raw_lambdas),
         )
     if kind == "pattern":
-        _unknown(table, {"type", "device", "seed", "suite", *TRAINING_DATA_OPTIONS}, field)
+        _unknown(table, {"type", "device", "seed", "suite", "method", *TRAINING_DATA_OPTIONS},
+                 field)
         device = _string(table, "device", field, "cuda")
         suite = _string(table, "suite", field, "default")
+        method = _string(table, "method", field, "dense")
         _require(device in {"cpu", "cuda"}, f"{field}.device must be cpu or cuda")
         _require(suite in SUITE_NAMES,
                  f"{field}.suite must be one of {', '.join(SUITE_NAMES)}")
+        _require(method in {"dense", "lookup"}, f"{field}.method must be dense or lookup")
+        _require(method == "dense" or "piece_records" not in table,
+                 f"{field}.piece_records expands dense line counts, which lookup never builds")
         return PatternTrainingConfig(
             type="pattern", device=device,
             seed=_integer(table, "seed", field, 20260818), suite=suite,
@@ -602,6 +611,7 @@ def _parse_training(value: Any, field: str) -> TrainingConfig:
                          if "max_records" in table else None),
             piece_records=(_integer(table, "piece_records", field, minimum=1)
                            if "piece_records" in table else None),
+            method=method,
         )
     raise WorkflowConfigError(f"{field}.type must be baseline or pattern")
 
