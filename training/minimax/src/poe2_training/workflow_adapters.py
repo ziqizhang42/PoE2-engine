@@ -61,6 +61,15 @@ class StageAdapter:
     authenticator: Callable[..., dict[str, Any]]
 
 
+def names_path(config: WorkflowConfig, recorded: Any, path: Path) -> bool:
+    """Return whether a record names path: relative to the repository, or absolutely as before.
+
+    Records written before paths were relative name them absolutely, which matches only while
+    the repository stays where it was.
+    """
+    return isinstance(recorded, str) and recorded in {config.recorded_path(path), str(path)}
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise AdapterError(message)
@@ -91,6 +100,26 @@ def data_build_directory(config: WorkflowConfig,
                 f"iteration-{teacher.iteration}")
         root = root / f"teacher-{name}"
     return root / config.build_preset
+
+
+def configured_elsewhere(build: Path, repository: Path) -> str | None:
+    """Return where a CMake build tree was configured, if not at build from repository.
+
+    CMake refuses to reconfigure a tree whose cache names another build or source folder.
+    """
+    try:
+        lines = (build / "CMakeCache.txt").read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise AdapterError(f"could not read the CMake cache of {build}: {error}") from error
+    cache = dict(line.split("=", 1) for line in lines if "=" in line and ":" in line)
+    for key, expected in (("CMAKE_CACHEFILE_DIR:INTERNAL", build),
+                          ("CMAKE_HOME_DIRECTORY:INTERNAL", repository)):
+        recorded = cache.get(key)
+        if recorded is not None and Path(recorded).resolve() != expected.resolve():
+            return recorded
+    return None
 
 
 def data_binary(config: WorkflowConfig, dataset: ManagedDatasetConfig | None = None) -> Path:
@@ -207,7 +236,7 @@ def gate_base_input(config: WorkflowConfig, iteration: IterationConfig) -> str:
     gate = iteration.engine_gate
     _require(gate is not None, "iteration has no engine gate")
     if gate.base is None:
-        return str(gate_base_build_directory(config, iteration))
+        return config.recorded_path(gate_base_build_directory(config, iteration))
     return gate.base
 
 
@@ -463,13 +492,17 @@ def search_benchmark_command(python: str, config: WorkflowConfig,
 
 def match_command(config: WorkflowConfig, settings: MatchConfig, *, runner: Path,
                   new_build: Path, base: str, kind: str, root: Path) -> list[str]:
-    """Return the evaluator command for one match, recorded under root/runs without a ledger."""
+    """Return the evaluator command for one match, recorded under root/runs without a ledger.
+
+    The evaluator runs in the repository and records paths as given, so they are given
+    relative to it and its manifest and ledger row stay valid if the repository moves.
+    """
     command = [
-        str(runner), "eval", "--new-build", str(new_build), "--base", base,
+        str(runner), "eval", "--new-build", config.recorded_path(new_build), "--base", base,
         "--new-engine", settings.new_engine, "--base-engine", settings.base_engine,
         "--preset", config.build_preset, "--kind", kind,
-        "--run-root", str(root / "runs"), "--no-ledger",
-        "--opening-book", str(settings.opening_book), "--shuffle-openings",
+        "--run-root", config.recorded_path(root / "runs"), "--no-ledger",
+        "--opening-book", config.recorded_path(settings.opening_book), "--shuffle-openings",
         "--games", str(settings.games), "--workers", str(settings.workers),
         "--timeout-ms", str(settings.timeout_ms),
         "--go-movetime-ms", str(settings.go_movetime_ms),
@@ -503,7 +536,7 @@ def comparison_command(config: WorkflowConfig, comparison: ComparisonConfig,
     new_build = private_build_directory(config, comparison.root, new_id)
     return match_command(
         config, comparison, runner=new_build / "runner" / "poe2_runner", new_build=new_build,
-        base=str(private_build_directory(config, comparison.root, base_id)),
+        base=config.recorded_path(private_build_directory(config, comparison.root, base_id)),
         kind=COMPARISON_KIND, root=comparison.root)
 
 
@@ -799,11 +832,14 @@ def authenticate_candidate(config: WorkflowConfig,
         "promotable": candidate.promotable, "samples": candidate.samples,
         "symmetry_samples": candidate.symmetry_samples,
         "benchmark_iterations": candidate.benchmark_iterations,
-        "opening_book": str(candidate.opening_book),
         "search_positions": candidate.search_positions,
         "search_movetime_ms": candidate.search_movetime_ms,
     }
-    _require(report.get("settings") == expected_settings,
+    settings = report.get("settings")
+    _require(isinstance(settings, dict) and
+             {key: value for key, value in settings.items() if key != "opening_book"} ==
+             expected_settings and
+             names_path(config, settings.get("opening_book"), candidate.opening_book),
              "candidate validation settings differ from configuration")
     _require(candidate.opening_book.is_file(),
              f"candidate opening book is missing: {candidate.opening_book}")
@@ -945,7 +981,11 @@ def _authenticate_match_run(config: WorkflowConfig, root: Path, report: dict[str
                             kind: str, new_id: str, base_id: str | None,
                             new_engine_path: Path, base_engine_path: Path) -> dict[str, Any]:
     """Authenticate a match report's settings and its single evaluator run against both sides."""
-    _require(report.get("settings") == {**recorded, "opening_book": str(settings.opening_book)},
+    recorded_settings = report.get("settings")
+    _require(isinstance(recorded_settings, dict) and
+             {key: value for key, value in recorded_settings.items() if key != "opening_book"} ==
+             {key: value for key, value in recorded.items() if key != "opening_book"} and
+             names_path(config, recorded_settings.get("opening_book"), settings.opening_book),
              f"{label} settings differ from configuration")
     _require(settings.opening_book.is_file(),
              f"{label} opening book is missing: {settings.opening_book}")
@@ -990,13 +1030,13 @@ def _authenticate_match_run(config: WorkflowConfig, root: Path, report: dict[str
     _require(
         manifest.get("kind") == kind and
         manifest.get("new_id") == new_id and
-        manifest.get("new_engine_path") == str(new_engine_path) and
+        names_path(config, manifest.get("new_engine_path"), new_engine_path) and
         manifest.get("new_engine") == settings.new_engine and
         manifest.get("new_engine_args") == settings.new_engine_args and
         manifest.get("base_engine") == settings.base_engine and
         manifest.get("base_engine_args") == settings.base_engine_args and
         normalized_manifest_base.resolve() == base_engine_path and
-        manifest.get("opening_book") == str(settings.opening_book) and
+        names_path(config, manifest.get("opening_book"), settings.opening_book) and
         manifest.get("games") == settings.games and
         manifest.get("workers_requested") == settings.workers and
         manifest.get("timeout_ms") == settings.timeout_ms and
@@ -1057,7 +1097,7 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
                  "engine-gate base model build escapes the gate directory")
     base_metadata = report.get("base_engine_artifact")
     _require(isinstance(base_metadata, dict) and
-             base_metadata.get("path") == str(base_engine_path) and
+             names_path(config, base_metadata.get("path"), base_engine_path) and
              isinstance(base_metadata.get("sha256"), str) and
              sha256_file(base_engine_path) == base_metadata["sha256"],
              "engine-gate base engine artifact is missing or changed")

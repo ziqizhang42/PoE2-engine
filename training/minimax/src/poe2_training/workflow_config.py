@@ -9,7 +9,7 @@ import re
 import tomllib
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from .model_metrics import DEFAULT_RIDGE_LAMBDAS
 from .pattern_suites import SUITE_NAMES
@@ -300,6 +300,13 @@ class WorkflowConfig:
     iterations: tuple[IterationConfig, ...]
     models: tuple[ModelReference, ...] = ()
     comparisons: tuple[ComparisonConfig, ...] = ()
+
+    def recorded_path(self, path: Path) -> str:
+        """Return how fingerprints and records name a path: relative to the repository if inside."""
+        try:
+            return path.relative_to(self.repository).as_posix()
+        except ValueError:
+            return str(path)
 
     def dataset(self, name: str) -> DatasetConfig:
         for dataset in self.datasets:
@@ -1144,6 +1151,22 @@ def fingerprint(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+PathRenderer = Callable[[Path], str]
+
+
+def rendered_paths(value: Any, render: PathRenderer) -> Any:
+    """Return value with every Path named by render, so a fingerprint does not embed the location."""
+    if isinstance(value, Path):
+        return render(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return rendered_paths(asdict(value), render)
+    if isinstance(value, dict):
+        return {key: rendered_paths(item, render) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [rendered_paths(item, render) for item in value]
+    return value
+
+
 def _trained_model_definition(result: dict[str, dict[str, Any]], iteration: str) -> dict[str, str]:
     """Identify a model this recipe trains by its iteration's gate, which the recipe fixes alone.
 
@@ -1154,10 +1177,10 @@ def _trained_model_definition(result: dict[str, dict[str, Any]], iteration: str)
 
 
 def _dataset_definitions(config: WorkflowConfig, dataset: DatasetConfig,
-                         result: dict[str, dict[str, Any]]) -> None:
+                         result: dict[str, dict[str, Any]], render: PathRenderer) -> None:
     if isinstance(dataset, ImportedDatasetConfig):
         result[f"dataset:{dataset.name}:features"] = {
-            "adapter": "imported-features", "path": dataset.feature_directory,
+            "adapter": "imported-features", "path": render(dataset.feature_directory),
         }
         return
     source_id = f"dataset:{dataset.positions or dataset.name}:source"
@@ -1185,7 +1208,7 @@ def _dataset_definitions(config: WorkflowConfig, dataset: DatasetConfig,
 
 
 def _iteration_definitions(config: WorkflowConfig, iteration: IterationConfig,
-                           result: dict[str, dict[str, Any]]) -> None:
+                           result: dict[str, dict[str, Any]], render: PathRenderer) -> None:
     training_id = f"iteration:{iteration.name}:training"
     dataset_id = f"dataset:{iteration.dataset}:features"
     result[training_id] = {
@@ -1217,7 +1240,7 @@ def _iteration_definitions(config: WorkflowConfig, iteration: IterationConfig,
             "sealed_evaluation": (
                 fingerprint(result[f"iteration:{iteration.name}:sealed-evaluation"])
                 if iteration.sealed_evaluation is not None else None),
-            "settings": iteration.candidate_validation,
+            "settings": rendered_paths(iteration.candidate_validation, render),
         }
     gate = iteration.engine_gate
     if gate is not None:
@@ -1226,7 +1249,7 @@ def _iteration_definitions(config: WorkflowConfig, iteration: IterationConfig,
             "adapter": "engine-gate", "preset": config.build_preset,
             "candidate": fingerprint(result[
                 f"iteration:{iteration.name}:candidate-validation"]),
-            "settings": recorded_gate_settings(gate),
+            "settings": rendered_paths(recorded_gate_settings(gate), render),
         }
         if gate.base_iteration is not None:
             result[stage_id]["base"] = _trained_model_definition(result, gate.base_iteration)
@@ -1246,8 +1269,14 @@ def _model_identity(config: WorkflowConfig, result: dict[str, dict[str, Any]],
         result[f"iteration:{model.iteration}:candidate-validation"])}
 
 
-def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
-    """Return normalized settings and upstream config fingerprints for every stage."""
+def stage_definitions(config: WorkflowConfig, *,
+                      absolute_paths: bool = False) -> dict[str, dict[str, Any]]:
+    """Return normalized settings and upstream config fingerprints for every stage.
+
+    Paths are named relative to the repository, so a run survives moving it. absolute_paths
+    reproduces the earlier absolute form, which stages recorded before then were locked to.
+    """
+    render: PathRenderer = str if absolute_paths else config.recorded_path
     result: dict[str, dict[str, Any]] = {}
 
     def deferred(dataset: DatasetConfig) -> bool:
@@ -1262,7 +1291,7 @@ def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
     def define(dataset: DatasetConfig) -> None:
         if dataset.name not in defined:
             defined.add(dataset.name)
-            _dataset_definitions(config, dataset, result)
+            _dataset_definitions(config, dataset, result, render)
 
     for dataset in config.datasets:
         if not deferred(dataset):
@@ -1270,13 +1299,13 @@ def stage_definitions(config: WorkflowConfig) -> dict[str, dict[str, Any]]:
     for iteration in config.iterations:
         for name in datasets_used(config, iteration):
             define(config.dataset(name))
-        _iteration_definitions(config, iteration, result)
+        _iteration_definitions(config, iteration, result, render)
     for comparison in config.comparisons:
         result[comparison_stage(comparison)] = {
             "adapter": "comparison", "preset": config.build_preset,
             "new": _model_identity(config, result, comparison.new),
             "base": _model_identity(config, result, comparison.base),
-            "settings": match_settings(comparison),
+            "settings": rendered_paths(match_settings(comparison), render),
         }
     return result
 
@@ -1285,6 +1314,7 @@ def comparison_stage(comparison: ComparisonConfig) -> str:
     return f"comparison:{comparison.name}:match"
 
 
-def stage_fingerprints(config: WorkflowConfig) -> dict[str, str]:
-    return {stage: fingerprint(definition)
-            for stage, definition in stage_definitions(config).items()}
+def stage_fingerprints(config: WorkflowConfig, *,
+                       absolute_paths: bool = False) -> dict[str, str]:
+    return {stage: fingerprint(definition) for stage, definition in
+            stage_definitions(config, absolute_paths=absolute_paths).items()}

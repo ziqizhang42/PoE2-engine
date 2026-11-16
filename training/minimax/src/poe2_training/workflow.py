@@ -51,9 +51,11 @@ from .workflow_adapters import (
     authenticate_training,
     candidate_build_id,
     candidate_training_datasets,
+    names_path,
     catch2_cache_directory,
     catch2_candidates,
     catch2_pin,
+    configured_elsewhere,
     comparison_command,
     comparison_side,
     data_binary,
@@ -97,6 +99,7 @@ from .workflow_config import (
     fingerprint,
     match_settings,
     recorded_gate_settings,
+    rendered_paths,
     stage_fingerprints,
     trained_models_used,
     with_trained_model,
@@ -894,8 +897,12 @@ def check_model_lineage(config: WorkflowConfig, model: ModelReference | None = N
                 f"{entry.name} produced {produced}")
 
 
-def _pending_source_chunks(dataset: ManagedDatasetConfig) -> list[tuple[int, int]]:
-    """Return chunk ranges still to generate; reject unfinished or unexpected chunk paths."""
+def _pending_source_chunks(dataset: ManagedDatasetConfig,
+                           leftovers: frozenset[Path] = frozenset()) -> list[tuple[int, int]]:
+    """Return chunk ranges still to generate; reject unfinished or unexpected chunk paths.
+
+    Crash leftovers count as not yet generated, since the next run removes them first.
+    """
     expected = {source_chunk_path(dataset, *item): item for item in source_chunk_ranges(dataset)}
     directory = source_chunks_directory(dataset)
     if directory.exists():
@@ -906,7 +913,7 @@ def _pending_source_chunks(dataset: ManagedDatasetConfig) -> list[tuple[int, int
                 f"{unexpected[0]}")
     pending: list[tuple[int, int]] = []
     for path, item in expected.items():
-        state = _path_state(path)
+        state = "missing" if path in leftovers else _path_state(path)
         if state in {"incomplete", "unexpected"}:
             raise _blocked_path(path, "source chunk")
         if state == "missing":
@@ -916,6 +923,14 @@ def _pending_source_chunks(dataset: ManagedDatasetConfig) -> list[tuple[int, int
 
 def _waiting_models(config: WorkflowConfig, iteration: IterationConfig) -> list[ModelReference]:
     return [model for model in trained_models_used(config, iteration) if model.model_id is None]
+
+
+def crash_leftovers(config: WorkflowConfig, state: RunState | None = None) -> list[Path]:
+    """Return unfinished artifacts a stopped invocation recorded; the next run removes them."""
+    state = RunState(config) if state is None else state
+    paths = [_recorded_artifact(config, artifact) for artifact in state.unfinished_artifacts()]
+    return [path for path in paths if path is not None and _path_state(path) != "complete" and
+            (path.exists() or path.is_symlink())]
 
 
 def _require_not_started(path: Path, label: str, models: Sequence[ModelReference]) -> None:
@@ -928,9 +943,17 @@ def _require_not_started(path: Path, label: str, models: Sequence[ModelReference
 
 
 def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
-    """Read-only validation of config evolution and every artifact currently present."""
+    """Read-only validation of config evolution and every artifact currently present.
+
+    Crash leftovers count as missing: the next mutating command removes them before it starts.
+    """
     state = RunState(config)
     state.validate_evolution()
+    leftovers = frozenset(crash_leftovers(config, state))
+
+    def state_of(path: Path) -> str:
+        return "missing" if path in leftovers else _path_state(path)
+
     check_model_lineage(config)
     config = resolve_trained_models(config)
     authenticated: dict[str, Any] = {}
@@ -939,7 +962,7 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
                 dataset.teacher.model_id is None):
             _require_not_started(dataset.root, f"dataset {dataset.name}", [dataset.teacher])
             continue
-        feature_state = _path_state(dataset.feature_directory)
+        feature_state = state_of(dataset.feature_directory)
         if isinstance(dataset, ImportedDatasetConfig):
             if feature_state != "complete":
                 raise _blocked_path(dataset.feature_directory, "imported feature")
@@ -951,12 +974,12 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
                 raise WorkflowError(f"imported dataset changed after pinning: {dataset.name}")
             authenticated[f"dataset:{dataset.name}:features"] = stats
             continue
-        source_state = _path_state(dataset.source_directory)
+        source_state = state_of(dataset.source_directory)
         if dataset.positions is None:
             if source_state in {"incomplete", "unexpected"}:
                 raise _blocked_path(dataset.source_directory, "position source")
             if source_state == "missing":
-                _pending_source_chunks(dataset)
+                _pending_source_chunks(dataset, leftovers)
             if source_state == "complete":
                 _direct_audit(
                     source_audit_command(sys.executable, config, dataset), config.repository)
@@ -964,7 +987,7 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
         complete_shards = 0
         for index in range(dataset.source.shards):
             shard_path = label_shard_path(dataset, index)
-            shard_state = _path_state(shard_path)
+            shard_state = state_of(shard_path)
             if shard_state in {"incomplete", "unexpected"}:
                 raise _blocked_path(shard_path, "label shard")
             if shard_state == "complete":
@@ -988,7 +1011,7 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
             authenticated[f"dataset:{dataset.name}:features"] = authenticate_features(dataset)
     blocked_matches = blocked_comparisons(config)
     for comparison in config.comparisons:
-        path_state = _path_state(comparison.root)
+        path_state = state_of(comparison.root)
         if comparison.name in blocked_matches or not _comparison_ready(config, comparison):
             if path_state != "missing":
                 raise WorkflowError(
@@ -1019,7 +1042,7 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
             stages.append(("engine-gate", iteration.gate_directory,
                            lambda item=iteration: authenticate_gate(config, item)))
         for name, path, authenticate in stages:
-            path_state = _path_state(path)
+            path_state = state_of(path)
             if path_state in {"incomplete", "unexpected"}:
                 raise _blocked_path(path, name)
             if path_state == "complete":
@@ -1027,12 +1050,13 @@ def validate_existing(config: WorkflowConfig) -> dict[str, Any]:
     return authenticated
 
 
-def _evaluator_run(result: CommandResult, root: Path, label: str) -> Path:
+def _evaluator_run(config: WorkflowConfig, result: CommandResult, root: Path,
+                   label: str) -> Path:
     """Return the one valid evaluator run a match command reported inside its root."""
     matches = re.findall(r"^eval_run run_dir=(.+?) ledger=disabled$", result.output, re.MULTILINE)
     if len(matches) != 1:
         raise WorkflowError(f"engine evaluator emitted no unique run path: {result.log_path}")
-    run_path = Path(matches[0]).resolve()
+    run_path = (config.repository / matches[0]).resolve()
     if root not in run_path.parents:
         raise WorkflowError(f"engine evaluator escaped {label} root: {run_path}")
     manifest = json.loads((run_path / "manifest.json").read_bytes())
@@ -1153,9 +1177,23 @@ class WorkflowRunner:
 
     def _configure(self, stage: str, operation: str, build: Path, arguments: Sequence[str],
                    attempt: int) -> CommandResult:
+        moved_from = configured_elsewhere(build, self.config.repository)
+        if moved_from is not None:
+            # Like a half-built tree, a moved one is rebuilt from scratch; it is only ever
+            # configured again when its outputs are about to be rebuilt anyway.
+            _remove_artifact(self.config, build)
+            self.state.append("moved_build_removed", **_artifact_record(self.config, build),
+                              configured_at=moved_from)
+            self._notice(f"removed {build}, configured at {moved_from}, to rebuild it here")
         return self._command(stage, operation, [
             "cmake", "--preset", self.config.build_preset, "-B", str(build), *arguments,
             *self._catch2_arguments()], attempt=attempt)
+
+    def _notice(self, message: str) -> None:
+        if self.progress is None:
+            print(message, file=sys.stderr)
+        else:
+            self.progress.note(message)
 
     def _paths(self, stage: str, operation: str, attempt: int) -> tuple[Path, Path]:
         safe = stage.replace(":", "-")
@@ -1243,9 +1281,12 @@ class WorkflowRunner:
         self._data_commits[binary] = self.commit
 
     def _begin(self, stage: str, action: str, input_value: Any) -> int:
-        input_fingerprint = fingerprint(input_value)
+        input_fingerprint = fingerprint(rendered_paths(input_value, self.config.recorded_path))
         locked_input = self.state.started_input_fingerprint(stage)
-        if locked_input is not None and locked_input != input_fingerprint:
+        # Inputs locked before paths were recorded relative to the repository named them
+        # absolutely, which still matches where the repository was then.
+        if locked_input not in {None, input_fingerprint,
+                                fingerprint(rendered_paths(input_value, str))}:
             raise WorkflowError(
                 f"inputs to started stage {stage} changed; restore the authenticated "
                 "upstream artifacts recorded by its first attempt")
@@ -1331,7 +1372,7 @@ class WorkflowRunner:
         stage = f"dataset:{dataset.name}:features"
         if _path_state(dataset.feature_directory) != "complete":
             raise _blocked_path(dataset.feature_directory, "imported feature")
-        attempt = self._begin(stage, "import", {"path": str(dataset.feature_directory)})
+        attempt = self._begin(stage, "import", {"path": dataset.feature_directory})
         started = time.perf_counter()
         try:
             stats = authenticate_features(dataset)
@@ -1674,7 +1715,7 @@ class WorkflowRunner:
                     "promotable": candidate.promotable, "samples": candidate.samples,
                     "symmetry_samples": candidate.symmetry_samples,
                     "benchmark_iterations": candidate.benchmark_iterations,
-                    "opening_book": str(candidate.opening_book),
+                    "opening_book": self.config.recorded_path(candidate.opening_book),
                     "search_positions": candidate.search_positions,
                     "search_movetime_ms": candidate.search_movetime_ms,
                 },
@@ -1776,7 +1817,7 @@ class WorkflowRunner:
             runner = build / "runner" / "poe2_runner"
             command = engine_gate_command(self.config, iteration, build, runner)
             result = self._command(stage, "evaluate", command, attempt=attempt)
-            run_path = _evaluator_run(result, root, "engine gate")
+            run_path = _evaluator_run(self.config, result, root, "engine gate")
             manifest = json.loads((run_path / "manifest.json").read_bytes())
             build_artifacts = {
                 "new_engine_binary": build / "engines" / gate.new_engine,
@@ -1789,7 +1830,8 @@ class WorkflowRunner:
                 "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
                 "created_at_utc": now_utc(), "git_commit": self.commit,
                 "settings": {
-                    **recorded_gate_settings(gate), "opening_book": str(gate.opening_book),
+                    **recorded_gate_settings(gate),
+                    "opening_book": self.config.recorded_path(gate.opening_book),
                 },
                 "opening_book_sha256": sha256_file(gate.opening_book),
                 "run_id": manifest.get("run_id"),
@@ -1799,7 +1841,7 @@ class WorkflowRunner:
                 "build_directory": build.relative_to(root).as_posix(),
                 "model_header_sha256": header_metadata["sha256"],
                 "base_engine_artifact": {
-                    "path": str(base_engine_binary),
+                    "path": self.config.recorded_path(base_engine_binary),
                     "sha256": sha256_file(base_engine_binary),
                 },
                 "build_artifacts": {
@@ -1863,12 +1905,12 @@ class WorkflowRunner:
             result = self._command(stage, "evaluate", comparison_command(
                 self.config, comparison, new.model_id, base.model_id),
                 attempt=attempt)
-            run_path = _evaluator_run(result, root, "comparison")
+            run_path = _evaluator_run(self.config, result, root, "comparison")
             report = {
                 "schema": COMPARISON_SCHEMA, "schema_version": 1,
                 "created_at_utc": now_utc(), "git_commit": self.commit,
                 "settings": {**match_settings(comparison),
-                             "opening_book": str(comparison.opening_book)},
+                             "opening_book": self.config.recorded_path(comparison.opening_book)},
                 "opening_book_sha256": sha256_file(comparison.opening_book),
                 "run_id": json.loads((run_path / "manifest.json").read_bytes()).get("run_id"),
                 "run_directory": run_path.relative_to(root).as_posix(),
@@ -2375,9 +2417,13 @@ class SavedLedgerRow:
         return dict(zip(self.header, self.row, strict=True))
 
 
-def _verified_ledger_row(match: dict[str, Any], settings: MatchConfig, *, kind: str,
-                         new_id: str, label: str) -> SavedLedgerRow:
-    """Return a match's saved ledger row after checking every field it shares with the run."""
+def _verified_ledger_row(config: WorkflowConfig, match: dict[str, Any], settings: MatchConfig,
+                         *, kind: str, new_id: str, label: str) -> SavedLedgerRow:
+    """Return a match's saved ledger row after checking every field it shares with the run.
+
+    The row names its paths relative to the repository, as the tracked ledger does, even if the
+    match recorded them absolutely.
+    """
     path = Path(match["ledger_row"])
     header, row = _read_ledger_row(path)
     if "run_id" not in header:
@@ -2398,10 +2444,8 @@ def _verified_ledger_row(match: dict[str, Any], settings: MatchConfig, *, kind: 
         "base_engine": settings.base_engine,
         "base_engine_args": settings.base_engine_args,
         "games_requested": str(settings.games),
-        "opening_book": str(settings.opening_book),
         "go_movetime_ms": str(settings.go_movetime_ms),
         "timeout_ms": str(settings.timeout_ms),
-        "run_dir": match["run_directory"],
         "valid": "true",
         "workers_requested": str(settings.workers),
     }
@@ -2464,6 +2508,9 @@ def _verified_ledger_row(match: dict[str, Any], settings: MatchConfig, *, kind: 
         expected_saved[ledger_name] = _ledger_scalar(score_counts[score_name])
     mismatches = [name for name, value in expected_saved.items()
                   if values.get(name) != value]
+    paths = {"opening_book": settings.opening_book, "run_dir": Path(match["run_directory"])}
+    mismatches.extend(name for name, path in paths.items()
+                      if not names_path(config, values.get(name), path))
     for ledger_name, manifest_name in {
             "sequential_null": "sequential_null",
             "sequential_alt": "sequential_alt",
@@ -2481,7 +2528,8 @@ def _verified_ledger_row(match: dict[str, Any], settings: MatchConfig, *, kind: 
         raise WorkflowError(
             f"saved ledger row differs from the authenticated {label} in: " +
             ", ".join(sorted(set(mismatches))))
-    return saved
+    portable = {name: config.recorded_path(path) for name, path in paths.items()}
+    return replace(saved, row=[portable.get(name, value) for name, value in zip(header, row)])
 
 
 def _inspect_master(master: Path, saved: SavedLedgerRow) -> bool:
@@ -2554,7 +2602,7 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
     candidate = authenticate_candidate(config, iteration)
     gate = authenticate_gate(config, iteration, candidate=candidate)
     assert iteration.engine_gate is not None
-    saved = _verified_ledger_row(gate, iteration.engine_gate, kind=GATE_KIND,
+    saved = _verified_ledger_row(config, gate, iteration.engine_gate, kind=GATE_KIND,
                                  new_id=gate["candidate_build_id"], label="gate")
     archive = _archive_entry(config, iteration, candidate)
     model_index = config.repository / MODEL_INDEX_PATH
@@ -2609,7 +2657,7 @@ def _record_comparison(config: WorkflowConfig, name: str, *, apply: bool) -> dic
                 f"{model.name}, which is not archived under {MODEL_ARCHIVE_DIRECTORY}/; run "
                 f"promote-gate --apply {model.iteration} and commit the result")
     match = authenticate_comparison(config, comparison, new, base)
-    saved = _verified_ledger_row(match, comparison, kind=COMPARISON_KIND,
+    saved = _verified_ledger_row(config, match, comparison, kind=COMPARISON_KIND,
                                  new_id=new.model_id, label="comparison")
     index = config.repository / COMPARISON_INDEX_PATH
     row = _comparison_index_row(config, comparison, new, base, match, saved.values)

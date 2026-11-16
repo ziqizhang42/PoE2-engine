@@ -17,10 +17,12 @@ from poe2_training.workflow import (
     CommandRunner,
     WorkflowError,
     WorkflowRunner,
+    crash_leftovers,
     promote_gate,
     recover_after_crash,
     run_lock,
     run_workflow,
+    validate_existing,
 )
 from poe2_training.workflow_adapters import (
     AdapterError,
@@ -105,6 +107,20 @@ class CrashLeftoverTest(RecoveryFixture):
         count = len(state.events)
         self.assertEqual(self._recover()[0], [])
         self.assertEqual(len(RunState(self.config).events), count)
+
+    def test_validation_counts_crash_leftovers_as_not_yet_created(self) -> None:
+        runner = self._runner()
+        shard = label_shard_path(self.dataset, 0)
+        runner._start_artifact(shard)
+        shard.mkdir(parents=True)
+        (shard / "INCOMPLETE").write_text("poe2-minimax-labels\n", encoding="utf-8")
+        chunk = source_chunk_path(self.dataset, 0, 4)
+        runner._start_artifact(chunk)
+        chunk.mkdir(parents=True)
+        (chunk / "INCOMPLETE").write_text("poe2-position-source-chunk\n", encoding="utf-8")
+        self.assertEqual(validate_existing(self.config), {})
+        self.assertEqual(crash_leftovers(self.config), [shard, chunk])
+        self.assertTrue(shard.is_dir() and chunk.is_dir())
 
     def test_a_recorded_failure_is_kept_for_inspection(self) -> None:
         runner = self._runner()

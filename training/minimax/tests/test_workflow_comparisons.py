@@ -9,12 +9,12 @@ from unittest import mock
 from test_workflow_generations import (
     CHAIN,
     RECIPES,
+    REPOSITORY,
     RUN1_FINGERPRINTS,
     V02,
     ChainFixture,
     _complete,
     _record_gate,
-    relocated,
 )
 from poe2_training.shared import sha256_file
 from poe2_training.workflow import (
@@ -79,7 +79,7 @@ class ComparisonConfigTest(ChainFixture):
             new = "g001"
             base = "g000"
             """), encoding="utf-8")
-        fingerprints = stage_fingerprints(relocated(load_workflow_config(compared)))
+        fingerprints = stage_fingerprints(load_workflow_config(compared))
         self.assertIn("comparison:g001-vs-g000:match", fingerprints)
         del fingerprints["comparison:g001-vs-g000:match"]
         self.assertEqual(fingerprints, RUN1_FINGERPRINTS)
@@ -253,9 +253,11 @@ class ComparisonRunTest(ChainFixture):
         self.assertEqual(commands["build-base"][-1], "poe2_minimax")
         evaluate = commands["evaluate"]
         self.assertEqual(evaluate[0], str(builds["g001"] / "runner/poe2_runner"))
-        for flag, value in (("--kind", "training-comparison"), ("--new-build", str(builds["g001"])),
-                            ("--base", str(builds["g000"])),
-                            ("--run-root", str(comparison.root / "runs"))):
+        relative = {name: build.relative_to(REPOSITORY).as_posix() for name, build in builds.items()}
+        for flag, value in (("--kind", "training-comparison"), ("--new-build", relative["g001"]),
+                            ("--base", relative["g000"]),
+                            ("--run-root", (comparison.root / "runs").relative_to(REPOSITORY)
+                             .as_posix())):
             self.assertEqual(evaluate[evaluate.index(flag) + 1], value)
         started = next(event for event in state.events if event["type"] == "stage_started")
         self.assertEqual(started["input_fingerprint"], fingerprint({

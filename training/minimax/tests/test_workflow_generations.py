@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from fixture import repository_temporary_directory
+from fixture import rebased, repository_temporary_directory
 from poe2_training.workflow import (
     WorkflowError,
     WorkflowRunner,
@@ -23,7 +23,6 @@ from poe2_training.workflow import (
 )
 from poe2_training.workflow_adapters import data_binary, label_command, source_chunk_command
 from poe2_training.workflow_config import (
-    ImportedDatasetConfig,
     WorkflowConfigError,
     fingerprint,
     load_workflow_config,
@@ -38,9 +37,8 @@ from poe2_training.workflow_ui import WorkflowProgress
 REPOSITORY = Path(__file__).resolve().parents[3]
 RECIPES = REPOSITORY / "training/minimax/recipes"
 V02 = "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3"
-# Stage fingerprints of the long-form run1 recipe as the committed code computes them, with
-# the repository relocated to /repository so they hold at any checkout path. Finished runs are
-# tied to these, so neither form may change them.
+# Stage fingerprints of the long-form run1 recipe. They name paths relative to the repository,
+# so they hold at any checkout path, and runs are tied to them, so neither form may change them.
 RUN1_FINGERPRINTS = {
     "dataset:g001:source": "dd37bbd5caf89213a81b5f533151ae4d767c3b3cb31fa5c5673069e259381259",
     "dataset:g001:labels": "0ae64cafbc93bc101d42d923123159a857cf144f6ef5f6105f6e37c07b250a7b",
@@ -50,6 +48,14 @@ RUN1_FINGERPRINTS = {
     "iteration:g001:sealed-evaluation":
         "668a696e5e802e40399131c5aa7f5aebae7bb7957dc46e7393a3e35cadecd1ae",
     "iteration:g001:candidate-validation":
+        "cf047901bb749ddccc82679a4522b96cfa8bfd44ff0b1b279d645b5718ae0585",
+    "iteration:g001:engine-gate":
+        "998e462fee1becfa4299acf2318797d23d7f4d15cc6def774f595232db5a0053",
+}
+# The stages that name a path, as code before relative paths fingerprinted them with the
+# repository at /repository. Stages started then stay locked to this absolute form.
+RUN1_ABSOLUTE_FINGERPRINTS = {
+    "iteration:g001:candidate-validation":
         "8e21dd2187ab9413a8784fd617d2d9b5fab3ffd257c3133394cada7e1dbe6663",
     "iteration:g001:engine-gate":
         "1bbafb0e336cc71b6cd778f2f08498b6fedf3a5fb25ec007fd3fb4cfd62b7102",
@@ -57,24 +63,8 @@ RUN1_FINGERPRINTS = {
 
 
 def relocated(config):
-    """Return the config with its repository paths rebased on /repository."""
-    def move(path: Path) -> Path:
-        return Path("/repository") / path.relative_to(config.repository)
-
-    iterations = tuple(replace(
-        iteration,
-        candidate_validation=(None if iteration.candidate_validation is None else replace(
-            iteration.candidate_validation,
-            opening_book=move(iteration.candidate_validation.opening_book))),
-        engine_gate=(None if iteration.engine_gate is None else replace(
-            iteration.engine_gate, opening_book=move(iteration.engine_gate.opening_book))))
-        for iteration in config.iterations)
-    datasets = tuple(replace(dataset, feature_directory=move(dataset.feature_directory))
-                     if isinstance(dataset, ImportedDatasetConfig) else dataset
-                     for dataset in config.datasets)
-    comparisons = tuple(replace(comparison, opening_book=move(comparison.opening_book))
-                        for comparison in config.comparisons)
-    return replace(config, iterations=iterations, datasets=datasets, comparisons=comparisons)
+    """Return the config with its repository at /repository."""
+    return rebased(config, config.repository, Path("/repository"))
 
 
 DEFAULTS = textwrap.dedent("""
@@ -150,8 +140,10 @@ class CompactRecipeTest(ChainFixture):
         compact = load_workflow_config(RECIPES / "run1.toml")
         long_form = load_workflow_config(
             REPOSITORY / "training/minimax/tests/recipes/run1-long-form.toml")
-        self.assertEqual(stage_fingerprints(relocated(long_form)), RUN1_FINGERPRINTS)
-        self.assertEqual(stage_fingerprints(relocated(compact)), RUN1_FINGERPRINTS)
+        self.assertEqual(stage_fingerprints(long_form), RUN1_FINGERPRINTS)
+        self.assertEqual(stage_fingerprints(compact), RUN1_FINGERPRINTS)
+        absolute = stage_fingerprints(relocated(compact), absolute_paths=True)
+        self.assertEqual({**RUN1_FINGERPRINTS, **RUN1_ABSOLUTE_FINGERPRINTS}, absolute)
         self.assertEqual(stage_fingerprints(compact), stage_fingerprints(long_form))
         self.assertEqual(stage_definitions(compact), stage_definitions(long_form))
         self.assertEqual(compact.datasets, long_form.datasets)

@@ -18,7 +18,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest import mock
 
-from fixture import repository_temporary_directory, write_feature_fixture
+from fixture import moved_repository, repository_temporary_directory, write_feature_fixture
 from test_workflow_generations import V02
 from poe2_training.pattern_suites import pattern_suite
 from poe2_training.shared import (
@@ -36,6 +36,7 @@ from poe2_training.workflow import (
     WorkflowError,
     _comparison_models,
     _dependency_order,
+    _verified_ledger_row,
     check_model_lineage,
     handoff_candidate,
     print_status,
@@ -51,8 +52,10 @@ from poe2_training.workflow_adapters import (
     CANDIDATE_SCHEMA,
     COMPARISON_KIND,
     COMPARISON_SCHEMA,
+    GATE_KIND,
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
+    AdapterError,
     authenticate_candidate,
     authenticate_comparison,
     authenticate_features,
@@ -957,6 +960,12 @@ class WorkflowStateTest(unittest.TestCase):
 
 
 class WorkflowPromotionTest(unittest.TestCase):
+    # Fixtures record paths absolutely, as runs did before paths were relative to the repository.
+    relative_records = False
+
+    def _named(self, path: Path) -> str:
+        return self.config.recorded_path(path) if self.relative_records else str(path)
+
     def setUp(self) -> None:
         # Private builds here are mocked; test_workflow_recovery covers the Catch2 reuse.
         self.enterContext(mock.patch("poe2_training.workflow.catch2_pin", return_value=None))
@@ -1038,7 +1047,7 @@ class WorkflowPromotionTest(unittest.TestCase):
                 "promotable": candidate.promotable, "samples": candidate.samples,
                 "symmetry_samples": candidate.symmetry_samples,
                 "benchmark_iterations": candidate.benchmark_iterations,
-                "opening_book": str(candidate.opening_book),
+                "opening_book": self._named(candidate.opening_book),
                 "search_positions": candidate.search_positions,
                 "search_movetime_ms": candidate.search_movetime_ms,
             },
@@ -1118,12 +1127,12 @@ class WorkflowPromotionTest(unittest.TestCase):
             "created_at_utc": "20260819T000000Z", "valid": True,
             "kind": kind, "new_id": new_id,
             "new_engine": settings.new_engine,
-            "new_engine_path": str(new_engine_path.resolve()),
+            "new_engine_path": self._named(new_engine_path.resolve()),
             "new_engine_args": settings.new_engine_args, "base_engine": settings.base_engine,
             "base_engine_args": settings.base_engine_args,
             "base_engine_path": base_engine_path,
             "base_id": base_id,
-            "opening_book": str(settings.opening_book),
+            "opening_book": self._named(settings.opening_book),
             "opening_book_digest": "fnv1a64:fixture", "opening_count": 1,
             "opening_seed": 123, "opening_seed_source": "derived",
             "opening_sampling": "deterministic_shuffle_without_replacement",
@@ -1173,10 +1182,10 @@ class WorkflowPromotionTest(unittest.TestCase):
             "sequential_decision": manifest["sequential_decision"],
             "sequential_null": str(settings.sequential_null),
             "sequential_alt": str(settings.sequential_alt),
-            "opening_book": str(settings.opening_book),
+            "opening_book": self._named(settings.opening_book),
             "opening_book_digest": manifest["opening_book_digest"],
             "opening_count": "1", "go_movetime_ms": str(settings.go_movetime_ms),
-            "timeout_ms": str(settings.timeout_ms), "run_dir": str(run.resolve()),
+            "timeout_ms": str(settings.timeout_ms), "run_dir": self._named(run.resolve()),
             "analysis_version": "2", "statistical_unit": "opening_pair",
             "statistical_samples": "1", "statistical_games": str(settings.games),
             "pair_score_0": "0", "pair_score_0_5": "0", "pair_score_1": "0",
@@ -1236,14 +1245,14 @@ class WorkflowPromotionTest(unittest.TestCase):
         header, row, run = self._write_match_run(
             root, gate, kind="training-gate", new_id=build_id,
             base_id=base_model_id or "fixture-base", new_engine_path=new_engine_binary,
-            base_engine_path=manifest_base_path or str(base_engine), run_id=run_id,
+            base_engine_path=manifest_base_path or self._named(base_engine), run_id=run_id,
             decision=decision, ledger_overrides=ledger_overrides)
         complete_json_report(root, GATE_SCHEMA, {
             "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
             "git_commit": "2" * 40,
             "settings": {
                 **recorded_gate_settings(gate),
-                "opening_book": str(gate.opening_book),
+                "opening_book": self._named(gate.opening_book),
             },
             "opening_book_sha256": sha256_file(gate.opening_book),
             "run_id": row[header.index("run_id")], "run_directory": "runs/one",
@@ -1253,7 +1262,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "build_directory": build.relative_to(root).as_posix(),
             "model_header_sha256": header_digest,
             "base_engine_artifact": {
-                "path": str(base_engine),
+                "path": self._named(base_engine),
                 "sha256": sha256_file(base_engine),
             },
             "build_artifacts": {
@@ -1396,6 +1405,42 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.config = replace(self.config, iterations=(self.iteration,), models=(model,))
         return model
 
+    def _moved(self):
+        """Copy the repository files this test uses to another folder; return the config there."""
+        destination = repository_temporary_directory()
+        self.addCleanup(destination.cleanup)
+        return moved_repository(self.config, Path(destination.name))
+
+    def _saved_gate_row(self, config) -> dict[str, str]:
+        iteration = config.iteration("candidate")
+        gate = authenticate_gate(config, iteration)
+        return _verified_ledger_row(config, gate, iteration.engine_gate, kind=GATE_KIND,
+                                    new_id=gate["candidate_build_id"], label="gate").values
+
+    def test_relative_records_authenticate_after_the_repository_moves(self) -> None:
+        self.relative_records = True
+        self._candidate()
+        self._with_base_model()
+        self._gate()
+        runs = (self.iteration.gate_directory / "runs/one").relative_to(REPOSITORY).as_posix()
+        moved = self._moved()
+        for config in (self.config, moved):
+            values = self._saved_gate_row(config)
+            self.assertEqual((values["run_dir"], values["opening_book"]),
+                             (runs, "eval/openings/holdout.txt"))
+        self.assertEqual(stage_fingerprints(moved), stage_fingerprints(self.config))
+
+    def test_absolute_records_authenticate_only_where_they_were_written(self) -> None:
+        self._candidate()
+        self._with_base_model()
+        self._gate()
+        values = self._saved_gate_row(self.config)
+        self.assertEqual(values["run_dir"], (self.iteration.gate_directory / "runs/one")
+                         .relative_to(REPOSITORY).as_posix())
+        moved = self._moved()
+        with self.assertRaisesRegex(AdapterError, "candidate validation settings differ"):
+            authenticate_candidate(moved, moved.iteration("candidate"))
+
     def test_engine_gate_builds_its_base_model_from_the_same_commit(self) -> None:
         self._candidate()
         model = self._with_base_model()
@@ -1418,7 +1463,8 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.assertIn("ctest", commands["test"])
         gate_command = engine_gate_command(
             self.config, self.iteration, self.root / "build", self.root / "runner")
-        self.assertEqual(gate_command[gate_command.index("--base") + 1], str(base_build))
+        self.assertEqual(gate_command[gate_command.index("--base") + 1],
+                         base_build.relative_to(REPOSITORY).as_posix())
 
     def test_engine_gate_rejects_a_base_model_equal_to_its_candidate(self) -> None:
         self._candidate()
@@ -1712,12 +1758,12 @@ class WorkflowPromotionTest(unittest.TestCase):
         _, _, run = self._write_match_run(
             root, comparison, kind=COMPARISON_KIND, new_id=new.model_id, base_id=base.model_id,
             new_engine_path=binaries["new_engine_binary"],
-            base_engine_path=str(binaries["base_engine_binary"].resolve()),
+            base_engine_path=self._named(binaries["base_engine_binary"].resolve()),
             run_id="comparison-run", decision="accept_alt")
         complete_json_report(root, COMPARISON_SCHEMA, {
             "schema": COMPARISON_SCHEMA, "schema_version": 1, "git_commit": "3" * 40,
             "settings": {**match_settings(comparison),
-                         "opening_book": str(comparison.opening_book)},
+                         "opening_book": self._named(comparison.opening_book)},
             "opening_book_sha256": sha256_file(comparison.opening_book),
             "run_id": "comparison-run", "run_directory": "runs/one", **sides,
             "build_artifacts": {name: {"path": binary.relative_to(root).as_posix(),

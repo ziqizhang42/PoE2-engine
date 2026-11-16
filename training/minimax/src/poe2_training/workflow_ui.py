@@ -221,6 +221,10 @@ class WorkflowProgress:
     def comparison_completed(self, name: str) -> None:
         self._write(f"{paint('✓', 'green', stream=self.stream)} comparison {name}")
 
+    def note(self, message: str) -> None:
+        with self._lock:
+            self._write(message)
+
     def not_started(self, kind: str, name: str, reason: str) -> None:
         where = f"iteration {self._iteration_position(name)} " if kind == "iteration" else kind
         self._write(f"{paint('■', 'yellow', stream=self.stream)} {where} {name} "

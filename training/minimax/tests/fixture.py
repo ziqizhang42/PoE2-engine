@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import struct
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from poe2_training.artifact import CELL_COUNT, HEADER, LINE_COUNT, MAGIC, RECORD_BYTES
 
@@ -23,6 +24,43 @@ def repository_temporary_directory() -> tempfile.TemporaryDirectory:
     """
     (REPOSITORY / "build").mkdir(exist_ok=True)
     return tempfile.TemporaryDirectory(dir=REPOSITORY / "build")
+
+
+def rebased(value: Any, old: Path, new: Path) -> Any:
+    """Return value, such as a workflow config, with every path below old moved below new."""
+    if isinstance(value, Path):
+        return new / value.relative_to(old) if value.is_relative_to(old) else value
+    if is_dataclass(value) and not isinstance(value, type):
+        return replace(value, **{item.name: rebased(getattr(value, item.name), old, new)
+                                 for item in fields(value) if item.init})
+    if isinstance(value, tuple):
+        return tuple(rebased(item, old, new) for item in value)
+    return value
+
+
+def _paths(value: Any) -> list[Path]:
+    if isinstance(value, Path):
+        return [value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return [path for item in fields(value) for path in _paths(getattr(value, item.name))]
+    if isinstance(value, tuple):
+        return [path for item in value for path in _paths(item)]
+    return []
+
+
+def moved_repository(config: Any, destination: Path) -> Any:
+    """Copy everything a config names inside its repository to destination; return it there."""
+    inside = {path for path in _paths(config) if config.repository in path.parents}
+    for path in sorted(inside):
+        if any(other in path.parents for other in inside) or not path.exists():
+            continue
+        target = destination / path.relative_to(config.repository)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_dir():
+            shutil.copytree(path, target, symlinks=True)
+        else:
+            shutil.copy2(path, target)
+    return rebased(config, config.repository, destination)
 
 
 @dataclass(frozen=True)

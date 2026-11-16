@@ -20,6 +20,7 @@ from .workflow import (
     promote_gate,
     record_comparison,
     run_workflow,
+    crash_leftovers,
     validate_existing,
 )
 from .workflow_config import WorkflowConfigError, load_workflow_config
@@ -122,6 +123,8 @@ def main() -> int:
                 f"authenticated_artifacts={len(artifacts)} config={config.path}",
             )
             _print_not_started(blocked_work(config))
+            for leftover in crash_leftovers(config):
+                print(f"unfinished {leftover} from a stopped run; the next run removes it")
         elif arguments.command == "status":
             print_status(config, json_output=arguments.json)
         elif arguments.command == "run":

@@ -146,14 +146,29 @@ class RunState:
 
     def validate_evolution(self) -> None:
         current = stage_fingerprints(self.config)
+        absolute: dict[str, str] | None = None
         for stage, locked in self.started_fingerprints().items():
             if stage not in current:
                 raise StateError(
                     f"configuration removes started stage {stage}; restore it in {self.config.path}")
-            if current[stage] != locked:
+            if current[stage] == locked:
+                continue
+            # Stages started before fingerprints named paths relative to the repository are
+            # locked to their absolute form, which holds only where the repository was then.
+            if absolute is None:
+                absolute = stage_fingerprints(self.config, absolute_paths=True)
+            if absolute[stage] != locked:
                 raise StateError(
                     f"configuration changes started stage {stage}; use its accepted snapshot under "
-                    f"{self.snapshots_directory}")
+                    f"{self.snapshots_directory}{self._moved_hint()}")
+
+    def _moved_hint(self) -> str:
+        recorded = [event.get("config_path") for event in self.events
+                    if event["type"] == "config_accepted"]
+        if not recorded or recorded[-1] == str(self.config.path):
+            return ""
+        return (f"; the run was recorded with its recipe at {recorded[-1]}, and a stage started "
+                "before paths were recorded relative to the repository validates only there")
 
     def accept_config(self) -> tuple[int, Path, bool]:
         """Snapshot a compatible config revision, returning revision/path/new."""
