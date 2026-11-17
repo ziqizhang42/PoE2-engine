@@ -63,3 +63,8 @@ model = "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e
 name = "g001"
 parent = "g000"
 seed = 20261114
+
+[[generations]]
+name = "g002"
+parent = "g001"
+seed = 20261117
