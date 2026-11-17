@@ -2,7 +2,12 @@
 
 ## Prepare and verify locally
 
-1. Set the repository version in `CMakeLists.txt`, update the training-tool version in `training/minimax/pyproject.toml` and `training/minimax/uv.lock`, and update `CHANGELOG.md`. The release section names the engine version and its built-in net, by name and ID as `poe2_minimax --version` prints them. A release that changes only the built-in net raises only the last number; `poe2-train handoff --apply` already did that when it installed the net ([nets.md](nets.md#the-built-in-net)).
+1. Set the repository version in `CMakeLists.txt` and update `CHANGELOG.md`. The training tools read their version from `CMakeLists.txt`.
+
+   - The middle number is for new capabilities in the engine or tools. The last is for a release without them: a bug fix or a new built-in net.
+   - `poe2-train handoff --apply` already raised the last number when it installed a net ([nets.md](nets.md#the-built-in-net)), so two engines with different built-in nets never share a version. Prefer installing a net on a tagged release, so that the next release changes only the net.
+   - The release section's heading names the version, the date, and the built-in net, as in `## 0.3.1 - 2026-11-17 · net run1/g001`.
+   - A section describes the difference from the previous release. Edit and merge its entries as work lands instead of appending dated ones, and drop an entry when what it describes is removed again. How things work belongs in `docs/`, results in `eval/results.csv` and `models/`, and experiment findings in [research-log.md](research-log.md).
 
 2. Run the native Debug and Release checks and build the packaged WebAssembly artifact:
    ```bash
