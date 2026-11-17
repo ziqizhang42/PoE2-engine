@@ -342,8 +342,10 @@ std::expected<std::shared_ptr<const Net>, std::string> try_parse_net(
                    "; this engine reads format " + std::to_string(kContainerVersion)};
   }
   const std::uint32_t header_bytes = reader.u32();
-  if (reader.truncated() || bytes.size() < header_bytes + kTrailerBytes ||
-      header_bytes < kFixedHeaderBytes + 4) {
+  // Nothing is added to header_bytes: the sum could wrap where size_t is 32 bits, as in the
+  // browser build.
+  if (reader.truncated() || header_bytes < kFixedHeaderBytes + 4 || bytes.size() < kTrailerBytes ||
+      header_bytes > bytes.size() - kTrailerBytes) {
     return Failure{"net file is truncated"};
   }
   const std::span<const std::uint8_t> body = bytes.first(bytes.size() - kTrailerBytes);

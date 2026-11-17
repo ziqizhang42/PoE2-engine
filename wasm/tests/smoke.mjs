@@ -195,9 +195,14 @@ const unsupportedDesign = Uint8Array.from(defaultNet);
 unsupportedDesign.set(new TextEncoder().encode("pattern-gain-v9"), 16);
 const damaged = Uint8Array.from(defaultNet);
 damaged[200] ^= 1;
+// A header size near 2^32 must not wrap the browser build's 32-bit length arithmetic.
+const oversizedHeader = new Uint8Array(20);
+oversizedHeader.set(defaultNet.subarray(0, 12));
+new DataView(oversizedHeader.buffer).setUint32(12, 0xfffffff0, true);
 for (const [net, reason] of [
   [Uint8Array.of(1, 2, 3), "not a PoE2 net file"],
   [defaultNet.subarray(0, 40), "net file is truncated"],
+  [oversizedHeader, "net file is truncated"],
   [damaged, "net file is damaged: its integrity check does not match its contents"],
   [
     resealed(unsupportedDesign),

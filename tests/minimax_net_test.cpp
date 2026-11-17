@@ -158,6 +158,11 @@ TEST_CASE("damaged, foreign, and unsupported net files are refused with a reason
 
   require_rejected(std::vector<std::uint8_t>(valid.begin(), valid.begin() + 40), "truncated");
   require_rejected(std::vector<std::uint8_t>(valid.begin(), valid.begin() + 10), "truncated");
+  constexpr std::size_t kHeaderSizeOffset = 12;
+  std::vector<std::uint8_t> oversized_header(valid.begin(), valid.begin() + 20);
+  oversized_header[kHeaderSizeOffset] = 0xf0;
+  std::fill_n(oversized_header.begin() + kHeaderSizeOffset + 1, 3, std::uint8_t{0xff});
+  require_rejected(oversized_header, "truncated");
   constexpr std::size_t kMetadataSizeOffset = 76;
   std::vector<std::uint8_t> short_metadata = valid;
   short_metadata[kMetadataSizeOffset] += 1;
