@@ -19,6 +19,7 @@
 #include "poe2/minimax/net.hpp"
 #include "poe2/minimax/options.hpp"
 #include "poe2/minimax/search.hpp"
+#include "poe2/minimax/sha256.hpp"
 #include "poe2/move.hpp"
 
 namespace fs = std::filesystem;
@@ -40,6 +41,10 @@ namespace {
   return net_fixtures() / std::string{poe2::minimax::kPatternGainDesign} / "reference.poe2net";
 }
 
+[[nodiscard]] fs::path default_net_path() {
+  return fs::path{POE2_SOURCE_DIR} / "engines" / "minimax" / "nets" / "default.poe2net";
+}
+
 [[nodiscard]] poe2::Position position_from_bitboards(poe2::Bitboard player_one,
                                                      poe2::Bitboard player_two) {
   poe2::Position position;
@@ -59,12 +64,23 @@ namespace {
 }
 
 void require_rejected(const std::vector<std::uint8_t>& bytes, std::string_view reason) {
+  const auto result = poe2::minimax::try_parse_net(bytes);
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE_THAT(result.error(), ContainsSubstring(std::string{reason}));
   try {
     static_cast<void>(poe2::minimax::parse_net(bytes));
     FAIL("net was accepted");
   } catch (const poe2::minimax::NetError& error) {
-    REQUIRE_THAT(error.what(), ContainsSubstring(std::string{reason}));
+    REQUIRE(std::string{error.what()} == result.error());
   }
+}
+
+// Replaces the integrity check so that a deliberately changed file is otherwise intact.
+[[nodiscard]] std::vector<std::uint8_t> resealed(std::vector<std::uint8_t> bytes) {
+  bytes.resize(bytes.size() - 32);
+  const poe2::minimax::labeling::Sha256Digest digest = poe2::minimax::labeling::sha256(bytes);
+  bytes.insert(bytes.end(), digest.begin(), digest.end());
+  return bytes;
 }
 
 [[nodiscard]] std::vector<std::uint8_t> valid_net_bytes(
@@ -141,6 +157,14 @@ TEST_CASE("damaged, foreign, and unsupported net files are refused with a reason
   require_rejected(foreign, "not a PoE2 net file");
 
   require_rejected(std::vector<std::uint8_t>(valid.begin(), valid.begin() + 40), "truncated");
+  require_rejected(std::vector<std::uint8_t>(valid.begin(), valid.begin() + 10), "truncated");
+  constexpr std::size_t kMetadataSizeOffset = 76;
+  std::vector<std::uint8_t> short_metadata = valid;
+  short_metadata[kMetadataSizeOffset] += 1;
+  require_rejected(resealed(short_metadata), "truncated");
+  std::vector<std::uint8_t> trailing = valid;
+  trailing.insert(trailing.end() - 32, std::uint8_t{'\n'});
+  require_rejected(resealed(trailing), "unexpected bytes after its metadata");
 
   std::vector<std::uint8_t> damaged = valid;
   damaged[200] ^= 1;
@@ -180,9 +204,19 @@ TEST_CASE("damaged, foreign, and unsupported net files are refused with a reason
   }
 }
 
+TEST_CASE("the built-in net is the default net file, byte for byte", "[minimax][net][default]") {
+  const std::shared_ptr<const poe2::minimax::Net>& built_in = poe2::minimax::default_net();
+  const std::shared_ptr<const poe2::minimax::Net> file =
+      poe2::minimax::load_net_file(default_net_path());
+  REQUIRE(built_in->sha256() == file->sha256());
+  REQUIRE(built_in->metadata() == file->metadata());
+  REQUIRE(poe2::minimax::serialize_net(built_in->design(), built_in->metadata(),
+                                       built_in->parameters()) == read_bytes(default_net_path()));
+}
+
 TEST_CASE("search with a file-loaded net matches the same net built in", "[minimax][net][search]") {
   const std::shared_ptr<const poe2::minimax::Net> file =
-      poe2::minimax::load_net_file(reference_net_path());
+      poe2::minimax::load_net_file(default_net_path());
   poe2::Position position;
   for (const int index : {24, 0, 23, 48, 32}) {
     REQUIRE(position.play(poe2::square_from_index(index)));

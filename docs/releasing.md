@@ -2,7 +2,7 @@
 
 ## Prepare and verify locally
 
-1. Set the repository version in `CMakeLists.txt`, update the training-tool version in `training/minimax/pyproject.toml` and `training/minimax/uv.lock`, and update `CHANGELOG.md`.
+1. Set the repository version in `CMakeLists.txt`, update the training-tool version in `training/minimax/pyproject.toml` and `training/minimax/uv.lock`, and update `CHANGELOG.md`. The release section names the engine version and its built-in net, by name and ID as `poe2_minimax --version` prints them. A release that changes only the built-in net raises only the last number; `poe2-train handoff --apply` already did that when it installed the net ([nets.md](nets.md#the-built-in-net)).
 
 2. Run the native Debug and Release checks and build the packaged WebAssembly artifact:
    ```bash

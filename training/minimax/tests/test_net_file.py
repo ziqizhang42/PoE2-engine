@@ -15,7 +15,9 @@ from poe2_training.net_file import (
 )
 
 REFERENCE_NET = REPOSITORY / "tests" / "fixtures" / "nets" / PATTERN_GAIN_DESIGN / "reference.poe2net"
-MODEL_HEADER = REPOSITORY / "engines" / "minimax" / "src" / "frozen_pattern_gain_model.hpp"
+V02_HEADER = (REPOSITORY / "models" /
+              "candidate-sha256-633309adb322e026784089d8b8ea175c80864a5941b0f2b912294e94a7d1ade3.hpp")
+DEFAULT_NET = REPOSITORY / "engines" / "minimax" / "nets" / "default.poe2net"
 
 
 class NetFileTest(unittest.TestCase):
@@ -27,10 +29,13 @@ class NetFileTest(unittest.TestCase):
         self.assertEqual(net.net_id, "633309adb322")
         self.assertEqual(encode_net(net.parameters, net.metadata), data)
 
-    def test_reference_net_holds_the_built_in_header_parameters(self) -> None:
-        parameters, strings = parameters_from_header(MODEL_HEADER.read_text())
+    def test_reference_net_holds_the_v02_header_parameters(self) -> None:
+        parameters, strings = parameters_from_header(V02_HEADER.read_text())
         self.assertEqual(read_net(REFERENCE_NET).parameters, parameters)
         self.assertIn("kArtifactModelId", strings)
+
+    def test_the_default_net_is_a_valid_net_file(self) -> None:
+        self.assertEqual(read_net(DEFAULT_NET).design, PATTERN_GAIN_DESIGN)
 
     def test_metadata_order_does_not_change_the_bytes(self) -> None:
         parameters = read_net(REFERENCE_NET).parameters

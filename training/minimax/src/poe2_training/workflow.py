@@ -163,6 +163,9 @@ LEDGER_NET_COLUMNS = (
     "base_engine_version", "base_net_name", "base_net_id", "base_net_sha256",
 )
 ITERATION_NON_STAGE_FIELDS = frozenset({"dataset", "depends_on", "status", "blocked_by"})
+DEFAULT_NET_PATH = Path("engines/minimax/nets/default.poe2net")
+PROJECT_FILE = Path("CMakeLists.txt")
+_PROJECT_VERSION = re.compile(rb"(project\(\s*PoE2\s+VERSION )(\d+)\.(\d+)\.(\d+)")
 
 
 class WorkflowError(ValueError):
@@ -2184,11 +2187,22 @@ def run_workflow(config: WorkflowConfig, *, iteration_name: str | None = None,
 
 
 def handoff_candidate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
-    """Preview or deliberately install one authenticated generated header."""
+    """Preview or deliberately install one recorded gate winner as the built-in net."""
     if apply:
         with _recovered_run_lock(config):
             return _handoff_candidate(config, iteration_name, apply=True)
     return _handoff_candidate(config, iteration_name, apply=False)
+
+
+def _next_patch_version(project: bytes) -> tuple[str, str, bytes]:
+    """Return the project version, the next patch version, and the project file using it."""
+    match = _PROJECT_VERSION.search(project)
+    if match is None:
+        raise WorkflowError(f"{PROJECT_FILE} does not state the PoE2 project version")
+    major, minor, patch = (int(part) for part in match.group(2, 3, 4))
+    current, following = f"{major}.{minor}.{patch}", f"{major}.{minor}.{patch + 1}"
+    return current, following, (project[:match.start(2)] + following.encode() +
+                                project[match.end(4):])
 
 
 def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
@@ -2196,24 +2210,29 @@ def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
     config = resolve_trained_models(config)
     iteration = config.iteration(iteration_name)
     candidate = authenticate_candidate(config, iteration)
-    header_metadata = candidate["artifacts"].get("model_header")
-    if not isinstance(header_metadata, dict):
-        raise WorkflowError("candidate report has no model header")
-    source = iteration.candidate_directory / header_metadata["path"]
-    target = config.repository / "engines" / "minimax" / "src" / "frozen_pattern_gain_model.hpp"
-    tracked_digest = sha256_file(target)
     archive = _archive_entry(config, iteration, candidate)
+    net = decode_net(archive.net)
+    target = config.repository / DEFAULT_NET_PATH
+    tracked_digest = sha256_file(target) if target.is_file() else None
+    project_path = config.repository / PROJECT_FILE
+    try:
+        project = project_path.read_bytes()
+    except OSError as error:
+        raise WorkflowError(f"could not read {project_path}: {error}") from error
+    version, next_version, bumped_project = _next_patch_version(project)
     gate = (authenticate_gate(config, iteration, candidate=candidate)
             if iteration.engine_gate is not None and
             _path_state(iteration.gate_directory) == "complete" else None)
+    different = tracked_digest != net.sha256
     preview = {
         "iteration": iteration_name, "promotable": candidate["promotable"],
-        "candidate_header": str(source), "candidate_sha256": header_metadata["sha256"],
-        "tracked_header": str(target), "tracked_sha256": tracked_digest,
+        "net_name": net.name, "net_id": net.net_id, "net_sha256": net.sha256,
+        "archived_net": str(archive.net_path), "archived": _archived_model_state(archive),
+        "tracked_net": str(target), "tracked_sha256": tracked_digest,
         "gate_decision": gate["sequential_decision"] if gate is not None else None,
-        "archived_header": str(archive.header_path),
-        "archived": _archived_model_state(archive),
-        "different": tracked_digest != header_metadata["sha256"], "applied": False,
+        "project_version": version, "installed_project_version": (
+            next_version if different else version),
+        "different": different, "applied": False,
     }
     if not apply:
         return preview
@@ -2234,15 +2253,17 @@ def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
             f"record the gate first: run promote-gate --apply for {iteration_name}, then "
             "commit its ledger row and archived model")
     require_clean_committed(config)
-    if preview["different"]:
+    if different:
+        # A release that changes only the built-in net bumps only the patch version, so every
+        # engine version names one default net.
         try:
-            contents = archive.header_path.read_bytes()
-            if hashlib.sha256(contents).hexdigest() != header_metadata["sha256"]:
-                raise WorkflowError(
-                    f"archived header changed during handoff: {archive.header_path}")
+            contents = archive.net_path.read_bytes()
+            if contents != archive.net:
+                raise WorkflowError(f"archived net changed during handoff: {archive.net_path}")
+            atomic_write_bytes(project_path, bumped_project, replace=True)
             atomic_write_bytes(target, contents, replace=True)
         except OSError as error:
-            raise WorkflowError(f"could not install candidate header at {target}: {error}") from error
+            raise WorkflowError(f"could not install net {net.name} at {target}: {error}") from error
         preview["applied"] = True
     return preview
 

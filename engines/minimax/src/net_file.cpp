@@ -1,11 +1,13 @@
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "poe2/minimax/net.hpp"
@@ -34,11 +36,11 @@ std::shared_ptr<const Net> load_net_file(const std::filesystem::path& path) {
       input.peek() != std::ifstream::traits_type::eof()) {
     throw NetError{"could not read " + label};
   }
-  try {
-    return parse_net(bytes);
-  } catch (const NetError& failure) {
-    throw NetError{label + ": " + failure.what()};
+  std::expected<std::shared_ptr<const Net>, std::string> net = try_parse_net(bytes);
+  if (!net.has_value()) {
+    throw NetError{label + ": " + net.error()};
   }
+  return std::move(*net);
 }
 
 }  // namespace poe2::minimax

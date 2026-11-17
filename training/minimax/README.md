@@ -111,17 +111,23 @@ uv run --frozen poe2-evaluate-pattern \
 
 The sealed-test report verifies that the experiment and feature digests match, removes canonical positions present in the development artifact, and evaluates two-ply closure, the gain-only control, and the float and validation-selected quantized pattern/gain models. It records phase, parity, exact-label, and teacher-label metrics. Reusing an output directory is rejected.
 
-## C++ export and inference parity
+## Net export and inference parity
 
-Export the authenticated selected integer tables from the repository root, then build the release inference checker:
+Export the selected integer tables as a net file ([../../docs/nets.md](../../docs/nets.md)),
+then build the release inference checker from the repository root:
 
 ```bash
-EXPERIMENT_DIR=path/to/completed/pattern-experiment
-python3 tools/export_minimax_pattern_gain.py \
+EXPERIMENT_DIR=../../path/to/completed/pattern-experiment
+uv run --frozen python -m poe2_training.net_export \
   --experiment "$EXPERIMENT_DIR" \
-  --output engines/minimax/src/frozen_pattern_gain_model.hpp
+  --output ../../path/to/new/net.poe2net \
+  --name run9/g001 --parent run9/g000 --teacher run9/g000 --created 2026-11-17
 cmake --build --preset release --target poe2_minimax_infer
 ```
+
+The same report always exports the same bytes. The engine plays a net file with `--net`; the
+built-in net is `engines/minimax/nets/default.poe2net`, which only `poe2-train handoff --apply`
+replaces.
 
 The engine defaults to `--evaluator pattern-gain`. Use `--evaluator two-ply-closure` for the
 unlearned closure evaluator or `--evaluator static` for the raw normalized board score.
@@ -145,6 +151,7 @@ uv run --frozen poe2-verify-pattern-gain \
   --dataset "$FEATURE_DIR" \
   --experiment "$EXPERIMENT_DIR" \
   --inference-binary ../../build/release/engines/minimax/poe2_minimax_infer \
+  --net ../../path/to/new/net.poe2net \
   --samples 4096 \
   --symmetry-samples 512 \
   --benchmark-iterations 100

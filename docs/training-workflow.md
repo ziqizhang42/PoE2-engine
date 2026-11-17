@@ -59,7 +59,7 @@ The candidate promotion sequence is:
 2. Run the iteration: training, candidate validation, and the gate. Candidate validation exports the model as a net file, and the gate plays that file on an engine built from the run's commit, so nothing in the source tree changes.
 3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision. A generation that is gated against a model trained in the same recipe, or reads data taught by one, can be promoted only after that model is archived, so promote a chain's generations in order.
 4. Review and commit the ledger row, archive, and index.
-5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed model header.
+5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed built-in net and the version it raised.
 
 ## Configuration
 
@@ -530,14 +530,14 @@ Both models must already be in the `models/` archive, so every hash in the recor
 
 ## Candidate handoff
 
-Handoff installs a gate winner as the shipped model. It previews the difference by default:
+Handoff installs a gate winner as the engine's built-in net. It previews the difference by default:
 
 ```bash
 uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION"
 uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION" --apply
 ```
 
-Apply requires a promotable candidate, a completed engine gate whose decision is `accept_alt`, a committed ledger row and archive from gate promotion, a clean worktree, and the run lock. It copies the archived header over `engines/minimax/src/frozen_pattern_gain_model.hpp`, atomically and touching nothing else. Review and commit that file. Until the built-in net is itself a net file, only a candidate validated before nets were files can be installed.
+Apply requires a promotable candidate, a completed engine gate whose decision is `accept_alt`, a committed ledger row and archive from gate promotion, a clean worktree, and the run lock. It copies the archived net file over `engines/minimax/nets/default.poe2net` and raises the last number of the project version in `CMakeLists.txt` (for example 0.3.0 to 0.3.1), each atomically and touching nothing else; the preview shows both versions. A candidate validated before nets were files, such as `run1/g001`, installs the net archived for it, converted from its header. Review and commit both files, and add a changelog line naming the new version and its built-in net ([nets.md](nets.md#the-built-in-net)). If the command is cut short, restore both files with Git and rerun it.
 
 ## Lower-level references
 

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <memory>
 #include <span>
 #include <string>
@@ -13,8 +14,8 @@
 #include <vector>
 
 #include "pattern_gain_layout.hpp"
+#include "poe2/minimax/default_net_bytes.hpp"
 #include "poe2/minimax/evaluation.hpp"
-#include "poe2/minimax/model_header.hpp"
 #include "poe2/minimax/sha256.hpp"
 
 namespace poe2::minimax {
@@ -44,41 +45,56 @@ constexpr std::array<std::uint32_t, 5> kPatternGainTableSizes{{
 // int16 weights stay below 2^29 in magnitude, so intercepts get the remaining headroom.
 constexpr std::int32_t kMaximumIntercept = std::int32_t{1} << 24;
 
+// Reads past the end yield zeros and mark the reader truncated, so parsing needs no exceptions;
+// the browser build cannot catch them.
 class Reader final {
  public:
   explicit Reader(std::span<const std::uint8_t> bytes) : bytes_(bytes) {}
 
-  [[nodiscard]] std::span<const std::uint8_t> take(std::size_t count) {
+  [[nodiscard]] std::span<const std::uint8_t> take(std::size_t count) noexcept {
     if (count > bytes_.size() - offset_) {
-      throw NetError{"net file is truncated"};
+      truncated_ = true;
+      offset_ = bytes_.size();
+      return {};
     }
     const std::span<const std::uint8_t> result = bytes_.subspan(offset_, count);
     offset_ += count;
     return result;
   }
 
-  [[nodiscard]] std::uint32_t u32() {
+  [[nodiscard]] std::uint32_t u32() noexcept {
     const std::span<const std::uint8_t> bytes = take(4);
+    if (bytes.empty()) {
+      return 0;
+    }
     return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
            (static_cast<std::uint32_t>(bytes[2]) << 16) |
            (static_cast<std::uint32_t>(bytes[3]) << 24);
   }
 
-  [[nodiscard]] std::int32_t i32() { return static_cast<std::int32_t>(u32()); }
+  [[nodiscard]] std::int32_t i32() noexcept { return static_cast<std::int32_t>(u32()); }
 
-  [[nodiscard]] std::int16_t i16() {
+  [[nodiscard]] std::int16_t i16() noexcept {
     const std::span<const std::uint8_t> bytes = take(2);
+    if (bytes.empty()) {
+      return 0;
+    }
     return static_cast<std::int16_t>(static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(bytes[0]) | (static_cast<std::uint16_t>(bytes[1]) << 8)));
   }
 
-  [[nodiscard]] std::uint8_t u8() { return take(1)[0]; }
+  [[nodiscard]] std::uint8_t u8() noexcept {
+    const std::span<const std::uint8_t> bytes = take(1);
+    return bytes.empty() ? 0 : bytes[0];
+  }
 
   [[nodiscard]] std::size_t offset() const noexcept { return offset_; }
+  [[nodiscard]] bool truncated() const noexcept { return truncated_; }
 
  private:
   std::span<const std::uint8_t> bytes_;
   std::size_t offset_ = 0;
+  bool truncated_ = false;
 };
 
 class Writer final {
@@ -117,33 +133,39 @@ class Writer final {
   return text;
 }
 
-[[nodiscard]] std::string design_name(std::span<const std::uint8_t> field) {
+using Failure = std::unexpected<std::string>;
+
+[[nodiscard]] std::expected<std::string, std::string> design_name(
+    std::span<const std::uint8_t> field) {
   const auto end = std::find(field.begin(), field.end(), std::uint8_t{0});
   if (std::any_of(end, field.end(), [](std::uint8_t byte) { return byte != 0; })) {
-    throw NetError{"net design identifier is malformed"};
+    return Failure{"net design identifier is malformed"};
   }
   std::string name(end - field.begin(), '\0');
   std::copy(field.begin(), end, name.begin());
   if (name.empty() || std::any_of(name.begin(), name.end(), [](char character) {
         return character < '!' || character > '~';
       })) {
-    throw NetError{"net design identifier is malformed"};
+    return Failure{"net design identifier is malformed"};
   }
   return name;
 }
 
+// Returns why the knots do not fit the design, or an empty string.
 template <std::size_t Size>
-void require_knots(const std::array<std::uint8_t, Size>& knots,
-                   const std::array<std::uint8_t, Size>& expected, std::string_view label) {
-  if (knots != expected) {
-    std::string text;
-    for (const std::uint8_t knot : expected) {
-      text += text.empty() ? "" : ", ";
-      text += std::to_string(knot);
-    }
-    throw NetError{"net " + std::string{label} + " knots must be " + text + " in design " +
-                   std::string{kPatternGainDesign}};
+[[nodiscard]] std::string knots_error(const std::array<std::uint8_t, Size>& knots,
+                                      const std::array<std::uint8_t, Size>& expected,
+                                      std::string_view label) {
+  if (knots == expected) {
+    return {};
   }
+  std::string text;
+  for (const std::uint8_t knot : expected) {
+    text += text.empty() ? "" : ", ";
+    text += std::to_string(knot);
+  }
+  return "net " + std::string{label} + " knots must be " + text + " in design " +
+         std::string{kPatternGainDesign};
 }
 
 [[nodiscard]] bool valid_key(std::string_view key) noexcept {
@@ -163,27 +185,28 @@ void require_knots(const std::array<std::uint8_t, Size>& knots,
 
 // Metadata is UTF-8 text of "key=value" lines, each ending in a newline, with keys strictly
 // ascending so that one set of entries has exactly one encoding.
-[[nodiscard]] NetMetadata parse_metadata(std::span<const std::uint8_t> bytes) {
+[[nodiscard]] std::expected<NetMetadata, std::string> parse_metadata(
+    std::span<const std::uint8_t> bytes) {
   const std::string_view text{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
   NetMetadata entries;
   std::size_t begin = 0;
   while (begin < text.size()) {
     const std::size_t end = text.find('\n', begin);
     if (end == std::string_view::npos) {
-      throw NetError{"net metadata must end each line with a newline"};
+      return Failure{"net metadata must end each line with a newline"};
     }
     const std::string_view line = text.substr(begin, end - begin);
     const std::size_t separator = line.find('=');
     if (separator == std::string_view::npos) {
-      throw NetError{"net metadata line has no '=': " + std::string{line}};
+      return Failure{"net metadata line has no '=': " + std::string{line}};
     }
     const std::string_view key = line.substr(0, separator);
     const std::string_view value = line.substr(separator + 1);
     if (!valid_key(key) || !valid_value(value)) {
-      throw NetError{"net metadata line is malformed: " + std::string{line}};
+      return Failure{"net metadata line is malformed: " + std::string{line}};
     }
     if (!entries.empty() && entries.back().first >= key) {
-      throw NetError{"net metadata keys must be unique and in ascending order"};
+      return Failure{"net metadata keys must be unique and in ascending order"};
     }
     entries.emplace_back(std::string{key}, std::string{value});
     begin = end + 1;
@@ -191,7 +214,7 @@ void require_knots(const std::array<std::uint8_t, Size>& knots,
   const auto name = std::find_if(entries.begin(), entries.end(),
                                  [](const auto& entry) { return entry.first == "name"; });
   if (name == entries.end() || name->second.empty()) {
-    throw NetError{"net metadata has no name"};
+    return Failure{"net metadata has no name"};
   }
   return entries;
 }
@@ -207,7 +230,7 @@ void require_knots(const std::array<std::uint8_t, Size>& knots,
   return text;
 }
 
-[[nodiscard]] PatternGainParameters read_pattern_gain(Reader& reader) {
+[[nodiscard]] PatternGainParameters read_pattern_gain(Reader& reader) noexcept {
   PatternGainParameters parameters;
   for (std::uint8_t& knot : parameters.line_knots) {
     knot = reader.u8();
@@ -227,18 +250,7 @@ void require_knots(const std::array<std::uint8_t, Size>& knots,
   return parameters;
 }
 
-void validate_pattern_gain(const PatternGainParameters& parameters) {
-  require_knots(parameters.line_knots, kPatternGainLineKnots, "line");
-  require_knots(parameters.gain_knots, kPatternGainKnots, "gain");
-  if (std::any_of(parameters.intercept.begin(), parameters.intercept.end(), [](std::int32_t value) {
-        return value < -kMaximumIntercept || value > kMaximumIntercept;
-      })) {
-    throw NetError{"net intercepts must lie within +/-2^24"};
-  }
-}
-
 [[nodiscard]] PatternGainTables make_tables(const PatternGainParameters& parameters) {
-  validate_pattern_gain(parameters);
   PatternGainTables tables;
   for (std::size_t pattern = 0; pattern < tables.raw_line_weights.size(); ++pattern) {
     const std::size_t orbit = pattern_gain::kRawToReversalOrbit[pattern];
@@ -264,19 +276,32 @@ void validate_pattern_gain(const PatternGainParameters& parameters) {
          });
 }
 
-[[nodiscard]] PatternGainParameters compiled_header_parameters() {
-  namespace header = frozen_pattern_gain_model;
-  static_assert(header::kFractionalBits == kPatternGainFractionalBits);
-  static_assert(header::kReversalOrbitCount == kPatternGainOrbitCount);
-  static_assert(header::kGainFeatureCount == kPatternGainFeatureCount);
-  PatternGainParameters parameters;
-  std::copy(header::kLineKnots.begin(), header::kLineKnots.end(), parameters.line_knots.begin());
-  std::copy(header::kGainKnots.begin(), header::kGainKnots.end(), parameters.gain_knots.begin());
-  std::copy(header::kIntercept.begin(), header::kIntercept.end(), parameters.intercept.begin());
-  std::copy(header::kLineWeights.begin(), header::kLineWeights.end(),
-            parameters.line_weights.begin());
-  std::copy(header::kGainWeights.begin(), header::kGainWeights.end(),
-            parameters.gain_weights.begin());
+// Returns why these contents cannot make a net of the design, or an empty string.
+[[nodiscard]] std::string contents_error(const NetMetadata& metadata,
+                                         const PatternGainParameters& parameters) {
+  for (std::string error : {knots_error(parameters.line_knots, kPatternGainLineKnots, "line"),
+                            knots_error(parameters.gain_knots, kPatternGainKnots, "gain")}) {
+    if (!error.empty()) {
+      return error;
+    }
+  }
+  if (std::any_of(parameters.intercept.begin(), parameters.intercept.end(), [](std::int32_t value) {
+        return value < -kMaximumIntercept || value > kMaximumIntercept;
+      })) {
+    return "net intercepts must lie within +/-2^24";
+  }
+  const std::string header = metadata_lookup(metadata, "header_sha256");
+  if (!header.empty() && !is_sha256_hex(header)) {
+    return "net metadata header_sha256 must be a SHA-256 hex digest";
+  }
+  return {};
+}
+
+[[nodiscard]] PatternGainParameters checked_contents(const NetMetadata& metadata,
+                                                     const PatternGainParameters& parameters) {
+  if (const std::string error = contents_error(metadata, parameters); !error.empty()) {
+    throw NetError{error};
+  }
   return parameters;
 }
 
@@ -285,12 +310,9 @@ void validate_pattern_gain(const PatternGainParameters& parameters) {
 Net::Net(std::string sha256, NetMetadata metadata, const PatternGainParameters& parameters)
     : sha256_(std::move(sha256)),
       metadata_(std::move(metadata)),
-      parameters_(parameters),
-      tables_(make_tables(parameters)) {
+      parameters_(checked_contents(metadata_, parameters)),
+      tables_(make_tables(parameters_)) {
   const std::string header = metadata_lookup(metadata_, "header_sha256");
-  if (!header.empty() && !is_sha256_hex(header)) {
-    throw NetError{"net metadata header_sha256 must be a SHA-256 hex digest"};
-  }
   id_ = (header.empty() ? sha256_ : header).substr(0, 12);
 }
 
@@ -304,38 +326,46 @@ std::string_view Net::metadata_value(std::string_view key) const noexcept {
 
 std::span<const std::string_view> supported_net_designs() noexcept { return kSupportedDesigns; }
 
-std::shared_ptr<const Net> parse_net(std::span<const std::uint8_t> bytes) {
+std::expected<std::shared_ptr<const Net>, std::string> try_parse_net(
+    std::span<const std::uint8_t> bytes) {
   if (bytes.size() < kMagic.size() || !std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
-    throw NetError{"not a PoE2 net file"};
+    return Failure{"not a PoE2 net file"};
   }
   Reader reader{bytes};
   static_cast<void>(reader.take(kMagic.size()));
   const std::uint32_t version = reader.u32();
+  if (reader.truncated()) {
+    return Failure{"net file is truncated"};
+  }
   if (version != kContainerVersion) {
-    throw NetError{"net file uses container format " + std::to_string(version) +
+    return Failure{"net file uses container format " + std::to_string(version) +
                    "; this engine reads format " + std::to_string(kContainerVersion)};
   }
   const std::uint32_t header_bytes = reader.u32();
-  if (bytes.size() < header_bytes + kTrailerBytes || header_bytes < kFixedHeaderBytes + 4) {
-    throw NetError{"net file is truncated"};
+  if (reader.truncated() || bytes.size() < header_bytes + kTrailerBytes ||
+      header_bytes < kFixedHeaderBytes + 4) {
+    return Failure{"net file is truncated"};
   }
   const std::span<const std::uint8_t> body = bytes.first(bytes.size() - kTrailerBytes);
   const labeling::Sha256Digest digest = labeling::sha256(body);
   if (!std::equal(digest.begin(), digest.end(), bytes.end() - kTrailerBytes)) {
-    throw NetError{"net file is damaged: its integrity check does not match its contents"};
+    return Failure{"net file is damaged: its integrity check does not match its contents"};
   }
 
-  const std::string design = design_name(reader.take(kDesignBytes));
-  if (std::find(kSupportedDesigns.begin(), kSupportedDesigns.end(), design) ==
+  const std::expected<std::string, std::string> design = design_name(reader.take(kDesignBytes));
+  if (!design.has_value()) {
+    return Failure{design.error()};
+  }
+  if (std::find(kSupportedDesigns.begin(), kSupportedDesigns.end(), *design) ==
       kSupportedDesigns.end()) {
-    throw NetError{"net design \"" + design + "\" is not supported by this engine (supported: " +
+    return Failure{"net design \"" + *design + "\" is not supported by this engine (supported: " +
                    supported_design_list() + ")"};
   }
   const std::uint32_t fractional_bits = reader.u32();
   const std::uint32_t table_count = reader.u32();
   if (table_count > kMaximumTables ||
       header_bytes != kFixedHeaderBytes + (std::size_t{4} * table_count) + 4) {
-    throw NetError{"net file header is malformed"};
+    return Failure{"net file header is malformed"};
   }
   std::vector<std::uint32_t> table_sizes(table_count);
   for (std::uint32_t& size : table_sizes) {
@@ -343,27 +373,45 @@ std::shared_ptr<const Net> parse_net(std::span<const std::uint8_t> bytes) {
   }
   const std::uint32_t metadata_bytes = reader.u32();
   if (fractional_bits != static_cast<std::uint32_t>(kPatternGainFractionalBits)) {
-    throw NetError{"net design " + design + " requires " +
+    return Failure{"net design " + *design + " requires " +
                    std::to_string(kPatternGainFractionalBits) + " fractional bits; the file has " +
                    std::to_string(fractional_bits)};
   }
   if (!std::ranges::equal(table_sizes, kPatternGainTableSizes)) {
-    throw NetError{"net table sizes do not match design " + design};
+    return Failure{"net table sizes do not match design " + *design};
   }
   if (metadata_bytes > kMaximumMetadataBytes) {
-    throw NetError{"net metadata is larger than " + std::to_string(kMaximumMetadataBytes) +
+    return Failure{"net metadata is larger than " + std::to_string(kMaximumMetadataBytes) +
                    " bytes"};
   }
 
   Reader body_reader{body};
   static_cast<void>(body_reader.take(header_bytes));
   const PatternGainParameters parameters = read_pattern_gain(body_reader);
-  NetMetadata metadata = parse_metadata(body_reader.take(metadata_bytes));
+  const std::span<const std::uint8_t> metadata_text = body_reader.take(metadata_bytes);
+  if (body_reader.truncated()) {
+    return Failure{"net file is truncated"};
+  }
   if (body_reader.offset() != body.size()) {
-    throw NetError{"net file has unexpected bytes after its metadata"};
+    return Failure{"net file has unexpected bytes after its metadata"};
+  }
+  std::expected<NetMetadata, std::string> metadata = parse_metadata(metadata_text);
+  if (!metadata.has_value()) {
+    return Failure{metadata.error()};
+  }
+  if (std::string error = contents_error(*metadata, parameters); !error.empty()) {
+    return Failure{std::move(error)};
   }
   return std::make_shared<const Net>(labeling::sha256_text(labeling::sha256(bytes)),
-                                     std::move(metadata), parameters);
+                                     std::move(*metadata), parameters);
+}
+
+std::shared_ptr<const Net> parse_net(std::span<const std::uint8_t> bytes) {
+  std::expected<std::shared_ptr<const Net>, std::string> net = try_parse_net(bytes);
+  if (!net.has_value()) {
+    throw NetError{net.error()};
+  }
+  return std::move(*net);
 }
 
 std::vector<std::uint8_t> serialize_net(std::string_view design, const NetMetadata& metadata,
@@ -408,9 +456,7 @@ std::vector<std::uint8_t> serialize_net(std::string_view design, const NetMetada
 }
 
 const std::shared_ptr<const Net>& default_net() {
-  static const std::shared_ptr<const Net> net = std::make_shared<const Net>(
-      std::string{kModelHeaderSha256}, NetMetadata{{"name", "compiled-header"}},
-      compiled_header_parameters());
+  static const std::shared_ptr<const Net> net = parse_net(kDefaultNetBytes);
   return net;
 }
 

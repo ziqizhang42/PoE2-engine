@@ -1,0 +1,16 @@
+#ifndef POE2_MINIMAX_DEFAULT_NET_BYTES_HPP
+#define POE2_MINIMAX_DEFAULT_NET_BYTES_HPP
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+namespace poe2::minimax {
+
+// Generated at configure time from engines/minimax/nets/default.poe2net.
+inline constexpr std::array<std::uint8_t, @POE2_MINIMAX_DEFAULT_NET_SIZE@> kDefaultNetBytes{
+    {@POE2_MINIMAX_DEFAULT_NET_BYTES@}};
+
+}  // namespace poe2::minimax
+
+#endif  // POE2_MINIMAX_DEFAULT_NET_BYTES_HPP

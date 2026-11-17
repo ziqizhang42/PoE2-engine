@@ -238,10 +238,6 @@ std::string_view label_mode_name(LabelMode mode) noexcept {
   return "unknown";
 }
 
-std::string_view net_provenance_key(const Net& net) noexcept {
-  return &net == default_net().get() ? "model_header_sha256" : "net_sha256";
-}
-
 bool is_data_evaluator(Evaluator evaluator) noexcept {
   // Label targets and terminal depths assume the two-empty closure that both of these share.
   return evaluator == Evaluator::kTwoPlyClosure || evaluator == Evaluator::kPatternGain;
@@ -534,8 +530,7 @@ std::string serialize_manifest(const LabelDataset& dataset, const Sha256Digest& 
          << "  \"search\": {\n"
          << "    \"evaluator\": \"" << evaluator_name(dataset.options.evaluator) << "\",\n";
   if (dataset.options.evaluator == Evaluator::kPatternGain) {
-    output << "    \"" << net_provenance_key(*dataset.options.net) << "\": \""
-           << json_escape(dataset.options.net->sha256()) << "\",\n";
+    output << "    \"net_sha256\": \"" << json_escape(dataset.options.net->sha256()) << "\",\n";
   }
   output << "    \"mode\": \"" << label_mode_name(dataset.options.mode) << "\",\n"
          << "    \"node_limit\": " << dataset.options.node_limit << ",\n"

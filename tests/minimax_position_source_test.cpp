@@ -291,9 +291,8 @@ TEST_CASE("noisy-search sources can use the compiled pattern-gain model",
   const std::string manifest = position_source::serialize_source_manifest(
       serial, position_source::serialize_source_shards(serial));
   REQUIRE(manifest.find("\"evaluator\": \"pattern-gain\"") != std::string::npos);
-  REQUIRE(manifest.find("\"model_header_sha256\": \"" +
-                        std::string{poe2::minimax::default_net()->sha256()} + "\"") !=
-          std::string::npos);
+  REQUIRE(manifest.find("\"net_sha256\": \"" + std::string{poe2::minimax::default_net()->sha256()} +
+                        "\"") != std::string::npos);
 
   options.evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
   const position_source::PositionSourceCorpus closure =
@@ -301,7 +300,7 @@ TEST_CASE("noisy-search sources can use the compiled pattern-gain model",
   const std::string closure_manifest = position_source::serialize_source_manifest(
       closure, position_source::serialize_source_shards(closure));
   REQUIRE(closure_manifest.find("\"evaluator\": \"two-ply-closure\"") != std::string::npos);
-  REQUIRE(closure_manifest.find("model_header_sha256") == std::string::npos);
+  REQUIRE(closure_manifest.find("net_sha256") == std::string::npos);
 
   options.evaluator = poe2::minimax::Evaluator::kStatic;
   REQUIRE_THROWS_AS(position_source::generate_position_source(options), std::invalid_argument);

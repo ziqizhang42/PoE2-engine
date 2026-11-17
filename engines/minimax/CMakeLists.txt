@@ -11,14 +11,18 @@ add_library(poe2_minimax_engine STATIC
 
 add_library(poe2::minimax_engine ALIAS poe2_minimax_engine)
 
-# Data artifacts record which model a pattern-gain teacher compiled in, so the digest must
-# follow the header's contents, not just its path.
-file(SHA256 "${POE2_MINIMAX_MODEL_HEADER}" POE2_MINIMAX_MODEL_HEADER_SHA256)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POE2_MINIMAX_MODEL_HEADER}")
-
+# The built-in net is the net file nets/default.poe2net, compiled in byte for byte and loaded
+# like any other net file. `poe2-train handoff --apply` replaces that file.
+set(POE2_MINIMAX_DEFAULT_NET "${CMAKE_CURRENT_SOURCE_DIR}/nets/default.poe2net")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POE2_MINIMAX_DEFAULT_NET}")
+file(READ "${POE2_MINIMAX_DEFAULT_NET}" POE2_MINIMAX_DEFAULT_NET_HEX HEX)
+string(LENGTH "${POE2_MINIMAX_DEFAULT_NET_HEX}" POE2_MINIMAX_DEFAULT_NET_HEX_LENGTH)
+math(EXPR POE2_MINIMAX_DEFAULT_NET_SIZE "${POE2_MINIMAX_DEFAULT_NET_HEX_LENGTH} / 2")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," POE2_MINIMAX_DEFAULT_NET_BYTES
+       "${POE2_MINIMAX_DEFAULT_NET_HEX}")
 configure_file(
-  src/model_header.hpp.in
-  ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/model_header.hpp
+  src/default_net_bytes.hpp.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/default_net_bytes.hpp
   @ONLY
 )
 
@@ -27,8 +31,6 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/engine_version.hpp
   @ONLY
 )
-
-target_sources(poe2_minimax_engine PRIVATE ${POE2_MINIMAX_MODEL_HEADER})
 
 target_include_directories(poe2_minimax_engine
   PUBLIC

@@ -468,7 +468,7 @@ TEST_CASE("teacher labels can use the compiled pattern-gain model and record its
   const std::string manifest = poe2::minimax::labeling::serialize_manifest(
       dataset, poe2::minimax::labeling::sha256("pattern binary"));
   REQUIRE(manifest.find("\"evaluator\": \"pattern-gain\"") != std::string::npos);
-  REQUIRE(manifest.find("\"model_header_sha256\": \"" + std::string{model_digest} + "\"") !=
+  REQUIRE(manifest.find("\"net_sha256\": \"" + std::string{model_digest} + "\"") !=
           std::string::npos);
 
   options.evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
@@ -476,7 +476,7 @@ TEST_CASE("teacher labels can use the compiled pattern-gain model and record its
       poe2::minimax::labeling::generate_labels(inputs, options, label_source("closure fixture")),
       poe2::minimax::labeling::sha256("closure binary"));
   REQUIRE(closure_manifest.find("\"evaluator\": \"two-ply-closure\"") != std::string::npos);
-  REQUIRE(closure_manifest.find("model_header_sha256") == std::string::npos);
+  REQUIRE(closure_manifest.find("net_sha256") == std::string::npos);
 
   options.evaluator = poe2::minimax::Evaluator::kStatic;
   REQUIRE_THROWS_AS(

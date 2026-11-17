@@ -147,9 +147,6 @@ class DatasetOutput final {
 };
 
 [[nodiscard]] std::string_view label_mode_name(LabelMode mode) noexcept;
-// The manifest key that names a pattern-gain evaluator's model: "net_sha256" for a net file, and
-// "model_header_sha256" for a net compiled from a C++ header, the form earlier data recorded.
-[[nodiscard]] std::string_view net_provenance_key(const Net& net) noexcept;
 [[nodiscard]] bool is_data_evaluator(Evaluator evaluator) noexcept;
 [[nodiscard]] std::string_view dataset_split_name(DatasetSplit split) noexcept;
 [[nodiscard]] std::uint64_t stable_digest(std::string_view bytes) noexcept;

@@ -83,11 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     handoff = subparsers.add_parser(
-        "handoff", help="preview or install a recorded gate winner's header")
+        "handoff", help="preview or install a recorded gate winner as the built-in net")
     _config_argument(handoff)
     _iteration_argument(handoff)
     handoff.add_argument("--apply", action="store_true",
-                         help="atomically replace the tracked generated header")
+                         help="replace the built-in net file and bump the patch version")
 
     promote = subparsers.add_parser(
         "promote-gate",

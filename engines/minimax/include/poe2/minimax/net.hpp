@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <memory>
 #include <span>
@@ -80,7 +81,11 @@ class Net final {
 
 [[nodiscard]] std::span<const std::string_view> supported_net_designs() noexcept;
 
-// Parses and validates a complete net file. Throws NetError with a reason the user can act on.
+// Parses and validates a complete net file, or returns a reason the user can act on. It does not
+// throw for a bad file, so builds that cannot catch exceptions (the browser package) can use it.
+[[nodiscard]] std::expected<std::shared_ptr<const Net>, std::string> try_parse_net(
+    std::span<const std::uint8_t> bytes);
+// The same, throwing NetError with the reason.
 [[nodiscard]] std::shared_ptr<const Net> parse_net(std::span<const std::uint8_t> bytes);
 [[nodiscard]] std::shared_ptr<const Net> load_net_file(const std::filesystem::path& path);
 

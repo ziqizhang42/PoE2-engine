@@ -178,7 +178,7 @@ if(NOT teacher_source_result EQUAL 0)
 endif()
 file(READ "${teacher_source}/manifest.json" teacher_source_manifest)
 if(NOT teacher_source_manifest MATCHES "\"evaluator\": \"pattern-gain\"" OR
-   NOT teacher_source_manifest MATCHES "\"model_header_sha256\": \"[0-9a-f]+\"")
+   NOT teacher_source_manifest MATCHES "\"net_sha256\": \"[0-9a-f]+\"")
   message(FATAL_ERROR "teacher source manifest does not record its model")
 endif()
 execute_process(
@@ -255,7 +255,7 @@ if(NOT teacher_feature_result EQUAL 0)
 endif()
 file(READ "${teacher_features}/manifest.json" teacher_feature_manifest)
 if(NOT teacher_feature_manifest MATCHES
-   "\"evaluator\": \"pattern-gain\", \"model_header_sha256\": \"[0-9a-f]+\"")
+   "\"evaluator\": \"pattern-gain\", \"net_sha256\": \"[0-9a-f]+\"")
   message(FATAL_ERROR "teacher features do not record the label model")
 endif()
 execute_process(

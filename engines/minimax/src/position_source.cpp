@@ -1032,8 +1032,7 @@ constexpr std::uint32_t kChunkSchemaVersion = 1;
          << ",\"policy_weights\":[" << options.policy_weights.random << ','
          << options.policy_weights.immediate_gain << ',' << options.policy_weights.opponent_aware
          << ',' << options.policy_weights.noisy_search << "],\"evaluator\":\""
-         << evaluator_name(options.evaluator) << "\",\""
-         << labeling::net_provenance_key(*options.net) << "\":\"" << options.net->sha256()
+         << evaluator_name(options.evaluator) << "\",\"net_sha256\":\"" << options.net->sha256()
          << "\",\"git_commit\":\"" << labeling::build::kGitCommit
          << "\",\"git_dirty\":" << (labeling::build::kGitDirty ? "true" : "false") << "}\n";
   return output.str();
@@ -1084,9 +1083,7 @@ constexpr std::uint32_t kChunkSchemaVersion = 1;
   chunk.options.policy_weights.noisy_search = parser.decimal<std::uint32_t>();
   parser.literal("],\"evaluator\":");
   const std::string_view evaluator = parser.quoted();
-  parser.literal(",\"");
-  parser.literal(labeling::net_provenance_key(net));
-  parser.literal("\":");
+  parser.literal(",\"net_sha256\":");
   const std::string_view model = parser.quoted();
   parser.literal(",\"git_commit\":");
   const std::string_view commit = parser.quoted();
@@ -1245,8 +1242,7 @@ std::string serialize_source_manifest(const PositionSourceCorpus& corpus,
          << ",\n"
          << "    \"evaluator\": \"" << evaluator_name(corpus.options.evaluator) << "\",\n";
   if (corpus.options.evaluator == Evaluator::kPatternGain) {
-    output << "    \"" << labeling::net_provenance_key(*corpus.options.net) << "\": \""
-           << json_escape(corpus.options.net->sha256()) << "\",\n";
+    output << "    \"net_sha256\": \"" << json_escape(corpus.options.net->sha256()) << "\",\n";
   }
   output << "    \"policy_weights\": {\"random\": " << corpus.options.policy_weights.random
          << ", \"immediate_gain\": " << corpus.options.policy_weights.immediate_gain

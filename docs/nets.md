@@ -29,6 +29,20 @@ net run1/g000 633309adb322 a52d5a8118ba116bf07469dba37c08022e7416b19544e823a2626
 The engine sends the same three facts during the protocol handshake, as `id version ...`,
 `id designs ...`, and `id net ...` lines between `id name minimax` and `poe2ok`.
 
+## The built-in net
+
+The built-in net is the net file `engines/minimax/nets/default.poe2net`. The build embeds it
+byte for byte in the engine, the inference tool, the data tool, and the browser package, and
+loads it through the same checks as a file given with `--net`, so a built-in net and the same
+file loaded with `--net` play identically and record the same SHA-256 in data manifests. It is
+v0.2 (`run1/g000`).
+
+Only `poe2-train handoff --apply` replaces it, with a gate winner already archived under
+`models/` ([training-workflow.md](training-workflow.md#candidate-handoff)). The same command
+raises the last number of the project version in `CMakeLists.txt` (0.3.0 to 0.3.1), so every
+engine version has exactly one built-in net: a release that changes only the built-in net
+bumps the patch number, and release notes name the engine version and its built-in net.
+
 ## Names and IDs
 
 Every net has one readable name, `<run>/<generation>` (for example `run1/g001`), and one ID:

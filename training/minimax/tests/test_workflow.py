@@ -18,7 +18,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest import mock
 
-from fixture import archive_net, net_bytes, moved_repository, repository_temporary_directory, write_feature_fixture
+from fixture import (REFERENCE_NET, archive_net, net_bytes, moved_repository,
+                     repository_temporary_directory, write_feature_fixture)
 from test_workflow_generations import V02
 from poe2_training.pattern_suites import pattern_suite
 from poe2_training.shared import (
@@ -1144,7 +1145,7 @@ class WorkflowPromotionTest(unittest.TestCase):
         })
 
     def _isolated_repository(self, name: str, *, ledger_header: list[str] | None = None,
-                             tracked_header: bytes | None = None):
+                             tracked_net: bytes | None = None):
         repository = self.root / name
         repository.mkdir()
         (repository / ".gitignore").write_text("eval/results.csv.lock\n", encoding="utf-8")
@@ -1153,10 +1154,12 @@ class WorkflowPromotionTest(unittest.TestCase):
             with (repository / "eval" / "results.csv").open(
                     "w", newline="", encoding="utf-8") as destination:
                 csv.writer(destination, lineterminator="\n").writerow(ledger_header)
-        if tracked_header is not None:
-            path = repository / "engines/minimax/src/frozen_pattern_gain_model.hpp"
+        if tracked_net is not None:
+            path = repository / "engines/minimax/nets/default.poe2net"
             path.parent.mkdir(parents=True)
-            path.write_bytes(tracked_header)
+            path.write_bytes(tracked_net)
+            (repository / "CMakeLists.txt").write_text(
+                "project(\n  PoE2\n  VERSION 0.3.0\n  LANGUAGES CXX\n)\n", encoding="utf-8")
         config_path = repository / "promotion.toml"
         config_path.write_bytes(self.config.contents)
         subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
@@ -1563,7 +1566,7 @@ class WorkflowPromotionTest(unittest.TestCase):
 
     def test_engine_gate_builds_its_commit_once_and_plays_the_candidate_net(self) -> None:
         self._candidate()
-        tracked = REPOSITORY / "engines/minimax/src/frozen_pattern_gain_model.hpp"
+        tracked = REPOSITORY / "engines/minimax/nets/default.poe2net"
         tracked_digest = sha256_file(tracked)
         commands = self._gate_commands()
         build = (self.iteration.gate_directory / "builds" / "000007-111111111111" /
@@ -1723,13 +1726,11 @@ class WorkflowPromotionTest(unittest.TestCase):
             handoff_candidate(self.config, "candidate", apply=True)
 
     def test_handoff_installs_only_a_recorded_gate_winner(self) -> None:
-        self._candidate(legacy=True)
-        ledger_header, _ = self._header_gate()
+        self._candidate()
+        ledger_header, _ = self._gate()
         repository, isolated = self._isolated_repository(
-            "handoff-repository", ledger_header=ledger_header,
-            tracked_header=b"tracked header\n")
-        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
-        tracked = repository / "engines/minimax/src/frozen_pattern_gain_model.hpp"
+            "handoff-repository", ledger_header=ledger_header, tracked_net=REFERENCE_NET.read_bytes())
+        tracked = repository / "engines/minimax/nets/default.poe2net"
 
         with self.assertRaisesRegex(WorkflowError, "record the gate first"):
             handoff_candidate(isolated, "candidate", apply=True)
@@ -1738,17 +1739,48 @@ class WorkflowPromotionTest(unittest.TestCase):
             handoff_candidate(isolated, "candidate", apply=True)
         self._commit_all(repository, "record gate")
 
+        candidate_net = candidate_net_path(self.iteration).read_bytes()
         preview = handoff_candidate(isolated, "candidate")
         self.assertTrue(preview["different"])
         self.assertTrue(preview["archived"])
+        self.assertEqual((preview["net_name"], preview["net_sha256"]),
+                         ("promotion-test/candidate", hashlib.sha256(candidate_net).hexdigest()))
+        self.assertEqual((preview["project_version"], preview["installed_project_version"]),
+                         ("0.3.0", "0.3.1"))
+        self.assertEqual(tracked.read_bytes(), REFERENCE_NET.read_bytes())
         result = handoff_candidate(isolated, "candidate", apply=True)
         self.assertTrue(result["applied"])
-        self.assertEqual(tracked.read_bytes(), candidate_header.read_bytes())
+        self.assertEqual(tracked.read_bytes(), candidate_net)
+        self.assertIn(b"VERSION 0.3.1\n", (repository / "CMakeLists.txt").read_bytes())
         status = subprocess.run(
             ["git", "status", "--short"], cwd=repository,
             check=True, capture_output=True, text=True).stdout.splitlines()
-        self.assertEqual(
-            status, [" M engines/minimax/src/frozen_pattern_gain_model.hpp"])
+        self.assertEqual(status, [" M CMakeLists.txt", " M engines/minimax/nets/default.poe2net"])
+        self._commit_all(repository, "install the candidate")
+
+        again = handoff_candidate(isolated, "candidate", apply=True)
+        self.assertFalse(again["different"])
+        self.assertFalse(again["applied"])
+        self.assertEqual(again["installed_project_version"], "0.3.1")
+
+    def test_handoff_installs_a_winner_validated_before_nets_were_files_as_its_net(self) -> None:
+        self._candidate(legacy=True)
+        ledger_header, _ = self._header_gate()
+        repository, isolated = self._isolated_repository(
+            "legacy-handoff-repository", ledger_header=ledger_header,
+            tracked_net=REFERENCE_NET.read_bytes())
+        promote_gate(isolated, "candidate", apply=True)
+        self._commit_all(repository, "record gate")
+        header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
+        model_id = f"candidate-sha256-{sha256_file(header)}"
+        archived = (repository / "models" / f"{model_id}.poe2net").read_bytes()
+
+        result = handoff_candidate(isolated, "candidate", apply=True)
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["net_id"], model_id[17:29])
+        installed = repository / "engines/minimax/nets/default.poe2net"
+        self.assertEqual(installed.read_bytes(), archived)
+        self.assertEqual(decode_net(archived).metadata["header_sha256"], model_id[17:])
 
     def test_promotion_archives_the_model_and_its_metrics(self) -> None:
         self._candidate()
