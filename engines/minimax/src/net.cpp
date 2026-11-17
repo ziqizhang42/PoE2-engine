@@ -252,11 +252,11 @@ template <std::size_t Size>
 
 [[nodiscard]] PatternGainTables make_tables(const PatternGainParameters& parameters) {
   PatternGainTables tables;
-  for (std::size_t pattern = 0; pattern < tables.raw_line_weights.size(); ++pattern) {
-    const std::size_t orbit = pattern_gain::kRawToReversalOrbit[pattern];
-    for (std::size_t knot = 0; knot < kPatternGainLineKnotCount; ++knot) {
-      tables.raw_line_weights[pattern][knot] =
-          parameters.line_weights[knot * kPatternGainOrbitCount + orbit];
+  for (std::size_t knot = 0; knot < kPatternGainLineKnotCount; ++knot) {
+    for (std::size_t pattern = 0; pattern < kPatternGainRawPatternCount; ++pattern) {
+      tables.raw_line_weights[knot][pattern] =
+          parameters.line_weights[knot * kPatternGainOrbitCount +
+                                  pattern_gain::kRawToReversalOrbit[pattern]];
     }
   }
   tables.intercept = parameters.intercept;

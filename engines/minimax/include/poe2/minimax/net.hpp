@@ -38,7 +38,8 @@ inline constexpr std::array<std::uint8_t, kPatternGainKnotCount> kPatternGainKno
 
 // The evaluator's lookup layout. A net fills it once when loaded; search reads it unchanged.
 struct PatternGainTables {
-  std::array<std::array<std::int16_t, kPatternGainLineKnotCount>, kPatternGainRawPatternCount>
+  // Knot-major: weight [knot][raw pattern], so an evaluation reads two whole rows.
+  std::array<std::array<std::int16_t, kPatternGainRawPatternCount>, kPatternGainLineKnotCount>
       raw_line_weights{};
   std::array<std::int32_t, kPatternGainPlyCount> intercept{};
   std::array<std::int16_t, kPatternGainKnotCount * kPatternGainFeatureCount> gain_weights{};

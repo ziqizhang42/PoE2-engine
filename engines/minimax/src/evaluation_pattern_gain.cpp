@@ -158,8 +158,9 @@ struct GainEvaluation {
   return negative ? -rounded : rounded;
 }
 
-// The phase knots bracketing a ply: interpolation reads only these two, so only their sums are
-// accumulated.
+// The two phase knots bracketing a ply, the only ones interpolation reads. Summing weights for
+// these alone keeps the browser build, which cannot fold weights into its code now that they are
+// loaded, as fast as it was with compiled-in weights.
 struct KnotPair {
   std::size_t lower = 0;
   int left = 0;
@@ -196,14 +197,16 @@ template <std::size_t KnotCount>
   accumulate_line_codes<1>(codes, own_pieces);
   accumulate_line_codes<2>(codes, opponent_pieces);
   const KnotPair pair = bracketing_knots(kPatternGainLineKnots, position.ply());
-  std::int64_t lower_sum = 0;
-  std::int64_t upper_sum = 0;
+  const auto& lower_weights = tables.raw_line_weights[pair.lower];
+  const auto& upper_weights = tables.raw_line_weights[pair.lower + 1];
+  // 36 int16 weights cannot overflow an int32 sum.
+  std::int32_t lower_sum = 0;
+  std::int32_t upper_sum = 0;
   for (std::size_t line_index = 0; line_index < kScoringLines.size(); ++line_index) {
-    const pattern_gain::ScoringLine& line = kScoringLines[line_index];
-    const std::size_t pattern = kPatternOffsets[line.length] + codes[line_index];
-    const auto& weights = tables.raw_line_weights[pattern];
-    lower_sum += weights[pair.lower];
-    upper_sum += weights[pair.lower + 1];
+    const std::size_t pattern =
+        kPatternOffsets[kScoringLines[line_index].length] + codes[line_index];
+    lower_sum += lower_weights[pattern];
+    upper_sum += upper_weights[pattern];
   }
   return interpolate(lower_sum, upper_sum, pair, position.ply());
 }
