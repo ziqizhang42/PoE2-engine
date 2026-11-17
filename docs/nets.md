@@ -18,7 +18,7 @@ does anything else, with the reason: not a net file, damaged, a container format
 this engine does not support, or tables that do not fit the design.
 
 `poe2_minimax --version` prints what the engine is and which net it would use (add `--net`
-to check a file):
+to check a file). Engine 0.3.0, for example, printed:
 
 ```text
 version 0.3.0
