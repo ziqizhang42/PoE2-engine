@@ -33,12 +33,14 @@ constexpr std::array<std::string_view, 1> kSupportedDesigns{{kPatternGainDesign}
 
 // pattern-gain-v1 tables, in file order: line knots (u8), gain knots (u8), intercepts (i32),
 // line weights (i16), gain weights (i16).
+constexpr std::size_t kLineWeightCount = kPatternGainLineKnotCount * kPatternGainOrbitCount;
+constexpr std::size_t kGainWeightCount = kPatternGainKnotCount * kPatternGainFeatureCount;
 constexpr std::array<std::uint32_t, 5> kPatternGainTableSizes{{
     kPatternGainLineKnotCount,
     kPatternGainKnotCount,
     kPatternGainPlyCount,
-    kPatternGainLineKnotCount* kPatternGainOrbitCount,
-    kPatternGainKnotCount* kPatternGainFeatureCount,
+    kLineWeightCount,
+    kGainWeightCount,
 }};
 
 // Bounds every evaluation well inside the search's int32 window: the line and gain residuals of
