@@ -68,3 +68,19 @@ seed = 20261114
 name = "g002"
 parent = "g001"
 seed = 20261117
+
+# Fixed-length matches on the same openings, so each generation's score against g000 can be
+# compared with the other's.
+[[comparisons]]
+new = "g001"
+base = "g000"
+games = 1000
+sequential_stop = false
+opening_seed = 20261117
+
+[[comparisons]]
+new = "g002"
+base = "g000"
+games = 1000
+sequential_stop = false
+opening_seed = 20261117
