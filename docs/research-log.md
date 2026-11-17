@@ -4,6 +4,24 @@ Experiments that answered a question about what to try next, newest first. Each 
 the question, what was measured, and the conclusion drawn from it. Release notes are in
 `CHANGELOG.md`; game results are in `eval/results.csv` and `models/`.
 
+## 2026-11-17: do the gains of g001 and g002 add up against v0.2?
+
+No. g001 and g002 each played v0.2 for 1,000 games on the same 500 openings.
+
+| Against v0.2 | g001 | g002 |
+|---|---:|---:|
+| Result | 677-323 | 660-340 |
+| Score | 67.7% | 66.0% |
+| 95% interval | 64.5% to 71.4% | 62.8% to 69.7% |
+| Average score margin per game | +5.37 | +4.93 |
+
+Opening by opening, g002 scored 1.7 percentage points less than g001 (standard error 0.9)
+and its margin was 0.43 points a game smaller (standard error 0.13). g002 beats g001 when
+the two play each other, but against v0.2 it is no better than g001 and slightly worse by
+margin. Conclusion: beating its parent does not show that a generation is stronger against
+other opponents. Compare a new generation with an older one as well before counting it as
+progress.
+
 ## 2026-11-17: does a net taught by g001 beat g001?
 
 Yes, but by much less than g001 beat v0.2. `run1/g002`, whose data is 303,534 positions from
