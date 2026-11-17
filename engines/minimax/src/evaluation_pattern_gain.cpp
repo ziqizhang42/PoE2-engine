@@ -159,8 +159,8 @@ struct GainEvaluation {
 }
 
 // The two phase knots bracketing a ply, the only ones interpolation reads. Summing weights for
-// these alone keeps the browser build, which cannot fold weights into its code now that they are
-// loaded, as fast as it was with compiled-in weights.
+// these alone, not for every knot, is what lets search with weights loaded at run time keep the
+// speed of weights fixed at compile time, above all in the browser build.
 struct KnotPair {
   std::size_t lower = 0;
   int left = 0;
