@@ -4,12 +4,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
 
+#include "poe2/minimax/net.hpp"
 #include "poe2/minimax/search.hpp"
 #include "poe2/move.hpp"
 
@@ -80,11 +82,14 @@ using AnalysisProgressSink = std::function<void(const AnalysisSuccess&)>;
 
 class Analyzer final {
  public:
-  explicit Analyzer(std::size_t hash_bytes = kDefaultHashBytes);
+  // A null net selects the built-in net.
+  explicit Analyzer(std::size_t hash_bytes = kDefaultHashBytes,
+                    std::shared_ptr<const minimax::Net> net = nullptr);
 
   [[nodiscard]] AnalysisResponse analyze(const AnalysisRequest& request,
                                          const AnalysisProgressSink& progress = {});
   [[nodiscard]] std::size_t hash_storage_bytes() const noexcept;
+  [[nodiscard]] const minimax::Net& net() const noexcept;
 
  private:
   minimax::Search search_;

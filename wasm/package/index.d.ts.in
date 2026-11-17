@@ -72,7 +72,27 @@ export interface AnalyzeOptions {
   readonly onProgress?: (update: AnalysisSuccess) => void;
 }
 
+export interface NetInfo {
+  /** The net's name, `<run>/<generation>`. */
+  readonly name: string;
+  /** The net's 12-hex-digit ID. */
+  readonly id: string;
+  /** SHA-256 of the net file. */
+  readonly sha256: string;
+  readonly design: string;
+}
+
+export interface EngineInfo {
+  readonly engineVersion: "@PROJECT_VERSION@";
+  readonly apiVersion: 1;
+  /** Net designs this engine can load. */
+  readonly designs: readonly string[];
+  /** The net the engine analyzes with: the built-in net unless `net` was given. */
+  readonly net: NetInfo;
+}
+
 export interface Engine {
+  readonly info: EngineInfo;
   /** Synchronous and CPU-bound; call from a Web Worker. */
   analyze(request: AnalysisRequest, options?: AnalyzeOptions): AnalysisResponse;
 }
@@ -80,6 +100,20 @@ export interface Engine {
 export interface CreateEngineOptions {
   /** Override the packaged WASM URL, for example with a Vite `?url` import. */
   readonly wasmUrl?: string | URL;
+  /** The bytes of a net file to analyze with instead of the built-in net. */
+  readonly net?: ArrayBuffer | ArrayBufferView;
 }
 
+/** Rejects `createEngine` when `net` is not a net file this engine can use. */
+export class NetLoadError extends Error {
+  readonly name: "NetLoadError";
+  readonly code: "invalid_net";
+  /** Why the file cannot be used, for example that it is damaged or of an unsupported design. */
+  readonly reason: string;
+}
+
+/**
+ * Rejects with `NetLoadError` for an unusable net file, and with `TypeError` when `net` is not
+ * binary data.
+ */
 export default function createEngine(options?: CreateEngineOptions): Promise<Engine>;

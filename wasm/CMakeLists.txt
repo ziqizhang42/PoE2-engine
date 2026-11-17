@@ -100,5 +100,6 @@ if(BUILD_TESTING)
       ${POE2_WASM_PACKAGE_DIR}/package.json
       ${POE2_WASM_PACKAGE_DIR}/poe2-engine.wasm
       ${PROJECT_VERSION}
+      ${PROJECT_SOURCE_DIR}/engines/minimax/nets/default.poe2net
   )
 endif()

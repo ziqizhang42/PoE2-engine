@@ -75,11 +75,12 @@ namespace {
 
 }  // namespace
 
-Analyzer::Analyzer(std::size_t hash_bytes)
+Analyzer::Analyzer(std::size_t hash_bytes, std::shared_ptr<const minimax::Net> net)
     : search_(minimax::SearchOptions{
           .hash_bytes = hash_bytes,
           .use_symmetry = true,
           .evaluator = minimax::Evaluator::kPatternGain,
+          .net = std::move(net),
       }) {}
 
 AnalysisResponse Analyzer::analyze(const AnalysisRequest& request,
@@ -151,6 +152,8 @@ AnalysisResponse Analyzer::analyze(const AnalysisRequest& request,
 std::size_t Analyzer::hash_storage_bytes() const noexcept {
   return search_.transposition_table().storage_bytes();
 }
+
+const minimax::Net& Analyzer::net() const noexcept { return search_.net(); }
 
 std::string_view analysis_error_code_name(AnalysisErrorCode code) noexcept {
   switch (code) {

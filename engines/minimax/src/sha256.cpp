@@ -89,7 +89,10 @@ void transform(std::array<std::uint32_t, 8>& state, const std::uint8_t* block) n
 }  // namespace
 
 Sha256Digest sha256(std::span<const std::uint8_t> bytes) {
-  if (bytes.size() > std::numeric_limits<std::uint64_t>::max() / 8) {
+  // Padding records the length in bits as 64 bits. Widening first keeps the comparison meaningful
+  // where size_t has 32 bits (the browser build).
+  const std::uint64_t size = bytes.size();
+  if (size > std::numeric_limits<std::uint64_t>::max() / 8) {
     throw std::length_error{"SHA-256 input is too large"};
   }
 

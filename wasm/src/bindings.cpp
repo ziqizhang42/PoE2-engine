@@ -3,11 +3,17 @@
 
 #include <climits>
 #include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include "poe2/minimax/net.hpp"
 #include "poe2/wasm/adapter.hpp"
 
 namespace poe2::wasm {
@@ -16,17 +22,68 @@ namespace {
 
 using emscripten::val;
 
+// Net files are about 11 KB; this bounds what a caller can make the engine copy.
+constexpr double kMaximumNetBytes = 1 << 20;
+
 class BrowserAnalyzer final {
  public:
+  BrowserAnalyzer() { analyzer_.emplace(); }
+  // `net_bytes` is a Uint8Array holding a net file. A file the engine cannot use leaves the
+  // analyzer without a net and the reason in load_error().
+  explicit BrowserAnalyzer(const val& net_bytes);
+
+  [[nodiscard]] std::string load_error() const { return load_error_; }
+  [[nodiscard]] val info() const;
   [[nodiscard]] val analyze(val request_value, val progress_callback);
 
  private:
-  Analyzer analyzer_;
+  std::optional<Analyzer> analyzer_;
+  std::string load_error_;
 };
+
+BrowserAnalyzer::BrowserAnalyzer(const val& net_bytes) {
+  if (!net_bytes.instanceof(val::global("Uint8Array"))) {
+    load_error_ = "net must be the bytes of a net file";
+    return;
+  }
+  if (net_bytes["length"].as<double>() > kMaximumNetBytes) {
+    load_error_ = "net file is larger than any supported net";
+    return;
+  }
+  const std::vector<std::uint8_t> bytes =
+      emscripten::convertJSArrayToNumberVector<std::uint8_t>(net_bytes);
+  std::expected<std::shared_ptr<const minimax::Net>, std::string> net =
+      minimax::try_parse_net(bytes);
+  if (!net.has_value()) {
+    load_error_ = std::move(net.error());
+    return;
+  }
+  analyzer_.emplace(kDefaultHashBytes, std::move(*net));
+}
 
 void set_versions(val& object) {
   object.set("engineVersion", std::string{engine_version()});
   object.set("apiVersion", kApiVersion);
+}
+
+val BrowserAnalyzer::info() const {
+  val designs = val::array();
+  for (const std::string_view design : minimax::supported_net_designs()) {
+    designs.call<void>("push", std::string{design});
+  }
+  val response = val::object();
+  set_versions(response);
+  response.set("designs", designs);
+  if (analyzer_.has_value()) {
+    const minimax::Net& net = analyzer_->net();
+    val net_value = val::object();
+    net_value.set("name", std::string{net.name()});
+    net_value.set("id", std::string{net.id()});
+    net_value.set("sha256", std::string{net.sha256()});
+    net_value.set("design", std::string{net.design()});
+    response.set("net", net_value);
+  }
+  return response;
 }
 
 [[nodiscard]] val error_value(const AnalysisError& error) {
@@ -107,6 +164,10 @@ void set_versions(val& object) {
 }
 
 val BrowserAnalyzer::analyze(val request_value, val progress_callback) {
+  if (!analyzer_.has_value()) {
+    return error_value(AnalysisErrorCode::kInvalidRequest, "the engine has no net: " + load_error_,
+                       AnalysisErrorField::kRequest);
+  }
   if (request_value.isNull() || request_value.isUndefined() || !is_type(request_value, "object") ||
       val::global("Array").call<bool>("isArray", request_value)) {
     return error_value(AnalysisErrorCode::kInvalidRequest,
@@ -199,7 +260,7 @@ val BrowserAnalyzer::analyze(val request_value, val progress_callback) {
     };
   }
 
-  const AnalysisResponse response = analyzer_.analyze(
+  const AnalysisResponse response = analyzer_->analyze(
       AnalysisRequest{
           .moves = std::move(moves),
           .search_time_ms = static_cast<int>(search_time),
@@ -220,5 +281,8 @@ val BrowserAnalyzer::analyze(val request_value, val progress_callback) {
 EMSCRIPTEN_BINDINGS(poe2_engine_wasm) {
   emscripten::class_<poe2::wasm::BrowserAnalyzer>("BrowserAnalyzer")
       .constructor<>()
+      .constructor<const emscripten::val&>()
+      .function("loadError", &poe2::wasm::BrowserAnalyzer::load_error)
+      .function("info", &poe2::wasm::BrowserAnalyzer::info)
       .function("analyze", &poe2::wasm::BrowserAnalyzer::analyze);
 }

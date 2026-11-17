@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cctype>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include "poe2/minimax/net.hpp"
 #include "poe2/wasm/adapter.hpp"
 
 namespace {
@@ -282,4 +284,33 @@ TEST_CASE("WASM adapter streams complete depths and returns the final snapshot",
     }
   }
   REQUIRE(result == updates.back());
+}
+
+TEST_CASE("WASM adapter analyzes with a given net or the built-in one", "[wasm][adapter][net]") {
+  const poe2::wasm::AnalysisRequest request{.moves = {}, .search_time_ms = 5000, .max_depth = 2};
+  poe2::wasm::Analyzer built_in{poe2::wasm::kDefaultHashBytes};
+  REQUIRE(&built_in.net() == poe2::minimax::default_net().get());
+  const poe2::wasm::AnalysisSuccess expected = require_success(built_in.analyze(request));
+
+  const std::vector<std::uint8_t> bytes = poe2::minimax::serialize_net(
+      poe2::minimax::kPatternGainDesign, poe2::minimax::default_net()->metadata(),
+      poe2::minimax::default_net()->parameters());
+  const auto net = poe2::minimax::try_parse_net(bytes);
+  REQUIRE(net.has_value());
+  poe2::wasm::Analyzer loaded{poe2::wasm::kDefaultHashBytes, *net};
+  REQUIRE(&loaded.net() == net->get());
+  REQUIRE(loaded.net().sha256() == poe2::minimax::default_net()->sha256());
+  REQUIRE(require_success(loaded.analyze(request)) == expected);
+
+  poe2::minimax::PatternGainParameters shifted = poe2::minimax::default_net()->parameters();
+  for (std::int32_t& intercept : shifted.intercept) {
+    intercept += 3200;
+  }
+  poe2::wasm::Analyzer changed{
+      poe2::wasm::kDefaultHashBytes,
+      poe2::minimax::parse_net(poe2::minimax::serialize_net(poe2::minimax::kPatternGainDesign,
+                                                            {{"name", "test/shifted"}}, shifted))};
+  REQUIRE(changed.net().name() == "test/shifted");
+  REQUIRE(require_success(changed.analyze(request)).evaluation_half_points !=
+          expected.evaluation_half_points);
 }
