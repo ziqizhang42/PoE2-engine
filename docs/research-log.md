@@ -4,6 +4,24 @@ Experiments that answered a question about what to try next, newest first. Each 
 the question, what was measured, and the conclusion drawn from it. Release notes are in
 `CHANGELOG.md`; game results are in `eval/results.csv` and `models/`.
 
+## 2026-11-17: does a net taught by g001 beat g001?
+
+Yes, but by much less than g001 beat v0.2. `run1/g002`, whose data is 303,534 positions from
+40,000 generated games all labeled by g001, beat g001 204-182 over 386 games (52.8%, 95%
+interval 50.3% to 56.3%).
+
+| | g001 against v0.2 | g002 against g001 |
+|---|---:|---:|
+| Games until the gate decided | 136 | 386 |
+| Score | 66.2% | 52.8% |
+| Paired openings won both / split / lost both | 22 / 46 / 0 | 12 / 180 / 1 |
+| Sealed-test MAE against its own teacher's labels | 3.909 | 3.443 |
+
+g002 fits g001's labels more closely than g001 fit v0.2's, but that does not compare their
+strength, because the labels differ. Conclusion: the gain per generation of this design is
+shrinking fast, as the teacher comparison of 2026-11-16 predicted. Whether a `g003` would
+still pass its gate is open.
+
 ## 2026-11-17: does loading the net from a file cost search speed?
 
 No, after two fixes. Measured by fixed-node searches, old and new engines interleaved, with
