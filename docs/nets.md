@@ -34,8 +34,8 @@ The engine sends the same three facts during the protocol handshake, as `id vers
 The built-in net is the net file `engines/minimax/nets/default.poe2net`. The build embeds it
 byte for byte in the engine, the inference tool, the data tool, and the browser package, and
 loads it through the same checks as a file given with `--net`, so a built-in net and the same
-file loaded with `--net` play identically and record the same SHA-256 in data manifests. It is
-v0.2 (`run1/g000`).
+file loaded with `--net` play identically and record the same SHA-256 in data manifests.
+`poe2_minimax --version` names it, and so does each release's heading in `CHANGELOG.md`.
 
 Only `poe2-train handoff --apply` replaces it, with a gate winner already archived under
 `models/` ([training-workflow.md](training-workflow.md#candidate-handoff)). The same command

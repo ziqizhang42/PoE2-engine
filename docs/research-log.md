@@ -64,8 +64,8 @@ Gains come from better labels or a larger design, not from longer training or mo
 
 ## 2026-11-16: does a net taught by v0.2 beat v0.2?
 
-Yes. `run1/g001` trained on 302,842 positions from 40,000 games that v0.2 played and
-labeled, and beat v0.2 90-46 over 136 games (66.2%, 95% interval 58.3% to 75.7%), winning
+Yes. `run1/g001`, whose data is 302,842 positions from 40,000 generated games all labeled
+by v0.2, beat v0.2 90-46 over 136 games (66.2%, 95% interval 58.3% to 75.7%), winning
 both games of 22 paired openings and losing both of none.
 
 ## 2026-11-16: does lookup training match dense training?
