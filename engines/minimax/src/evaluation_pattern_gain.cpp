@@ -158,27 +158,35 @@ struct GainEvaluation {
   return negative ? -rounded : rounded;
 }
 
+// The phase knots bracketing a ply: interpolation reads only these two, so only their sums are
+// accumulated.
+struct KnotPair {
+  std::size_t lower = 0;
+  int left = 0;
+  int right = 0;
+};
+
 template <std::size_t KnotCount>
-[[nodiscard]] std::int64_t interpolate(const std::array<std::int64_t, KnotCount>& values,
-                                       const std::array<std::uint8_t, KnotCount>& knots,
-                                       int ply) noexcept {
+[[nodiscard]] KnotPair bracketing_knots(const std::array<std::uint8_t, KnotCount>& knots,
+                                        int ply) noexcept {
   static_assert(KnotCount >= 2);
   assert(ply >= knots.front() && ply <= knots.back());
   std::size_t upper = 1;
   while (ply > knots[upper]) {
     ++upper;
   }
-  const std::size_t lower = upper - 1;
-  const int left = knots[lower];
-  const int right = knots[upper];
-  const std::int64_t numerator = static_cast<std::int64_t>(right - ply) * values[lower] +
-                                 static_cast<std::int64_t>(ply - left) * values[upper];
-  return rounded_divide(numerator, right - left);
+  return KnotPair{.lower = upper - 1, .left = knots[upper - 1], .right = knots[upper]};
+}
+
+[[nodiscard]] std::int64_t interpolate(std::int64_t lower_value, std::int64_t upper_value,
+                                       KnotPair pair, int ply) noexcept {
+  const std::int64_t numerator = static_cast<std::int64_t>(pair.right - ply) * lower_value +
+                                 static_cast<std::int64_t>(ply - pair.left) * upper_value;
+  return rounded_divide(numerator, pair.right - pair.left);
 }
 
 [[nodiscard]] std::int64_t line_residual(const Position& position,
                                          const PatternGainTables& tables) noexcept {
-  std::array<std::int64_t, kPatternGainLineKnotCount> sums{};
   const Player own = position.side_to_move();
   const Bitboard player_one = position.board().bits(Player::kOne);
   const Bitboard player_two = position.board().bits(Player::kTwo);
@@ -187,28 +195,32 @@ template <std::size_t KnotCount>
   std::array<std::uint16_t, kScoringLineCount> codes{};
   accumulate_line_codes<1>(codes, own_pieces);
   accumulate_line_codes<2>(codes, opponent_pieces);
+  const KnotPair pair = bracketing_knots(kPatternGainLineKnots, position.ply());
+  std::int64_t lower_sum = 0;
+  std::int64_t upper_sum = 0;
   for (std::size_t line_index = 0; line_index < kScoringLines.size(); ++line_index) {
     const pattern_gain::ScoringLine& line = kScoringLines[line_index];
     const std::size_t pattern = kPatternOffsets[line.length] + codes[line_index];
     const auto& weights = tables.raw_line_weights[pattern];
-    for (std::size_t knot = 0; knot < sums.size(); ++knot) {
-      sums[knot] += weights[knot];
-    }
+    lower_sum += weights[pair.lower];
+    upper_sum += weights[pair.lower + 1];
   }
-  return interpolate(sums, kPatternGainLineKnots, position.ply());
+  return interpolate(lower_sum, upper_sum, pair, position.ply());
 }
 
 [[nodiscard]] std::int64_t gain_residual(
     const std::array<std::int64_t, kPatternGainFeatureCount>& features, int ply,
     const PatternGainTables& tables) noexcept {
-  std::array<std::int64_t, kPatternGainKnotCount> sums{};
-  for (std::size_t knot = 0; knot < sums.size(); ++knot) {
-    for (std::size_t feature = 0; feature < features.size(); ++feature) {
-      sums[knot] +=
-          features[feature] * tables.gain_weights[knot * kPatternGainFeatureCount + feature];
-    }
+  const KnotPair pair = bracketing_knots(kPatternGainKnots, ply);
+  const std::size_t lower = pair.lower * kPatternGainFeatureCount;
+  const std::size_t upper = lower + kPatternGainFeatureCount;
+  std::int64_t lower_sum = 0;
+  std::int64_t upper_sum = 0;
+  for (std::size_t feature = 0; feature < features.size(); ++feature) {
+    lower_sum += features[feature] * tables.gain_weights[lower + feature];
+    upper_sum += features[feature] * tables.gain_weights[upper + feature];
   }
-  return interpolate(sums, kPatternGainKnots, ply);
+  return interpolate(lower_sum, upper_sum, pair, ply);
 }
 
 }  // namespace
