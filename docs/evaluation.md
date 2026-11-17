@@ -139,6 +139,8 @@ Every evaluation run is saved under:
 build/eval/runs/<timestamp>__<new-id>__<new-engine>__vs__<base-id>__<base-engine>[__args-hashes][__newnet_<net ID>][__basenet_<net ID>]/
 ```
 
+A name longer than 200 bytes keeps its first 182 bytes and ends in `__` and a 16-hex-digit digest of the full name, so it stays unique; the manifest records every part in full.
+
 Each run contains:
 
 ```text
