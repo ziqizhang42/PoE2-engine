@@ -17,7 +17,7 @@ endif()
 
 project(
   PoE2
-  VERSION 0.3.1
+  VERSION 0.3.2
   DESCRIPTION "Powers of Exponent 2"
   LANGUAGES CXX
 )

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2 - 2026-11-17 · net run1/g002
+
+- The built-in net is `run1/g002` (`232a3cc37caf`), the second generation of `run1`. `run1/g001` taught it: its data is 303,534 positions from 40,000 generated games, all labeled by g001. It beat g001 204-182 over 386 games at 100 ms a move (52.8%, 95% interval 50.3% to 56.3%).
+- The engine is the same as in 0.3.1.
+
 ## 0.3.1 - 2026-11-17 · net run1/g001
 
 - The built-in net is `run1/g001` (`8e39040c1537`), the first generation of `run1`. v0.2 taught it: its data is 302,842 positions from 40,000 generated games, all labeled by v0.2. It beat v0.2 90-46 over 136 games at 100 ms a move (66.2%, 95% interval 58.3% to 75.7%).
