@@ -85,7 +85,6 @@ wheels = [
 
 [[package]]
 name = "poe2-minimax-training"
-version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "poe2-minimax-training"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Offline learning tools for the PoE2 minimax evaluator"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -23,11 +23,17 @@ poe2-evaluate-pattern = "poe2_training.pattern_evaluation:main"
 poe2-verify-pattern-gain = "poe2_training.pattern_integration:main"
 poe2-train = "poe2_training.cli:main"
 
+# The training tools carry the repository version, which only CMakeLists.txt states.
+[tool.hatch.version]
+path = "../../CMakeLists.txt"
+pattern = '^  VERSION (?P<version>[0-9]+\.[0-9]+\.[0-9]+)$'
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/poe2_training"]
 
 [tool.uv]
 required-version = ">=0.12,<0.13"
+cache-keys = [{ file = "pyproject.toml" }, { file = "../../CMakeLists.txt" }]
 environments = [
   "sys_platform == 'linux' and platform_machine == 'x86_64' and implementation_name == 'cpython'",
 ]
