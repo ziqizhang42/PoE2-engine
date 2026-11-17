@@ -51,7 +51,7 @@ One policy is selected for each trajectory:
 - `random`: uniformly selects a legal square.
 - `immediate-gain`: selects the move with the largest exact non-mutating score gain.
 - `opponent-aware`: selects the exact immediate two-ply key: own gain minus the opponent's best remaining gain.
-- `noisy-search`: normally uses deterministic node-limited search and selects a random legal move at the configured noise percentage. The search uses the two-ply-closure evaluator unless `--evaluator pattern-gain` selects the compiled learned model. The manifest's `generator.evaluator` records the choice, and a pattern-gain source also records `generator.model_header_sha256`. Sources written before this field existed used two-ply closure.
+- `noisy-search`: normally uses deterministic node-limited search and selects a random legal move at the configured noise percentage. The search uses the two-ply-closure evaluator unless `--evaluator pattern-gain` selects the learned evaluator, with the built-in net or the net file given by `--net`. The manifest's `generator.evaluator` records the choice, and a pattern-gain source also records its net as `generator.net_sha256`, or as `generator.model_header_sha256` for the built-in net. Sources written before this field existed used two-ply closure.
 
 Ties are resolved by the trajectory's deterministic random stream. Each trajectory contributes at most one position from each of eight phase buckets spanning plies 4 through 46. With fewer than eight requested samples, the buckets are selected deterministically and then emitted in ply order. This avoids treating every adjacent state in a game as an independent example while retaining early-, middle-, and late-game coverage.
 

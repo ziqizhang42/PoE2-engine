@@ -276,6 +276,9 @@ int run_engine_stdio(std::string_view name, Engine& engine, std::istream& input,
     }
     if (line == kCommandPoe2) {
       output << "id name " << name << '\n';
+      for (const std::string& fact : engine.identity()) {
+        output << "id " << fact << '\n';
+      }
       output << kResponsePoe2Ok << '\n';
       continue;
     }

@@ -5,11 +5,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "poe2/minimax/net.hpp"
 #include "poe2/minimax/search.hpp"
 #include "poe2/minimax/sha256.hpp"
 
@@ -64,6 +66,7 @@ struct LabelingOptions {
   std::size_t workers = 1;
   bool require_all = false;
   Evaluator evaluator = Evaluator::kTwoPlyClosure;
+  std::shared_ptr<const Net> net = default_net();
 };
 
 struct LabelRecord {
@@ -144,7 +147,9 @@ class DatasetOutput final {
 };
 
 [[nodiscard]] std::string_view label_mode_name(LabelMode mode) noexcept;
-[[nodiscard]] std::string_view compiled_model_header_sha256() noexcept;
+// The manifest key that names a pattern-gain evaluator's model: "net_sha256" for a net file, and
+// "model_header_sha256" for a net compiled from a C++ header, the form earlier data recorded.
+[[nodiscard]] std::string_view net_provenance_key(const Net& net) noexcept;
 [[nodiscard]] bool is_data_evaluator(Evaluator evaluator) noexcept;
 [[nodiscard]] std::string_view dataset_split_name(DatasetSplit split) noexcept;
 [[nodiscard]] std::uint64_t stable_digest(std::string_view bytes) noexcept;

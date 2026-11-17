@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,7 @@
 #include "poe2/match_runner.hpp"
 #include "poe2/minimax/feature_data.hpp"
 #include "poe2/minimax/labeling.hpp"
+#include "poe2/minimax/net.hpp"
 #include "poe2/minimax/position_source.hpp"
 #include "poe2/move.hpp"
 
@@ -43,6 +45,8 @@ struct LabelCommandOptions {
   bool has_opening_shard = false;
   bool require_all = false;
   poe2::minimax::Evaluator evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
+  std::shared_ptr<const poe2::minimax::Net> net = poe2::minimax::default_net();
+  bool has_net = false;
 };
 
 struct SourceCommandOptions {
@@ -53,6 +57,7 @@ struct SourceCommandOptions {
   std::optional<std::uint64_t> trajectory_begin;
   std::optional<std::uint64_t> trajectory_end;
   fs::path chunk_directory;
+  bool has_net = false;
 };
 
 struct FeatureCommandOptions {
@@ -73,6 +78,7 @@ void print_usage(std::ostream& output) {
          << "                            [--opponent-weight <n>] [--search-weight <n>]\n"
          << "                            [--progress-every <n>]\n"
          << "                            [--evaluator two-ply-closure|pattern-gain]\n"
+         << "                            [--net <file>]\n"
          << "\n"
          << "  poe2_minimax_data source-chunk <source options> --output-dir <chunk-directory>\n"
          << "                            --trajectory-begin <n> --trajectory-end <n>\n"
@@ -89,7 +95,8 @@ void print_usage(std::ostream& output) {
          << "                            [--corpus-id <id>] [--source-shard <zero-based>]\n"
          << "                            [--shard-index <zero-based>] [--shard-count <n>]\n"
          << "                            [--progress-every <n>] [--require-all]\n"
-         << "                            [--evaluator two-ply-closure|pattern-gain]\n";
+         << "                            [--evaluator two-ply-closure|pattern-gain]\n"
+         << "                            [--net <file>]\n";
 }
 
 [[nodiscard]] FeatureCommandOptions parse_feature_options(int argc, char* argv[]) {
@@ -227,6 +234,9 @@ template <typename Integer>
       options.source_shard = checked_integer<std::uint32_t>(require_u64(value, argument), argument);
     } else if (argument == "--evaluator") {
       options.evaluator = parse_data_evaluator(value);
+    } else if (argument == "--net") {
+      options.net = poe2::minimax::load_net_file(fs::path{value});
+      options.has_net = true;
     } else {
       throw std::invalid_argument{"unknown argument: " + std::string{argument}};
     }
@@ -246,6 +256,9 @@ template <typename Integer>
   }
   if (options.shard_index >= options.shard_count) {
     throw std::invalid_argument{"--shard-index must be less than --shard-count"};
+  }
+  if (options.has_net && options.evaluator != poe2::minimax::Evaluator::kPatternGain) {
+    throw std::invalid_argument{"--net needs --evaluator pattern-gain"};
   }
   return options;
 }
@@ -300,6 +313,9 @@ template <typename Integer>
       options.progress_interval = require_positive_u64(value, argument);
     } else if (argument == "--evaluator") {
       options.source.evaluator = parse_data_evaluator(value);
+    } else if (argument == "--net") {
+      options.source.net = poe2::minimax::load_net_file(fs::path{value});
+      options.has_net = true;
     } else if (argument == "--trajectory-begin") {
       options.trajectory_begin = require_u64(value, argument);
     } else if (argument == "--trajectory-end") {
@@ -321,6 +337,9 @@ template <typename Integer>
   }
   if (options.source.trajectory_count == 0) {
     throw std::invalid_argument{"missing --trajectories"};
+  }
+  if (options.has_net && options.source.evaluator != poe2::minimax::Evaluator::kPatternGain) {
+    throw std::invalid_argument{"--net needs --evaluator pattern-gain"};
   }
   return options;
 }
@@ -416,6 +435,7 @@ int run_labels(const LabelCommandOptions& options) {
           .workers = options.workers,
           .require_all = options.require_all,
           .evaluator = options.evaluator,
+          .net = options.net,
       },
       std::move(source),
       [](const labeling::LabelProgress& progress) {
@@ -477,7 +497,7 @@ int run_source_assemble(const SourceCommandOptions& options) {
   require_source_mode(options, false, true);
   std::vector<position_source::PositionSourceChunk> chunks;
   for (const fs::directory_entry& entry : fs::directory_iterator(options.chunk_directory)) {
-    chunks.push_back(position_source::read_position_source_chunk(entry.path()));
+    chunks.push_back(position_source::read_position_source_chunk(entry.path(), options.source.net));
   }
   std::ranges::sort(chunks, {}, &position_source::PositionSourceChunk::trajectory_begin);
   const position_source::PositionSourceCorpus corpus =

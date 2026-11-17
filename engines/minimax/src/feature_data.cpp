@@ -330,11 +330,20 @@ struct LoadedLabelShard {
   if (evaluator == "b") {
     evaluator = "two-ply-closure";
   }
-  const bool has_model = manifest.find("\"model_header_sha256\": \"") != std::string_view::npos;
-  std::string model_header_sha256 =
-      has_model ? manifest_string(manifest, "\"model_header_sha256\": \"") : std::string{};
-  const bool valid_evaluator = (evaluator == "two-ply-closure" && !has_model) ||
-                               (evaluator == "pattern-gain" && is_sha256_hex(model_header_sha256));
+  std::string model_key;
+  std::string model_sha256;
+  for (const std::string_view key : {"net_sha256", "model_header_sha256"}) {
+    const std::string pattern = "\"" + std::string{key} + "\": \"";
+    if (manifest.find(pattern) != std::string_view::npos) {
+      if (!model_key.empty()) {
+        throw std::runtime_error{"label manifest names two evaluator models"};
+      }
+      model_key = key;
+      model_sha256 = manifest_string(manifest, pattern);
+    }
+  }
+  const bool valid_evaluator = (evaluator == "two-ply-closure" && model_key.empty()) ||
+                               (evaluator == "pattern-gain" && is_sha256_hex(model_sha256));
   if (!valid_evaluator) {
     throw std::runtime_error{"label manifest has an unsupported evaluator"};
   }
@@ -355,7 +364,8 @@ struct LoadedLabelShard {
       .workers_requested = static_cast<std::size_t>(workers),
       .target_selection = manifest_string(manifest, "\"target_selection\": \""),
       .evaluator = std::move(evaluator),
-      .model_header_sha256 = std::move(model_header_sha256),
+      .model_key = std::move(model_key),
+      .model_sha256 = std::move(model_sha256),
   };
 }
 
@@ -944,9 +954,9 @@ std::string serialize_feature_manifest(const FeatureDataset& dataset,
          << ", \"workers_requested\": " << dataset.labels.workers_requested
          << ", \"target_selection\": \"" << json_escape(dataset.labels.target_selection)
          << "\", \"evaluator\": \"" << json_escape(dataset.labels.evaluator) << '"';
-  if (!dataset.labels.model_header_sha256.empty()) {
-    output << ", \"model_header_sha256\": \"" << json_escape(dataset.labels.model_header_sha256)
-           << '"';
+  if (!dataset.labels.model_key.empty()) {
+    output << ", \"" << dataset.labels.model_key << "\": \""
+           << json_escape(dataset.labels.model_sha256) << '"';
   }
   output << "}\n"
          << "  },\n"

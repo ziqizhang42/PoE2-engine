@@ -238,7 +238,9 @@ std::string_view label_mode_name(LabelMode mode) noexcept {
   return "unknown";
 }
 
-std::string_view compiled_model_header_sha256() noexcept { return build::kModelHeaderSha256; }
+std::string_view net_provenance_key(const Net& net) noexcept {
+  return &net == default_net().get() ? "model_header_sha256" : "net_sha256";
+}
 
 bool is_data_evaluator(Evaluator evaluator) noexcept {
   // Label targets and terminal depths assume the two-empty closure that both of these share.
@@ -318,6 +320,7 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
         .hash_bytes = options.hash_bytes,
         .use_symmetry = true,
         .evaluator = options.evaluator,
+        .net = options.net,
     }};
     dataset.hash_capacity = sized_search.transposition_table().capacity();
     dataset.hash_storage_bytes = sized_search.transposition_table().storage_bytes();
@@ -368,6 +371,7 @@ LabelDataset generate_labels(std::span<const LabelInput> inputs, const LabelingO
           .hash_bytes = options.hash_bytes,
           .use_symmetry = true,
           .evaluator = options.evaluator,
+          .net = options.net,
       }};
       while (!stop.load(std::memory_order_relaxed)) {
         const std::size_t input_index = next_input.fetch_add(1, std::memory_order_relaxed);
@@ -530,8 +534,8 @@ std::string serialize_manifest(const LabelDataset& dataset, const Sha256Digest& 
          << "  \"search\": {\n"
          << "    \"evaluator\": \"" << evaluator_name(dataset.options.evaluator) << "\",\n";
   if (dataset.options.evaluator == Evaluator::kPatternGain) {
-    output << "    \"model_header_sha256\": \"" << json_escape(build::kModelHeaderSha256)
-           << "\",\n";
+    output << "    \"" << net_provenance_key(*dataset.options.net) << "\": \""
+           << json_escape(dataset.options.net->sha256()) << "\",\n";
   }
   output << "    \"mode\": \"" << label_mode_name(dataset.options.mode) << "\",\n"
          << "    \"node_limit\": " << dataset.options.node_limit << ",\n"

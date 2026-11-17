@@ -7,6 +7,7 @@
 
 #include "poe2/engine_stdio.hpp"
 #include "poe2/minimax/engine.hpp"
+#include "poe2/minimax/net.hpp"
 #include "poe2/minimax/options.hpp"
 
 namespace {
@@ -14,8 +15,14 @@ namespace {
 int run(int argc, char* argv[]) {
   std::vector<std::string_view> arguments;
   arguments.reserve(static_cast<std::size_t>(argc > 1 ? argc - 1 : 0));
+  bool print_version = false;
   for (int index = 1; index < argc; ++index) {
-    arguments.emplace_back(argv[index]);
+    const std::string_view argument{argv[index]};
+    if (argument == "--version") {
+      print_version = true;
+    } else {
+      arguments.push_back(argument);
+    }
   }
 
   std::string error;
@@ -24,6 +31,15 @@ int run(int argc, char* argv[]) {
   if (!options.has_value()) {
     std::cerr << "error " << error << '\n';
     return 2;
+  }
+
+  if (print_version) {
+    const poe2::minimax::Net& net =
+        options->net != nullptr ? *options->net : *poe2::minimax::default_net();
+    for (const std::string& line : poe2::minimax::engine_identity(net)) {
+      std::cout << line << '\n';
+    }
+    return 0;
   }
 
   poe2::minimax::MinimaxEngine engine{*options};

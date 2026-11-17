@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -45,6 +46,8 @@ class Engine {
   virtual ~Engine() = default;
 
   virtual void new_game() {}
+  // Extra handshake facts, each sent as "id <line>" after the engine name.
+  [[nodiscard]] virtual std::vector<std::string> identity() const { return {}; }
   [[nodiscard]] virtual EngineResult choose_move(const Position& position,
                                                  const EngineLimits& limits,
                                                  const InfoSink& info) = 0;

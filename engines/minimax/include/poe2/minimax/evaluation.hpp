@@ -7,6 +7,8 @@
 
 namespace poe2::minimax {
 
+struct PatternGainTables;
+
 // Returns the final-piece-count-normalized score difference from the side-to-move perspective.
 // Values are measured in half-points so Player Two's 5.5-point handicap remains exact.
 [[nodiscard]] Score evaluate(const Position& position) noexcept;
@@ -25,13 +27,16 @@ using FixedEvaluation = std::int32_t;
 inline constexpr int kPatternGainFractionalBits = 5;
 inline constexpr int kPatternGainScale = 1 << kPatternGainFractionalBits;
 
-// Returns two-ply closure plus the frozen line-pattern/gain-summary residual in scale-32 units.
+// Returns two-ply closure plus a net's line-pattern/gain-summary residual in scale-32 units.
 // Terminal positions and positions with at most two empty squares retain exact two-ply closure.
+// The overload without tables evaluates with the built-in net.
 [[nodiscard]] FixedEvaluation evaluate_pattern_gain_fixed(const Position& position) noexcept;
+[[nodiscard]] FixedEvaluation evaluate_pattern_gain_fixed(const Position& position,
+                                                          const PatternGainTables& tables) noexcept;
 // Hot-path overload for callers that have already computed legal moves and their count.
 [[nodiscard]] FixedEvaluation evaluate_pattern_gain_fixed(const Position& position,
-                                                          Bitboard legal_moves,
-                                                          int empty_count) noexcept;
+                                                          Bitboard legal_moves, int empty_count,
+                                                          const PatternGainTables& tables) noexcept;
 
 // Round a scale-32 pattern/gain value to the public whole-half-point score, with ties away from
 // zero.

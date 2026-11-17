@@ -2,15 +2,29 @@ add_library(poe2_minimax_engine STATIC
   src/engine.cpp
   src/evaluation.cpp
   src/evaluation_pattern_gain.cpp
+  src/net.cpp
+  src/net_file.cpp
   src/options.cpp
   src/search.cpp
+  src/sha256.cpp
 )
 
 add_library(poe2::minimax_engine ALIAS poe2_minimax_engine)
 
+# Data artifacts record which model a pattern-gain teacher compiled in, so the digest must
+# follow the header's contents, not just its path.
+file(SHA256 "${POE2_MINIMAX_MODEL_HEADER}" POE2_MINIMAX_MODEL_HEADER_SHA256)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POE2_MINIMAX_MODEL_HEADER}")
+
 configure_file(
   src/model_header.hpp.in
   ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/model_header.hpp
+  @ONLY
+)
+
+configure_file(
+  src/engine_version.hpp.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/engine_version.hpp
   @ONLY
 )
 
@@ -61,11 +75,6 @@ if(POE2_BUILD_NATIVE_APPS)
     set(POE2_LABEL_NATIVE_ARCH false)
   endif()
 
-  # Data artifacts record which model a pattern-gain teacher compiled in, so the digest must
-  # follow the header's contents, not just its path.
-  file(SHA256 "${POE2_MINIMAX_MODEL_HEADER}" POE2_MINIMAX_MODEL_HEADER_SHA256)
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POE2_MINIMAX_MODEL_HEADER}")
-
   configure_file(
     src/labeling_build.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/poe2/minimax/labeling_build.hpp
@@ -77,7 +86,6 @@ if(POE2_BUILD_NATIVE_APPS)
     src/feature_data.cpp
     src/labeling.cpp
     src/position_source.cpp
-    src/sha256.cpp
   )
 
   add_library(poe2::minimax_labeling ALIAS poe2_minimax_labeling)

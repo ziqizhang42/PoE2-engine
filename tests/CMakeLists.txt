@@ -40,6 +40,7 @@ add_executable(poe2_minimax_tests
   minimax_evaluation_test.cpp
   minimax_feature_data_test.cpp
   minimax_labeling_test.cpp
+  minimax_net_test.cpp
   minimax_options_test.cpp
   minimax_position_source_test.cpp
   minimax_search_test.cpp
@@ -48,6 +49,7 @@ add_executable(poe2_minimax_tests
 
 target_link_libraries(poe2_minimax_tests
   PRIVATE
+    poe2::engine_stdio
     poe2::minimax_labeling
     poe2::wasm_adapter
     Catch2::Catch2WithMain
@@ -56,6 +58,7 @@ target_link_libraries(poe2_minimax_tests
 target_compile_definitions(poe2_minimax_tests
   PRIVATE
     POE2_PROJECT_VERSION="${PROJECT_VERSION}"
+    POE2_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
 add_executable(poe2_match_runner_tests

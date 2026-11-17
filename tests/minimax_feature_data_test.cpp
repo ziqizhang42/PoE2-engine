@@ -160,9 +160,10 @@ TEST_CASE("offline feature datasets have fixed deterministic framing",
   REQUIRE(manifest.find("model_header_sha256") == std::string::npos);
 
   dataset.labels.evaluator = "pattern-gain";
-  dataset.labels.model_header_sha256 = std::string(64, 'a');
+  dataset.labels.model_key = "net_sha256";
+  dataset.labels.model_sha256 = std::string(64, 'a');
   const std::string teacher_manifest =
       poe2::minimax::feature_data::serialize_feature_manifest(dataset, digest);
-  REQUIRE(teacher_manifest.find("\"evaluator\": \"pattern-gain\", \"model_header_sha256\": \"" +
+  REQUIRE(teacher_manifest.find("\"evaluator\": \"pattern-gain\", \"net_sha256\": \"" +
                                 std::string(64, 'a') + "\"") != std::string::npos);
 }

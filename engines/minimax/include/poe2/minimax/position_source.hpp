@@ -50,6 +50,7 @@ struct PositionSourceOptions {
   std::uint8_t noise_percent = 15;
   PolicyWeights policy_weights;
   Evaluator evaluator = Evaluator::kTwoPlyClosure;
+  std::shared_ptr<const Net> net = default_net();
 };
 
 struct PositionSourceRecord {
@@ -148,9 +149,10 @@ void write_position_source(SourceOutput& output, const PositionSourceCorpus& cor
 void reserve_source_chunk_output(const std::filesystem::path& directory);
 void write_position_source_chunk(const std::filesystem::path& directory,
                                  const PositionSourceChunk& chunk);
-// Reads a COMPLETE chunk written by this same build, verifying its digest and records.
-[[nodiscard]] PositionSourceChunk read_position_source_chunk(
-    const std::filesystem::path& directory);
+// Reads a COMPLETE chunk written by this same build with this net, verifying its digest and
+// records.
+[[nodiscard]] PositionSourceChunk read_position_source_chunk(const std::filesystem::path& directory,
+                                                             const std::shared_ptr<const Net>& net);
 // Joins chunks covering every trajectory exactly once; equals generate_position_source.
 [[nodiscard]] PositionSourceCorpus assemble_position_source(
     const PositionSourceOptions& options, std::span<const PositionSourceChunk> chunks);

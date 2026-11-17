@@ -1,7 +1,10 @@
 #include "poe2/minimax/options.hpp"
 
 #include <charconv>
+#include <filesystem>
 #include <limits>
+
+#include "poe2/minimax/net.hpp"
 
 namespace poe2::minimax {
 
@@ -56,6 +59,20 @@ std::optional<SearchOptions> parse_search_options(std::span<const std::string_vi
       } else {
         error = "--evaluator must be static, two-ply-closure, or pattern-gain: ";
         error += arguments[index];
+        return std::nullopt;
+      }
+      continue;
+    }
+    if (argument == "--net") {
+      ++index;
+      if (index == arguments.size()) {
+        error = "missing value for --net";
+        return std::nullopt;
+      }
+      try {
+        options.net = load_net_file(std::filesystem::path{arguments[index]});
+      } catch (const NetError& failure) {
+        error = failure.what();
         return std::nullopt;
       }
       continue;

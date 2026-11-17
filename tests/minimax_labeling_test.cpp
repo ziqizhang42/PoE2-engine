@@ -463,7 +463,7 @@ TEST_CASE("teacher labels can use the compiled pattern-gain model and record its
   REQUIRE(dataset.records.front().deepest_completed_depth == 2);
   REQUIRE(dataset.records.front().deepest_value == depth_two_score);
 
-  const std::string_view model_digest = poe2::minimax::labeling::compiled_model_header_sha256();
+  const std::string_view model_digest = poe2::minimax::default_net()->sha256();
   REQUIRE(model_digest.size() == 64);
   const std::string manifest = poe2::minimax::labeling::serialize_manifest(
       dataset, poe2::minimax::labeling::sha256("pattern binary"));

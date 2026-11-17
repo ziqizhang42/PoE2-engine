@@ -292,7 +292,7 @@ TEST_CASE("noisy-search sources can use the compiled pattern-gain model",
       serial, position_source::serialize_source_shards(serial));
   REQUIRE(manifest.find("\"evaluator\": \"pattern-gain\"") != std::string::npos);
   REQUIRE(manifest.find("\"model_header_sha256\": \"" +
-                        std::string{labeling::compiled_model_header_sha256()} + "\"") !=
+                        std::string{poe2::minimax::default_net()->sha256()} + "\"") !=
           std::string::npos);
 
   options.evaluator = poe2::minimax::Evaluator::kTwoPlyClosure;
@@ -337,7 +337,8 @@ TEST_CASE("chunked position sources assemble to the same bytes as one pass",
     position_source::write_position_source_chunk(
         directory,
         position_source::generate_position_source_chunk(chunk_options, begin, begin + size));
-    chunks.push_back(position_source::read_position_source_chunk(directory));
+    chunks.push_back(
+        position_source::read_position_source_chunk(directory, poe2::minimax::default_net()));
     begin += size;
   }
   const position_source::PositionSourceCorpus assembled =
@@ -361,7 +362,8 @@ TEST_CASE("chunked position sources assemble to the same bytes as one pass",
 
   const fs::path tampered = root / "chunk-4" / std::string{position_source::kSourceChunkFileName};
   std::ofstream{tampered, std::ios::app} << "\n";
-  REQUIRE_THROWS_AS(position_source::read_position_source_chunk(root / "chunk-4"),
-                    std::runtime_error);
+  REQUIRE_THROWS_AS(
+      position_source::read_position_source_chunk(root / "chunk-4", poe2::minimax::default_net()),
+      std::runtime_error);
   fs::remove_all(root);
 }

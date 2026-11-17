@@ -26,7 +26,7 @@ TEST_CASE("minimax command-line options have stable defaults", "[minimax][cli]")
     FAIL("default minimax options should parse");
     return;
   }
-  const poe2::minimax::SearchOptions value = *options;
+  const poe2::minimax::SearchOptions& value = *options;
   REQUIRE(value == poe2::minimax::SearchOptions{});
   REQUIRE(value.hash_bytes == 64 * poe2::minimax::kMebibyte);
   REQUIRE(value.use_symmetry);
@@ -43,7 +43,7 @@ TEST_CASE("minimax command-line options select explicit evaluator modes", "[mini
     FAIL("explicit minimax options should parse");
     return;
   }
-  const poe2::minimax::SearchOptions value = *options;
+  const poe2::minimax::SearchOptions& value = *options;
   REQUIRE(value.hash_bytes == 0);
   REQUIRE_FALSE(value.use_symmetry);
   REQUIRE(value.evaluator == poe2::minimax::Evaluator::kPatternGain);

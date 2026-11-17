@@ -6,171 +6,24 @@
 #include <cstdint>
 #include <limits>
 
+#include "pattern_gain_layout.hpp"
 #include "poe2/minimax/evaluation.hpp"
-#include "poe2/minimax/model_header.hpp"
+#include "poe2/minimax/net.hpp"
 
 namespace poe2::minimax {
 
 namespace {
 
-constexpr std::size_t kScoringLineCount = 36;
-constexpr std::size_t kRawPatternCount = 3276;
-constexpr std::uint16_t kUnassignedOrbit = std::numeric_limits<std::uint16_t>::max();
-constexpr std::size_t kMaximumLinesPerCell = 4;
+using pattern_gain::kCellLineContributions;
+using pattern_gain::kPatternOffsets;
+using pattern_gain::kScoringLineCount;
+using pattern_gain::kScoringLines;
+
 constexpr std::size_t kPackedCountLaneBits = 8;
 constexpr std::uint32_t kPackedCountLaneMask = (1U << kPackedCountLaneBits) - 1U;
 constexpr std::array<Score, 4> kGainThresholds{{2, 4, 8, 16}};
 
 static_assert(kCellCount <= kPackedCountLaneMask);
-
-struct ScoringLine {
-  std::array<std::uint8_t, kBoardSize> cells{};
-  std::uint8_t length = 0;
-};
-
-struct LineContribution {
-  std::uint16_t place = 0;
-  std::uint8_t line = 0;
-};
-
-struct CellLineContributions {
-  // Corners use one zero-initialized entry, whose addition to line zero is a no-op.
-  std::array<LineContribution, kMaximumLinesPerCell> values{};
-};
-
-[[nodiscard]] consteval std::array<ScoringLine, kScoringLineCount> make_scoring_lines() {
-  std::array<ScoringLine, kScoringLineCount> lines{};
-  std::size_t next = 0;
-  const auto add = [&lines, &next](int row, int column, int row_step, int column_step) {
-    ScoringLine line;
-    while (row >= 0 && row < kBoardSize && column >= 0 && column < kBoardSize) {
-      line.cells[line.length++] = static_cast<std::uint8_t>(square_index(Square{row, column}));
-      row += row_step;
-      column += column_step;
-    }
-    lines[next++] = line;
-  };
-
-  for (int row = 0; row < kBoardSize; ++row) {
-    add(row, 0, 0, 1);
-  }
-  for (int column = 0; column < kBoardSize; ++column) {
-    add(0, column, 1, 0);
-  }
-  for (int column = 0; column < kBoardSize - 1; ++column) {
-    add(0, column, 1, 1);
-  }
-  for (int row = 1; row < kBoardSize - 1; ++row) {
-    add(row, 0, 1, 1);
-  }
-  for (int column = 1; column < kBoardSize; ++column) {
-    add(0, column, 1, -1);
-  }
-  for (int row = 1; row < kBoardSize - 1; ++row) {
-    add(row, kBoardSize - 1, 1, -1);
-  }
-  return lines;
-}
-
-[[nodiscard]] consteval std::array<std::uint16_t, kBoardSize + 1> make_pattern_offsets() {
-  std::array<std::uint16_t, kBoardSize + 1> offsets{};
-  std::uint16_t offset = 0;
-  std::uint16_t pattern_count = 1;
-  for (int length = 0; length <= kBoardSize; ++length) {
-    if (length >= 2) {
-      offsets[static_cast<std::size_t>(length)] = offset;
-      offset = static_cast<std::uint16_t>(offset + pattern_count);
-    }
-    pattern_count = static_cast<std::uint16_t>(pattern_count * 3);
-  }
-  return offsets;
-}
-
-[[nodiscard]] constexpr int reverse_ternary(int code, int length) noexcept {
-  int reversed = 0;
-  for (int index = 0; index < length; ++index) {
-    reversed = reversed * 3 + code % 3;
-    code /= 3;
-  }
-  return reversed;
-}
-
-[[nodiscard]] consteval std::array<std::uint16_t, kRawPatternCount> make_raw_to_reversal_orbit() {
-  std::array<std::uint16_t, kRawPatternCount> result{};
-  std::uint16_t next_orbit = 0;
-  std::size_t raw_offset = 0;
-  int pattern_count = 9;
-  for (int length = 2; length <= kBoardSize; ++length) {
-    std::array<std::uint16_t, 2187> representative_orbits{};
-    representative_orbits.fill(kUnassignedOrbit);
-    for (int code = 0; code < pattern_count; ++code) {
-      const int representative = std::min(code, reverse_ternary(code, length));
-      std::uint16_t& orbit = representative_orbits[static_cast<std::size_t>(representative)];
-      if (orbit == kUnassignedOrbit) {
-        orbit = next_orbit++;
-      }
-      result[raw_offset + static_cast<std::size_t>(code)] = orbit;
-    }
-    raw_offset += static_cast<std::size_t>(pattern_count);
-    pattern_count *= 3;
-  }
-  return result;
-}
-
-[[nodiscard]] consteval std::array<CellLineContributions, kCellCount> make_cell_line_contributions(
-    const std::array<ScoringLine, kScoringLineCount>& lines) {
-  std::array<CellLineContributions, kCellCount> result{};
-  std::array<std::uint8_t, kCellCount> counts{};
-  for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
-    const ScoringLine& line = lines[line_index];
-    std::uint16_t place = 1;
-    for (std::uint8_t offset = 0; offset < line.length; ++offset) {
-      CellLineContributions& contributions = result[line.cells[offset]];
-      contributions.values[counts[line.cells[offset]]++] = LineContribution{
-          .place = place,
-          .line = static_cast<std::uint8_t>(line_index),
-      };
-      place = static_cast<std::uint16_t>(place * 3);
-    }
-  }
-  return result;
-}
-
-using RawLineWeights =
-    std::array<std::array<std::int16_t, frozen_pattern_gain_model::kLineKnots.size()>,
-               kRawPatternCount>;
-
-[[nodiscard]] consteval RawLineWeights make_raw_line_weights(
-    const std::array<std::uint16_t, kRawPatternCount>& raw_to_orbit) {
-  RawLineWeights result{};
-  for (std::size_t pattern = 0; pattern < result.size(); ++pattern) {
-    const std::size_t orbit = raw_to_orbit[pattern];
-    for (std::size_t knot = 0; knot < result[pattern].size(); ++knot) {
-      result[pattern][knot] = frozen_pattern_gain_model::kLineWeights
-          [knot * frozen_pattern_gain_model::kReversalOrbitCount + orbit];
-    }
-  }
-  return result;
-}
-
-inline constexpr auto kScoringLines = make_scoring_lines();
-inline constexpr auto kPatternOffsets = make_pattern_offsets();
-inline constexpr auto kRawToReversalOrbit = make_raw_to_reversal_orbit();
-inline constexpr auto kCellLineContributions = make_cell_line_contributions(kScoringLines);
-inline constexpr auto kRawLineWeights = make_raw_line_weights(kRawToReversalOrbit);
-
-static_assert(kScoringLines.size() == kScoringLineCount);
-static_assert(kPatternOffsets[7] + 2187 == kRawPatternCount);
-static_assert(*std::max_element(kRawToReversalOrbit.begin(), kRawToReversalOrbit.end()) + 1 ==
-              frozen_pattern_gain_model::kReversalOrbitCount);
-static_assert(frozen_pattern_gain_model::kFractionalBits == kPatternGainFractionalBits);
-static_assert(frozen_pattern_gain_model::kScale == kPatternGainScale);
-static_assert(frozen_pattern_gain_model::kLineWeights.size() ==
-              frozen_pattern_gain_model::kLineKnots.size() *
-                  frozen_pattern_gain_model::kReversalOrbitCount);
-static_assert(frozen_pattern_gain_model::kGainWeights.size() ==
-              frozen_pattern_gain_model::kGainKnots.size() *
-                  frozen_pattern_gain_model::kGainFeatureCount);
 
 template <std::uint16_t Digit>
 void accumulate_line_codes(std::array<std::uint16_t, kScoringLineCount>& codes,
@@ -179,8 +32,8 @@ void accumulate_line_codes(std::array<std::uint16_t, kScoringLineCount>& codes,
   while (pieces != 0) {
     const int cell = std::countr_zero(pieces);
     pieces &= pieces - Bitboard{1};
-    const CellLineContributions& contributions = kCellLineContributions[cell];
-    for (const LineContribution contribution : contributions.values) {
+    const pattern_gain::CellLineContributions& contributions = kCellLineContributions[cell];
+    for (const pattern_gain::LineContribution contribution : contributions.values) {
       codes[contribution.line] =
           static_cast<std::uint16_t>(codes[contribution.line] + Digit * contribution.place);
     }
@@ -205,7 +58,7 @@ void insert_descending(std::array<Score, Size>& values, Score value) noexcept {
 
 struct GainEvaluation {
   Score closure_value = 0;
-  std::array<std::int64_t, frozen_pattern_gain_model::kGainFeatureCount> features{};
+  std::array<std::int64_t, kPatternGainFeatureCount> features{};
 };
 
 [[nodiscard]] constexpr std::uint32_t threshold_count_increment(Score gain) noexcept {
@@ -323,8 +176,9 @@ template <std::size_t KnotCount>
   return rounded_divide(numerator, right - left);
 }
 
-[[nodiscard]] std::int64_t line_residual(const Position& position) noexcept {
-  std::array<std::int64_t, frozen_pattern_gain_model::kLineKnots.size()> sums{};
+[[nodiscard]] std::int64_t line_residual(const Position& position,
+                                         const PatternGainTables& tables) noexcept {
+  std::array<std::int64_t, kPatternGainLineKnotCount> sums{};
   const Player own = position.side_to_move();
   const Bitboard player_one = position.board().bits(Player::kOne);
   const Bitboard player_two = position.board().bits(Player::kTwo);
@@ -334,39 +188,44 @@ template <std::size_t KnotCount>
   accumulate_line_codes<1>(codes, own_pieces);
   accumulate_line_codes<2>(codes, opponent_pieces);
   for (std::size_t line_index = 0; line_index < kScoringLines.size(); ++line_index) {
-    const ScoringLine& line = kScoringLines[line_index];
+    const pattern_gain::ScoringLine& line = kScoringLines[line_index];
     const std::size_t pattern = kPatternOffsets[line.length] + codes[line_index];
-    const auto& weights = kRawLineWeights[pattern];
+    const auto& weights = tables.raw_line_weights[pattern];
     for (std::size_t knot = 0; knot < sums.size(); ++knot) {
       sums[knot] += weights[knot];
     }
   }
-  return interpolate(sums, frozen_pattern_gain_model::kLineKnots, position.ply());
+  return interpolate(sums, kPatternGainLineKnots, position.ply());
 }
 
 [[nodiscard]] std::int64_t gain_residual(
-    const std::array<std::int64_t, frozen_pattern_gain_model::kGainFeatureCount>& features,
-    int ply) noexcept {
-  std::array<std::int64_t, frozen_pattern_gain_model::kGainKnots.size()> sums{};
+    const std::array<std::int64_t, kPatternGainFeatureCount>& features, int ply,
+    const PatternGainTables& tables) noexcept {
+  std::array<std::int64_t, kPatternGainKnotCount> sums{};
   for (std::size_t knot = 0; knot < sums.size(); ++knot) {
     for (std::size_t feature = 0; feature < features.size(); ++feature) {
-      sums[knot] += features[feature] *
-                    frozen_pattern_gain_model::kGainWeights
-                        [knot * frozen_pattern_gain_model::kGainFeatureCount + feature];
+      sums[knot] +=
+          features[feature] * tables.gain_weights[knot * kPatternGainFeatureCount + feature];
     }
   }
-  return interpolate(sums, frozen_pattern_gain_model::kGainKnots, ply);
+  return interpolate(sums, kPatternGainKnots, ply);
 }
 
 }  // namespace
 
 FixedEvaluation evaluate_pattern_gain_fixed(const Position& position) noexcept {
+  return evaluate_pattern_gain_fixed(position, default_net()->pattern_gain());
+}
+
+FixedEvaluation evaluate_pattern_gain_fixed(const Position& position,
+                                            const PatternGainTables& tables) noexcept {
   const Bitboard legal_moves = position.legal_moves();
-  return evaluate_pattern_gain_fixed(position, legal_moves, std::popcount(legal_moves));
+  return evaluate_pattern_gain_fixed(position, legal_moves, std::popcount(legal_moves), tables);
 }
 
 FixedEvaluation evaluate_pattern_gain_fixed(const Position& position, Bitboard legal_moves,
-                                            int empty_count) noexcept {
+                                            int empty_count,
+                                            const PatternGainTables& tables) noexcept {
   assert(legal_moves == position.legal_moves());
   assert(empty_count == std::popcount(legal_moves));
   if (empty_count <= 2) {
@@ -377,8 +236,9 @@ FixedEvaluation evaluate_pattern_gain_fixed(const Position& position, Bitboard l
   const GainEvaluation gains = evaluate_gains(position, legal_moves, empty_count);
   const int ply = position.ply();
   const std::int64_t value = static_cast<std::int64_t>(gains.closure_value) * kPatternGainScale +
-                             frozen_pattern_gain_model::kIntercept[static_cast<std::size_t>(ply)] +
-                             line_residual(position) + gain_residual(gains.features, ply);
+                             tables.intercept[static_cast<std::size_t>(ply)] +
+                             line_residual(position, tables) +
+                             gain_residual(gains.features, ply, tables);
   assert(value >= std::numeric_limits<FixedEvaluation>::min());
   assert(value <= std::numeric_limits<FixedEvaluation>::max());
   return static_cast<FixedEvaluation>(value);

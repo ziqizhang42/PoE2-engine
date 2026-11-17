@@ -90,8 +90,10 @@ struct LabelProvenance {
   std::size_t workers_requested = 0;
   std::string target_selection;
   std::string evaluator = "two-ply-closure";
-  // Empty unless the label search used a learned evaluator.
-  std::string model_header_sha256;
+  // Empty unless the label search used a learned evaluator; the key is the label manifest's,
+  // "net_sha256" or the earlier "model_header_sha256".
+  std::string model_key;
+  std::string model_sha256;
 
   friend bool operator==(const LabelProvenance&, const LabelProvenance&) = default;
 };

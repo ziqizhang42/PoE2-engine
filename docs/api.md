@@ -131,9 +131,12 @@ The minimax executable enables D4 symmetry, a 64 MiB transposition table, and th
 ```bash
 build/release/engines/minimax/poe2_minimax \
   [--hash-mb <size>] [--no-symmetry] \
-  [--evaluator static|two-ply-closure|pattern-gain]
+  [--evaluator static|two-ply-closure|pattern-gain] [--net <file>]
+build/release/engines/minimax/poe2_minimax --version [--net <file>]
 ```
 
 `--hash-mb 0` disables the table. `--no-symmetry` selects the separately compiled identity search path, so it does not construct or update a symmetry tracker.
 
 `static` is the normalized board score. `two-ply-closure` minimizes over the opponent's best reply after each candidate move, then applies the static score. `pattern-gain` adds the frozen line-pattern and marginal-gain-summary residual to that closure value, keeping scale-32 fixed-point scores inside search. It remains exact at terminal positions and with at most two empty squares.
+
+`--net` loads the `pattern-gain` parameters from a net file instead of the net built into the engine; a file the engine cannot use stops it with the reason. `--version` prints the engine version, the net designs it supports, and the name, ID, and SHA-256 of the net it would use, and the engine sends the same lines as `id` lines in its handshake. See [nets.md](nets.md).

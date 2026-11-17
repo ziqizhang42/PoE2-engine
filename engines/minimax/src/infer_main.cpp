@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "poe2/minimax/evaluation.hpp"
+#include "poe2/minimax/net.hpp"
 
 namespace {
 
@@ -26,6 +28,7 @@ enum class Evaluator : std::uint8_t {
 struct Options {
   Evaluator evaluator = Evaluator::kPatternGain;
   std::uint64_t iterations = 0;
+  std::shared_ptr<const poe2::minimax::Net> net = poe2::minimax::default_net();
 };
 
 [[nodiscard]] std::uint64_t parse_u64(std::string_view text, int base, std::string_view field) {
@@ -45,8 +48,8 @@ struct Options {
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument{argv[index]};
     if (argument == "--help") {
-      std::cout << "usage: poe2_minimax_infer"
-                   " [--evaluator two-ply-closure|pattern-gain] [--iterations <passes>]\n"
+      std::cout << "usage: poe2_minimax_infer [--evaluator two-ply-closure|pattern-gain]"
+                   " [--net <file>] [--iterations <passes>]\n"
                    "Reads hexadecimal player-one/player-two bitboards from stdin.\n";
       std::exit(0);
     }
@@ -62,6 +65,8 @@ struct Options {
       } else {
         throw std::invalid_argument{"--evaluator must be two-ply-closure or pattern-gain"};
       }
+    } else if (argument == "--net") {
+      options.net = poe2::minimax::load_net_file(value);
     } else if (argument == "--iterations") {
       options.iterations = parse_u64(value, 10, "--iterations");
       if (options.iterations == 0) {
@@ -129,9 +134,9 @@ struct Options {
 }
 
 [[nodiscard]] poe2::minimax::FixedEvaluation evaluate(const poe2::Position& position,
-                                                      Evaluator evaluator) noexcept {
-  if (evaluator == Evaluator::kPatternGain) {
-    return poe2::minimax::evaluate_pattern_gain_fixed(position);
+                                                      const Options& options) noexcept {
+  if (options.evaluator == Evaluator::kPatternGain) {
+    return poe2::minimax::evaluate_pattern_gain_fixed(position, options.net->pattern_gain());
   }
   return static_cast<poe2::minimax::FixedEvaluation>(
       poe2::minimax::evaluate_two_ply_closure(position) * poe2::minimax::kPatternGainScale);
@@ -140,13 +145,13 @@ struct Options {
 void run_benchmark(const std::vector<poe2::Position>& positions, const Options& options) {
   std::int64_t checksum = 0;
   for (const poe2::Position& position : positions) {
-    checksum += evaluate(position, options.evaluator);
+    checksum += evaluate(position, options);
   }
 
   const auto begin = std::chrono::steady_clock::now();
   for (std::uint64_t iteration = 0; iteration < options.iterations; ++iteration) {
     for (const poe2::Position& position : positions) {
-      checksum += evaluate(position, options.evaluator);
+      checksum += evaluate(position, options);
     }
   }
   const auto end = std::chrono::steady_clock::now();
@@ -174,7 +179,7 @@ int run(int argc, char* argv[]) {
     return 0;
   }
   for (const poe2::Position& position : positions) {
-    std::cout << evaluate(position, options.evaluator) << '\n';
+    std::cout << evaluate(position, options) << '\n';
   }
   return 0;
 }
