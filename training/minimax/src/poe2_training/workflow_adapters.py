@@ -1039,7 +1039,8 @@ def authenticate_candidate(config: WorkflowConfig,
         log = (config.output_directory / command["log"]).resolve()
         _require(config.output_directory in log.parents and log.is_file() and
                  sha256_file(log) == command["log_sha256"],
-                 f"candidate command log {index} is missing, unsafe, or changed")
+                 f"candidate command log {index} is missing, unsafe, or changed: {log}; "
+                 f"the candidate that records it is {iteration.candidate_directory}")
     training_datasets = candidate_training_datasets(iteration)
     _require(report.get("training_datasets") == training_datasets,
              "candidate lists different training datasets than its training report")

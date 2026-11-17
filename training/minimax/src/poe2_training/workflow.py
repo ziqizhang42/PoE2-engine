@@ -297,6 +297,9 @@ class CommandRunner:
                     process.stdout.close()
                 with self._lock:
                     self._active.pop(process.pid, None)
+            # Reports vouch for this log's digest under a COMPLETE marker, so it reaches the disk
+            # before the command counts as done; the metrics write below syncs its directory.
+            os.fsync(log.fileno())
         wall = time.perf_counter() - started
         metrics: dict[str, Any] = {
             "started_at_utc": started_utc, "finished_at_utc": now_utc(),

@@ -1465,6 +1465,15 @@ class WorkflowPromotionTest(unittest.TestCase):
         net.write_bytes(original)
         authenticate_candidate(self.config, self.iteration)
 
+    def test_a_candidate_with_a_lost_command_log_names_the_log_and_itself(self) -> None:
+        self._candidate()
+        log = self.config.output_directory / "logs" / f"{self.iteration.name}-fixture.log"
+        log.write_bytes(b"")
+        with self.assertRaises(AdapterError) as raised:
+            authenticate_candidate(self.config, self.iteration)
+        self.assertIn(str(log), str(raised.exception))
+        self.assertIn(str(self.iteration.candidate_directory), str(raised.exception))
+
     def test_a_candidate_and_gate_from_before_nets_still_authenticate_and_promote(self) -> None:
         self._candidate(legacy=True)
         ledger_header, _ = self._header_gate()

@@ -287,6 +287,22 @@ class CrashLeftoverTest(RecoveryFixture):
                 commands.run(check, log_path=logs / "closed.log",
                              metrics_path=logs / "closed.json")
 
+    def test_a_command_log_reaches_the_disk_before_the_command_returns(self) -> None:
+        log = (self.root / "logs" / "synced.log").resolve()
+        synced: list[str] = []
+        fsync = os.fsync
+
+        def recording_fsync(descriptor: int) -> None:
+            synced.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+            fsync(descriptor)
+
+        with mock.patch.object(os, "fsync", recording_fsync):
+            CommandRunner(REPOSITORY).run([sys.executable, "-c", "print('done')"],
+                                          log_path=log, metrics_path=log.with_suffix(".json"),
+                                          output_callback=lambda _line, _elapsed: None)
+        self.assertIn(str(log), synced)
+        self.assertTrue(log.read_text(encoding="utf-8").endswith("done\n"))
+
 
 class EventLogTest(RecoveryFixture):
     def test_a_torn_final_record_is_dropped_under_the_lock_and_recorded(self) -> None:
