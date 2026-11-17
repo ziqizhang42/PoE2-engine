@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from .model_metrics import DEFAULT_RIDGE_LAMBDAS
+from .net_file import FILE_SUFFIX, NetFileError, read_net
 from .pattern_suites import SUITE_NAMES
 from .shared import find_repository_root, sha256_file
 
@@ -67,10 +68,15 @@ class ModelReference:
 
     name: str
     model_id: str | None
+    # The C++ header of a model trained before nets were files; it no longer drives any build.
     header: Path | None
-    # Set for the model an iteration of this recipe trains. Its ID and header are those of the
+    # Set for the model an iteration of this recipe trains. Its ID and net are those of the
     # iteration's authenticated candidate, filled in by the workflow once its gate accepts it.
     iteration: str | None = None
+    # The net file engines and data tools load for this model, its SHA-256, and its name.
+    net: Path | None = None
+    net_sha256: str | None = None
+    net_name: str | None = None
 
     @property
     def sha256(self) -> str:
@@ -445,12 +451,23 @@ def _parse_models(repository: Path, value: Any) -> tuple[ModelReference, ...]:
         match = MODEL_ID_PATTERN.fullmatch(model_id) if isinstance(model_id, str) else None
         _require(match is not None, f"{field} must be an archived model ID: candidate-sha256-<digest>")
         directory = repository / MODEL_ARCHIVE_DIRECTORY
-        header = directory / f"{model_id}.hpp"
-        _require(header.is_file() and (directory / f"{model_id}.json").is_file(),
+        net_path = directory / f"{model_id}{FILE_SUFFIX}"
+        _require(net_path.is_file() and (directory / f"{model_id}.json").is_file(),
                  f"{field} is not archived under {MODEL_ARCHIVE_DIRECTORY}/: {model_id}")
-        _require(sha256_file(header) == match.group(1),
-                 f"{field} archived header does not match its digest: {header}")
-        models.append(ModelReference(name=name, model_id=model_id, header=header))
+        try:
+            net = read_net(net_path)
+        except NetFileError as error:
+            raise WorkflowConfigError(f"{field} archived net is unusable: {error}") from error
+        _require(net.identity_sha256 == match.group(1),
+                 f"{field} archived net does not match its model ID: {net_path}")
+        header: Path | None = directory / f"{model_id}.hpp"
+        if not header.is_file():
+            header = None
+        else:
+            _require(sha256_file(header) == match.group(1),
+                     f"{field} archived header does not match its digest: {header}")
+        models.append(ModelReference(name=name, model_id=model_id, header=header, net=net_path,
+                                     net_sha256=net.sha256, net_name=net.name))
     return tuple(models)
 
 

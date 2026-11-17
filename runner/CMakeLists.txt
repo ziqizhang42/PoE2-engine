@@ -211,6 +211,16 @@ add_test(
 )
 
 add_test(
+  NAME runner_eval_records_each_side_net
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DBUILD_DIR=${CMAKE_BINARY_DIR}
+          -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -DTEST_ROOT=${CMAKE_BINARY_DIR}/eval-nets-test
+          -P ${PROJECT_SOURCE_DIR}/tests/eval_nets_test.cmake
+)
+
+add_test(
   NAME runner_eval_sampling_is_reproducible
   COMMAND ${CMAKE_COMMAND}
           -DRUNNER=$<TARGET_FILE:poe2_runner>

@@ -406,13 +406,16 @@ class TrainingPart:
 
     def describe(self) -> dict[str, Any]:
         artifact = self.dataset.artifact
-        model = artifact.manifest.get("inputs", {}).get("label_search", {}).get(
-            "model_header_sha256")
+        search = artifact.manifest.get("inputs", {}).get("label_search", {})
+        header, net = search.get("model_header_sha256"), search.get("net_sha256")
+        # Named as the workflow names recorded teachers: a net file by its own hash.
+        teacher = (f"candidate-sha256-{header}" if header is not None else
+                   f"net-sha256-{net}" if net is not None else None)
         return {
             "corpus_id": artifact.manifest["corpus"]["id"],
             "feature_binary_sha256": artifact.binary_digest,
             "feature_manifest_sha256": artifact.manifest_digest,
-            "teacher": None if model is None else f"candidate-sha256-{model}",
+            "teacher": teacher,
             "weight": self.weight,
             "train_records": self.train_records,
             "dropped_primary_holdout": self.dropped_primary_holdout,

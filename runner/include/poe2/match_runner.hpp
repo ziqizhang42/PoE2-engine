@@ -147,6 +147,15 @@ struct SeriesResult {
   std::string detail;
 };
 
+// What an engine reports about itself in the "id" lines of its handshake. Engines from before
+// nets were files report none of it, which leaves every field empty.
+struct EngineIdentity {
+  std::string version;
+  std::string net_name;
+  std::string net_id;
+  std::string net_sha256;
+};
+
 struct GsprtAnalysis {
   std::optional<double> normalized_elo;
   double llr = 0.0;
@@ -176,6 +185,10 @@ void print_series_result(const SeriesResult& result, std::ostream& output);
                                                          double beta) noexcept;
 void analyze_series_result(SeriesResult& result, const SeriesOptions& options) noexcept;
 
+// Starts the engine once and reads its handshake. Throws std::runtime_error, with what the engine
+// printed, when it does not complete the handshake, for example because it refused its net.
+[[nodiscard]] EngineIdentity query_engine_identity(const std::string& command,
+                                                   std::chrono::milliseconds timeout);
 [[nodiscard]] MatchResult run_process_match(const MatchOptions& options, std::ostream& output);
 [[nodiscard]] SeriesResult run_process_series(const SeriesOptions& options, std::ostream& output);
 

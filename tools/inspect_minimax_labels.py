@@ -248,14 +248,18 @@ def audit_dataset(directory: Path, source_path: Path | None = None) -> AuditSumm
     expected_mode = {"exact": 1, "teacher": 2}.get(search.get("mode"))
     _require(expected_mode is not None, "search.mode is unknown")
     # Schema-v2 artifacts predating the descriptive evaluator names used "b".
+    # A pattern-gain teacher is named by net_sha256 for a net file, or by model_header_sha256
+    # for a net compiled from a C++ header, as labels made before nets were files record it.
     evaluator = search.get("evaluator")
-    model = search.get("model_header_sha256")
+    digests = {key: search[key] for key in ("net_sha256", "model_header_sha256") if key in search}
     if evaluator == "pattern-gain":
-        _require(isinstance(model, str) and re.fullmatch(r"[0-9a-f]{64}", model) is not None,
-                 "search.model_header_sha256 must be a SHA-256 hex digest")
+        _require(len(digests) == 1, "search must name its net by exactly one digest")
+        key, digest = next(iter(digests.items()))
+        _require(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+                 f"search.{key} must be a SHA-256 hex digest")
     else:
         _require(evaluator in ("two-ply-closure", "b"), "search evaluator is unknown")
-        _require(model is None, "search.model_header_sha256 requires pattern-gain")
+        _require(not digests, "search names a net, which requires pattern-gain")
     _require(search.get("symmetry") is True, "symmetry must be enabled")
     _require(search.get("two_ply_closure") is True, "two-ply closure must be enabled")
     if schema_version >= 2:

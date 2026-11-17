@@ -79,7 +79,7 @@ Record:
 | 330 | 98 | 49 signed 16-bit opponent gains |
 | 428 | 4 | Reserved zero |
 
-The manifest's `inputs.label_search` carries the label evaluator. Every shard must share it, so a learned teacher's `model_header_sha256` reaches the features, and shards labeled by different evaluators cannot be exported together.
+The manifest's `inputs.label_search` carries the label evaluator. Every shard must share it, so a learned teacher's net, recorded as `net_sha256` (or `model_header_sha256` for the built-in net), reaches the features, and shards labeled by different evaluators cannot be exported together.
 
 The independent auditor verifies framing and digests, canonical uniqueness and ordering, split and multiplicity accounting, line-pattern encoding, normalized static scores, two-ply-closure arithmetic, and a deterministic sample of marginal gains recomputed from the game rules.
 

@@ -235,16 +235,21 @@ class CompactRecipeTest(ChainFixture):
         for stage in ("dataset:g001:source", "iteration:g001:candidate-validation"):
             self.assertEqual(before[stage], after[stage], stage)
 
-    def test_a_trained_teacher_has_a_data_tool_named_by_its_iteration(self) -> None:
+    def test_a_trained_teacher_is_a_net_for_the_shared_data_tool(self) -> None:
         config = self._chain()
         dataset = config.dataset("g002")
-        binary = data_binary(config, dataset)
-        self.assertEqual(binary, config.output_directory /
-                         "build/teacher-iteration-g001/debug/runner/poe2_minimax_data")
+        binary = data_binary(config)
+        self.assertEqual(binary, config.output_directory / "build/debug/runner/poe2_minimax_data")
         for command in (source_chunk_command(config, dataset, 0, 4),
                         label_command(config, dataset, 0)):
             self.assertEqual(command[0], str(binary))
             self.assertEqual(command[command.index("--evaluator") + 1], "pattern-gain")
+            self.assertIn("once iteration g001's gate accepts it",
+                          command[command.index("--net") + 1])
+        teacher = config.dataset("g001").teacher
+        command = label_command(config, config.dataset("g001"), 0)
+        self.assertEqual(command[command.index("--net") + 1], str(teacher.net))
+        self.assertEqual(teacher.net, REPOSITORY / "models" / f"{V02}.poe2net")
 
     def test_dependency_order_includes_the_parent_that_trains_a_model(self) -> None:
         config = self._chain()

@@ -38,6 +38,12 @@ and `run1/g001`, keep the IDs earlier records gave them, which are hashes of the
 they were converted from (`633309adb322` and `8e39040c1537`); their files record that header
 hash as `header_sha256`, and their file hashes are recorded beside the IDs.
 
+Training writes nets: candidate validation exports each trained model with
+`python -m poe2_training.net_export` (run from `training/minimax`), and every gated model,
+winner or not, is archived as `models/candidate-sha256-<digest>.poe2net` beside a record of
+its lineage, training, and metrics ([training-workflow.md](training-workflow.md#gate-promotion)).
+Teachers, gates, and comparisons load those files; nothing is rebuilt per model.
+
 ## Designs
 
 A net states its design, the evaluator it was made for. An engine lists the designs it can

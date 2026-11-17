@@ -144,7 +144,7 @@ class LocationTest(unittest.TestCase):
 
     def test_a_build_tree_configured_elsewhere_is_rebuilt_from_scratch(self) -> None:
         dataset = self.config.dataset("main")
-        build = data_build_directory(self.config, dataset)
+        build = data_build_directory(self.config)
         build.mkdir(parents=True)
         (build / "CMakeCache.txt").write_text(
             "# This is the CMakeCache file.\n"
@@ -164,7 +164,7 @@ class LocationTest(unittest.TestCase):
                     f"CMAKE_CACHEFILE_DIR:INTERNAL={build}\n"
                     f"CMAKE_HOME_DIRECTORY:INTERNAL={REPOSITORY}\n", encoding="utf-8")
             else:
-                binary = data_binary(self.config, dataset)
+                binary = data_binary(self.config)
                 binary.parent.mkdir(parents=True, exist_ok=True)
                 binary.write_bytes(b"fixture\0" + COMMIT.encode() + b"\0")
 
@@ -178,7 +178,7 @@ class LocationTest(unittest.TestCase):
         self.assertEqual([event["configured_at"] for event in removed],
                          ["/elsewhere/build/debug"])
 
-        data_binary(self.config, dataset).unlink()
+        data_binary(self.config).unlink()
         again = WorkflowRunner(self.config, state, COMMIT)
         with mock.patch.object(again, "_command", side_effect=build_here):
             again._ensure_data_binary("dataset:main:source", 2, dataset)

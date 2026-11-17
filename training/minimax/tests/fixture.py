@@ -12,9 +12,27 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from poe2_training.artifact import CELL_COUNT, HEADER, LINE_COUNT, MAGIC, RECORD_BYTES
+from poe2_training.net_file import encode_net, read_net
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
+REFERENCE_NET = REPOSITORY / "tests" / "fixtures" / "nets" / "pattern-gain-v1" / "reference.poe2net"
+
+
+def net_bytes(name: str, **metadata: str) -> bytes:
+    """Return a valid net file holding the reference parameters under this name."""
+    return encode_net(read_net(REFERENCE_NET).parameters, {"name": name, **metadata})
+
+
+def archive_net(repository: Path, name: str = "fixture/g000", *,
+                record: str = "{}\n") -> str:
+    """Archive a net under repository/models as promote-gate would, returning its model ID."""
+    data = net_bytes(name)
+    model_id = f"candidate-sha256-{hashlib.sha256(data).hexdigest()}"
+    (repository / "models").mkdir(parents=True, exist_ok=True)
+    (repository / "models" / f"{model_id}.poe2net").write_bytes(data)
+    (repository / "models" / f"{model_id}.json").write_text(record, encoding="utf-8")
+    return model_id
 
 
 def repository_temporary_directory() -> tempfile.TemporaryDirectory:
@@ -80,6 +98,7 @@ class FixtureRecord:
 def write_feature_fixture(directory: Path, *, dirty: bool = False,
                           rows: Sequence[FixtureRecord] | None = None,
                           teacher_sha256: str | None = None,
+                          teacher_key: str = "model_header_sha256",
                           corpus_id: str = "training-loader-test") -> Path:
     directory.mkdir()
     corpus_digest = hashlib.sha256(corpus_id.encode()).digest()
@@ -156,7 +175,7 @@ def write_feature_fixture(directory: Path, *, dirty: bool = False,
                 "workers_requested": 1,
                 "target_selection": "deepest_terminal_parity",
                 **({} if teacher_sha256 is None else
-                   {"evaluator": "pattern-gain", "model_header_sha256": teacher_sha256}),
+                   {"evaluator": "pattern-gain", teacher_key: teacher_sha256}),
             },
         },
         "exporter_build": {

@@ -109,6 +109,24 @@ struct BestMoveResult {
   return false;
 }
 
+void read_identity_line(std::string_view line, EngineIdentity& identity) {
+  constexpr std::string_view kVersion = "id version ";
+  constexpr std::string_view kNet = "id net ";
+  if (line.starts_with(kVersion)) {
+    identity.version = std::string{line.substr(kVersion.size())};
+    return;
+  }
+  if (!line.starts_with(kNet)) {
+    return;
+  }
+  std::istringstream fields{std::string{line.substr(kNet.size())}};
+  std::string trailing;
+  if (!(fields >> identity.net_name >> identity.net_id >> identity.net_sha256) ||
+      (fields >> trailing)) {
+    throw std::runtime_error{"engine reported a malformed net line: " + std::string{line}};
+  }
+}
+
 [[nodiscard]] BestMoveResult read_bestmove(EngineProcess& engine,
                                            std::chrono::milliseconds timeout) {
   const Clock::time_point deadline = Clock::now() + timeout;
@@ -917,6 +935,37 @@ void analyze_series_result(SeriesResult& result, const SeriesOptions& options) n
       log_betting_evidence(result.statistical_score_counts, 0.5, EvidenceDirection::kBelow);
   update_normalized_elo(result);
   update_sequential_test(result);
+}
+
+EngineIdentity query_engine_identity(const std::string& command,
+                                     std::chrono::milliseconds timeout) {
+  EngineProcess engine{command};
+  engine.start();
+  std::string output;
+  if (!engine.write_line(engine_stdio::kCommandPoe2)) {
+    throw std::runtime_error{"could not start engine: " + command};
+  }
+  EngineIdentity identity;
+  const Clock::time_point deadline = Clock::now() + timeout;
+  while (Clock::now() < deadline) {
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+    const LineReadResult line = engine.read_line(remaining);
+    if (line.status != LineReadStatus::kLine) {
+      break;
+    }
+    if (line.line == engine_stdio::kResponsePoe2Ok) {
+      static_cast<void>(engine.write_line(engine_stdio::kCommandQuit));
+      engine.stop();
+      return identity;
+    }
+    read_identity_line(line.line, identity);
+    output += line.line;
+    output += '\n';
+  }
+  engine.stop();
+  throw std::runtime_error{"engine did not complete its handshake: " + command +
+                           (output.empty() ? std::string{} : "\n" + output)};
 }
 
 MatchResult run_process_match(const MatchOptions& options, std::ostream& output) {

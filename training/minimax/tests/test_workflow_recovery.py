@@ -169,8 +169,8 @@ class CrashLeftoverTest(RecoveryFixture):
 
     def test_a_half_built_data_build_is_rebuilt_from_scratch(self) -> None:
         runner = self._runner()
-        build = data_build_directory(self.config, self.dataset)
-        binary = data_binary(self.config, self.dataset)
+        build = data_build_directory(self.config)
+        binary = data_binary(self.config)
 
         def crash_while_building(_stage: str, operation: str, *_arguments, **_options) -> None:
             build.mkdir(parents=True, exist_ok=True)
@@ -350,7 +350,7 @@ class Catch2ReuseTest(RecoveryFixture):
         pin = catch2_pin(REPOSITORY)
         assert pin is not None
         self.pin = pin
-        self.source = data_build_directory(self.config, self.dataset) / "_deps" / "catch2-src"
+        self.source = data_build_directory(self.config) / "_deps" / "catch2-src"
         self._checkout()
         self.cache = catch2_cache_directory(self.config, self.pin)
         self.enterContext(mock.patch("poe2_training.workflow.catch2_candidates",

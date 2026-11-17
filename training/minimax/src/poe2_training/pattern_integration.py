@@ -6,6 +6,7 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -60,7 +61,7 @@ def _quantized_model(model: dict[str, Any]) -> QuantizedPatternModel:
     )
 
 
-def _run_inference(binary: Path, evaluator: str,
+def _run_inference(binary: Sequence[str], evaluator: str,
                    player_one: np.ndarray, player_two: np.ndarray,
                    iterations: int = 0) -> str:
     _require(player_one.shape == player_two.shape, "inference bitboards are not aligned")
@@ -68,7 +69,7 @@ def _run_inference(binary: Path, evaluator: str,
         f"{int(one):016x} {int(two):016x}\n"
         for one, two in zip(player_one, player_two)
     )
-    command = [str(binary), "--evaluator", evaluator]
+    command = [*binary, "--evaluator", evaluator]
     if iterations > 0:
         command.extend(("--iterations", str(iterations)))
     completed = subprocess.run(
@@ -87,7 +88,7 @@ def _run_inference(binary: Path, evaluator: str,
     return completed.stdout.strip()
 
 
-def _predictions(binary: Path, evaluator: str,
+def _predictions(binary: Sequence[str], evaluator: str,
                  player_one: np.ndarray, player_two: np.ndarray) -> np.ndarray:
     output = _run_inference(binary, evaluator, player_one, player_two)
     try:
@@ -125,12 +126,15 @@ def _transform_bitboard(bits: int, symmetry: int) -> int:
     return transformed
 
 
-def run_verification(dataset_path: Path, experiment_path: Path, binary: Path,
+def run_verification(dataset_path: Path, experiment_path: Path, binary_path: Path,
                      sample_count: int, symmetry_sample_count: int,
-                     verify_digest: bool, benchmark_iterations: int) -> None:
+                     verify_digest: bool, benchmark_iterations: int,
+                     net: Path | None = None) -> None:
+    """Compare the experiment's quantized model with C++ inference, loading net if given."""
     report = open_pattern_report(experiment_path)
     model = _quantized_model(_selected_model(report))
-    _require(binary.is_file(), f"C++ inference binary does not exist: {binary}")
+    _require(binary_path.is_file(), f"C++ inference binary does not exist: {binary_path}")
+    binary = [str(binary_path), *([] if net is None else ["--net", str(net)])]
 
     with MappedFeatureDataset(dataset_path, verify_digest=verify_digest) as dataset:
         metadata = report.get("input")
@@ -220,6 +224,8 @@ def main() -> int:
                         help="authenticated frozen pattern/gain experiment")
     parser.add_argument("--inference-binary", type=Path, required=True,
                         help="release poe2_minimax_infer executable")
+    parser.add_argument("--net", type=Path,
+                        help="net file the inference binary loads instead of its built-in net")
     parser.add_argument("--samples", type=int, default=4096,
                         help="deterministically sampled base positions")
     parser.add_argument("--symmetry-samples", type=int, default=512,
@@ -241,6 +247,7 @@ def main() -> int:
             arguments.symmetry_samples,
             not arguments.skip_digest,
             arguments.benchmark_iterations,
+            arguments.net,
         )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"pattern/gain integration verification failed: {error}", file=sys.stderr)

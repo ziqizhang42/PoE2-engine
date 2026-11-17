@@ -45,7 +45,7 @@ def parse_pairs(line: str) -> dict[str, int]:
 
 
 def run_position(binary: Path, evaluator: str, opening: str,
-                 move_time_ms: int) -> SearchResult:
+                 move_time_ms: int, net: Path | None = None) -> SearchResult:
     position = "position startpos"
     if opening != "startpos":
         position += f" moves {opening}"
@@ -53,7 +53,8 @@ def run_position(binary: Path, evaluator: str, opening: str,
     started = time.perf_counter()
     try:
         completed = subprocess.run(
-            [str(binary), "--evaluator", evaluator],
+            [str(binary), "--evaluator", evaluator,
+             *([] if net is None else ["--net", str(net)])],
             input=commands,
             text=True,
             stdout=subprocess.PIPE,
@@ -125,6 +126,8 @@ def main() -> int:
     parser.add_argument("--positions", type=int, default=32)
     parser.add_argument("--movetime-ms", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20260818)
+    parser.add_argument("--net", type=Path,
+                        help="net file the engine loads instead of its built-in net")
     arguments = parser.parse_args()
     if arguments.positions <= 0 or arguments.movetime_ms <= 0:
         parser.error("--positions and --movetime-ms must be positive")
@@ -138,7 +141,8 @@ def main() -> int:
         sample = generator.sample(openings, min(arguments.positions, len(openings)))
         summaries: dict[str, dict[str, float]] = {}
         for evaluator in ("two-ply-closure", "pattern-gain"):
-            results = [run_position(engine, evaluator, opening, arguments.movetime_ms)
+            results = [run_position(engine, evaluator, opening, arguments.movetime_ms,
+                                    arguments.net)
                        for opening in sample]
             summaries[evaluator] = summarize(evaluator, results, arguments.movetime_ms)
         print(

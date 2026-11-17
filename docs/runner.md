@@ -135,7 +135,9 @@ build/release/runner/poe2_runner eval \
 It writes `manifest.json`, `summary.json`, `games.csv`, `command.txt`, and `runner.log` under `build/eval/runs/`, and appends one summary row to `eval/results.csv` unless `--no-ledger` is passed.
 Every eval run supplies both `--new-engine <name>` and `--base-engine <name>`. Use `--new-engine-args` or `--base-engine-args` for side-specific engine arguments.
 
-Eval mode requires an even game budget, alternating sides, a shuffled opening book, and enough unique openings. If `--opening-seed` is omitted, eval derives it from both build IDs, the opening-book digest, and the eval kind. Any abnormal game invalidates the run immediately, writes partial artifacts, excludes that game from inference, and returns status `3`.
+`--new-net <file>` and `--base-net <file>` give a side a net file ([nets.md](nets.md)), passed to its engine as `--net`, so one engine build can play two nets. Before the first game, eval asks each engine for its identity in the protocol handshake and records it in the manifest and the ledger: its version and the name, ID, and SHA-256 of the net it plays. A side given a net must report that it loaded one, or eval stops before playing. A side without one plays its built-in net and records what it reports; an engine from before nets were files reports nothing, which leaves those fields empty.
+
+Eval mode requires an even game budget, alternating sides, a shuffled opening book, and enough unique openings. If `--opening-seed` is omitted, eval derives it from both build IDs, the opening-book digest, and the eval kind, and from the SHA-256 of each net file given. Any abnormal game invalidates the run immediately, writes partial artifacts, excludes that game from inference, and returns status `3`.
 
 ## Opening Generation
 

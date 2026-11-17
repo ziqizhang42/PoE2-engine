@@ -56,7 +56,7 @@ Stages that reuse an existing complete artifact are labeled `authenticated`, so 
 The candidate promotion sequence is:
 
 1. Commit a recipe whose candidate iteration includes an `engine_gate` table. A gate can also be added later in a compatible recipe revision, as long as that stage has not started.
-2. Run the iteration: training, candidate validation, and the gate. The gate builds the candidate's model header privately, so nothing in the source tree changes.
+2. Run the iteration: training, candidate validation, and the gate. Candidate validation exports the model as a net file, and the gate plays that file on an engine built from the run's commit, so nothing in the source tree changes.
 3. Preview and apply gate promotion. This appends the ledger row, archives the model under `models/`, and adds a row to `models/index.csv`, whatever the decision. A generation that is gated against a model trained in the same recipe, or reads data taught by one, can be promoted only after that model is archived, so promote a chain's generations in order.
 4. Review and commit the ledger row, archive, and index.
 5. Only if the gate decision is `accept_alt`: preview and apply candidate handoff, then review and commit the installed model header.
@@ -179,7 +179,7 @@ A compact recipe is shorthand only. It expands into the long form described belo
 
 #### Chains
 
-A generation whose parent is trained by the same recipe learns from the parent's candidate straight from the run folder, so one `poe2-train run` can train several generations unattended. The child starts only once the parent's gate is complete and its decision is `accept_alt`, authenticated as promote-gate authenticates a gate. The parent does not need to be promoted or archived first. The child's data tool is built from the parent's candidate header under `<run>/build/teacher-iteration-<parent>/`, and its gate builds the same header privately as its base, from the same commit as the candidate. Every manifest records the parent's model digest, as it does for an archived teacher.
+A generation whose parent is trained by the same recipe learns from the parent's candidate straight from the run folder, so one `poe2-train run` can train several generations unattended. The child starts only once the parent's gate is complete and its decision is `accept_alt`, authenticated as promote-gate authenticates a gate. The parent does not need to be promoted or archived first. The child's data comes from the run's shared data tool loading the parent's candidate net file, and its gate plays the same net as its base on the gate's engine build. Every manifest records the SHA-256 of the parent's net, as it does for an archived teacher. A parent validated before nets were files is loaded from its converted net in `models/`, so it must be promoted first.
 
 A child's stage fingerprints name its parent by iteration and by the fingerprint of the parent's gate stage, which the recipe alone determines, so `plan` works before the parent exists. The parent's actual model ID is locked as an input of the child's stages when they first start, like other upstream inputs.
 
@@ -222,7 +222,7 @@ dataset = "g002"
 base_model = "g001"
 ```
 
-A model ID names a model archived under `models/`. Loading the recipe requires the archived `.hpp` and `.json` to exist and the header to match its digest. The workflow builds a private data tool for each archived teacher under `<run>/build/teacher-<digest prefix>/`, with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the archived header, and passes `--evaluator pattern-gain` to position generation and labeling. Source, label, and feature authentication require the recorded evaluator and model digest to match the recipe. A teacher is part of the source and label stage fingerprints, so it cannot change once those stages start. Datasets without a teacher keep the fingerprints they had before teachers existed.
+A model ID names a model archived under `models/`. Loading the recipe requires the archived net file (`.poe2net`) and `.json` to exist and the net to carry that ID; a model archived before nets were files also keeps its `.hpp`, which must match its digest. Position generation and labeling run the run's one data tool, `<run>/build/<preset>/runner/poe2_minimax_data`, with `--evaluator pattern-gain --net models/<ID>.poe2net`, so a teacher needs no build of its own. Source, label, and feature authentication require the recorded evaluator and net to match the recipe: data made from a net file records its SHA-256 as `net_sha256`, and data made before nets were files records the teacher's header digest as `model_header_sha256`, which still authenticates. A teacher is part of the source and label stage fingerprints, so it cannot change once those stages start. Datasets without a teacher keep the fingerprints they had before teachers existed.
 
 `{ iteration = "NAME" }` names the model that an earlier iteration of this recipe trains, used as described under [chains](#chains). That iteration must have an engine gate, only later iterations may use its model, and an entry may share a name only with its own iteration. Keep this reference after the model is promoted: replacing it with the archived ID would change the fingerprints of the stages that already used it.
 
@@ -354,7 +354,7 @@ games = 4000
 
 `name` defaults to `NEW-vs-BASE`. An entry takes the engine gate's match settings: `opening_book`, `games`, `workers`, `timeout_ms`, `go_movetime_ms`, `opening_seed`, and the `sequential_*` bounds. In a compact recipe it starts from `[defaults.engine_gate]` and overrides it key by key, which expands into the same long-form entry; in a long-form recipe, unset settings take the gate's defaults. Both sides always run `minimax/poe2_minimax --evaluator pattern-gain`, so the four engine fields may be given only with those values. Comparing a model with itself, by name or by model ID, is rejected.
 
-A side trained by the recipe needs only its iteration's authenticated, promotable candidate. Its own gate does not have to accept it, because comparing a generation that lost is a fair question. The result goes under `<run>/comparisons/<name>/` and is laid out like a gate: both models are built privately at the same commit under `builds/<model ID>/`, the evaluator run is under `runs/`, and the result is create-only, authenticated before reuse, and discarded if a pause interrupts it. Comparison builds skip the test suite, which each candidate's gate already ran.
+A side trained by the recipe needs only its iteration's authenticated, promotable candidate. Its own gate does not have to accept it, because comparing a generation that lost is a fair question. The result goes under `<run>/comparisons/<name>/` and is laid out like a gate: the run's commit is built once under `builds/<engine build ID>/`, both nets play on that one engine, the evaluator run is under `runs/`, and the result is create-only, authenticated before reuse, and discarded if a pause interrupts it. Comparison builds skip the test suite, which each candidate's gate already ran.
 
 `poe2-train run` plays each comparison as soon as both of its models exist, checking before the first iteration and after each one. Comparisons play in recipe order, one at a time and never alongside other work, because matches are timed. If a side is never trained, because its generation is not started after a lost gate, the comparison is not started either. `plan`, `status`, and `validate` show it with the reason, and `run` skips it without an error:
 
@@ -388,7 +388,7 @@ search_positions = 32
 search_movetime_ms = 100
 ```
 
-Candidate validation builds isolated inference, engine, and runner binaries; checks Python/C++ and D4 parity; and records benchmarks, digests, logs, resources, and separate float and exported-quantized metrics. The deployable frozen suite fixes its quantization at the engine's scale-32 contract before sealed evaluation.
+Candidate validation exports the selected model as a net file, `candidate/net.poe2net` ([nets.md](nets.md)), named `<run>/<iteration>` and recording its teacher, parent, training date, corpus, and the digests of its training report and features. It builds the inference tool and engine once in the run's shared build, checks Python/C++ and D4 parity with the inference tool loading the net, benchmarks search with the engine loading it, and records digests, logs, resources, and separate float and exported-quantized metrics. The candidate's model ID is `candidate-sha256-<net file SHA-256>`. The deployable frozen suite fixes its quantization at the engine's scale-32 contract before sealed evaluation. A candidate validated before nets were files holds the C++ header and private build it was validated with, and still authenticates.
 
 A promotable candidate can be gated against an existing engine build:
 
@@ -409,9 +409,9 @@ sequential_alpha = 0.05
 sequential_beta = 0.05
 ```
 
-The candidate side is fixed to `minimax/poe2_minimax --evaluator pattern-gain`. The gate requires a promotable candidate. It configures a private build with `-DPOE2_MINIMAX_MODEL_HEADER` pointing at the candidate's authenticated header, runs the full test suite, and plays the match. The tracked engine header is never read or changed. Its build identity, `candidate-sha256-<header digest>`, is derived from the model header; the base engine and arguments remain configurable.
+The candidate side is fixed to `minimax/poe2_minimax --evaluator pattern-gain`. The gate requires a promotable candidate. It builds the run's commit once under `engine-gate/builds/<engine build ID>/`, runs the full test suite, and plays the match with the candidate's net file (`--new-net`). The engine build ID is `<commit count>-<short SHA>`, as `make git-build` names builds; it is the ledger row's `new_id`, and the ledger also records each side's net. The base engine and arguments remain configurable.
 
-A gate sets exactly one base. `base` names an existing build ID, build directory, or engine binary. `base_model` names a `[models]` entry; the gate then builds that archived header privately under `engine-gate/builds/<model ID>/` from the same commit as the candidate, so both sides differ only in their weights. The ledger records the base's `base_id` as that model ID. A gate cannot use its own candidate as its base.
+A gate sets exactly one base. `base` names an existing build ID, build directory, or engine binary, which plays its own built-in net, so an engine from before nets were files can be a base. `base_model` names a `[models]` entry; the gate then plays that model's net (`--base-net`) on the same engine build as the candidate, so both sides differ only in their nets, and the ledger's `base_id` is the same engine build ID. A gate cannot use its own candidate as its base. Gates played before nets were files built each model's header privately under `builds/<model ID>/`; they still authenticate, but a candidate validated before nets were files cannot start a new gate.
 
 Every valid gate completes and records its sequential decision, including `accept_null` and `continue`, so a gate that does not show a win can still be promoted to the ledger and archived. Only handoff, and a [chain](#chains) continuing past the gate, require a win.
 
@@ -433,10 +433,10 @@ Every mutating command holds `<run>/.orchestrator.lock`. Accepted TOML revisions
 ├── build/<preset>/
 ├── datasets/<name>/{source-chunks,source,labels/shards,features}   relabeled: labels, features
 ├── iterations/<name>/{training/{report.json,training-metrics.svg},sealed-evaluation,candidate,engine-gate}
-└── comparisons/<name>/{builds/<model ID>,runs}
+└── comparisons/<name>/{builds/<engine build ID>,runs}
 ```
 
-Build trees are private to each run or candidate. A private build reuses a Catch2 checkout already on disk instead of fetching it from GitHub when Git confirms it is a clean checkout of the tag pinned in `tests/CMakeLists.txt`, cloned from the pinned URL. The first one found, from the run's own builds and then from the repository's `build/*/`, is copied to `build/catch2-<tag>/` in the run folder and verified again before each use; otherwise CMake fetches as usual. Engine, runner, and data binaries are byte-identical either way. Once a stage starts, its configuration and input digests cannot change or be removed; unstarted stages and new iterations may be added in a later compatible recipe revision.
+The run's data tool, inference tool, and engine share `build/<preset>/`, and each gate and comparison builds its commit once in its own folder. A private build reuses a Catch2 checkout already on disk instead of fetching it from GitHub when Git confirms it is a clean checkout of the tag pinned in `tests/CMakeLists.txt`, cloned from the pinned URL. The first one found, from the run's own builds and then from the repository's `build/*/`, is copied to `build/catch2-<tag>/` in the run folder and verified again before each use; otherwise CMake fetches as usual. Engine, runner, and data binaries are byte-identical either way. Once a stage starts, its configuration and input digests cannot change or be removed; unstarted stages and new iterations may be added in a later compatible recipe revision.
 
 Artifacts are create-only and authenticated before reuse. To pause a run, interrupt it with Ctrl-C, `SIGTERM`, or `SIGHUP` (closing its tmux session sends this). The workflow terminates its subprocess groups and waits for them to exit, then removes every artifact it had started in that invocation but not completed, such as an in-progress stage, source chunk, label shard, or a private build tree that was still building. It records each removal as an `interrupted_artifact_removed` event and prints it. Completed artifacts, including finished label shards, are kept, and paths it did not start are never touched, so rerunning the same command resumes. The position source is generated in chunks of 2,000 trajectories under `datasets/<name>/source-chunks/` and then assembled, so a pause during generation loses at most one chunk. Finished chunks are reused on resume, and must come from the same build commit as the rest, like label shards. The chunk size is not part of any fingerprint, because assembly is byte-identical for any chunk size. A failure that is not an interruption leaves its incomplete artifact for inspection: the workflow reports its exact path and stops. Inspect it, then manually move aside or remove only that path before retrying.
 
@@ -467,15 +467,18 @@ Promotion requires a clean tree and the run lock. It authenticates the saved row
 
 A generation whose gate base, or the teacher of any dataset it reads, is a model trained by the same recipe is promoted only after that model is archived, so every archived model's teachers are archived too. Promote a chain in generation order, committing each result before the next. Recording stays manual: a chain that ran unattended is promoted afterwards, one generation at a time.
 
-Promotion also archives the gated model, whether it won or not, in two files named by its build identity:
+Promotion also archives the gated model, whether it won or not, in files named by its model ID:
 
 ```text
 models/
-├── candidate-sha256-<header digest>.hpp    the exact gated model header
-└── candidate-sha256-<header digest>.json   offline metrics and provenance
+├── candidate-sha256-<digest>.poe2net   the net file the engine loads
+├── candidate-sha256-<digest>.json      training record, offline metrics, and provenance
+└── candidate-sha256-<digest>.hpp       only for g000 and g001, trained before nets were files
 ```
 
-The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so every gated row leads to its model. The JSON records the architecture, recipe and iteration, Git commit, corpus, report digests, float and quantized validation and sealed-test metrics, parity, and benchmarks. It contains only fields fixed by the authenticated candidate, so it is byte-identical on every promotion attempt.
+The digest is the net file's SHA-256. For `run1/g000` and `run1/g001`, trained before nets were files, it is the SHA-256 of their C++ header: their net files were converted from those headers, carry the digest as `header_sha256`, and evaluate identically. A net's ID, shown in the index and reported by the engine, is the first 12 hex digits of the digest. Every gated row leads to its model: through `new_net_sha256` for gates that played net files, and through `new_id`, which was the model ID, for gates played before.
+
+The JSON (schema version 2) records the net's name, ID, SHA-256, design, and parameter count; its lineage (parent and teacher net names, or `two-ply-closure`); how it was trained (method, training positions, distinct games behind them when every dataset was generated by a recipe, and the selected model's training curve); and the architecture, recipe and iteration, Git commit, corpus, report digests, float and quantized validation and sealed-test metrics, parity, and benchmarks. It contains only fields fixed by the authenticated candidate and its run, so it is byte-identical on every promotion attempt.
 
 `models/index.csv` gives one readable row per promoted gate, in promotion order, so progress across runs shows without opening the archive:
 
@@ -483,17 +486,23 @@ The ledger row's `new_id` is the same `candidate-sha256-<header digest>`, so eve
 |---|---|
 | `recorded_utc` | When the gate started, from its manifest |
 | `run`, `iteration` | The recipe run and iteration that produced the model |
-| `model` | The first 12 hex digits of the model header digest; the archive files and the ledger's `new_id` carry the full digest |
+| `model` | The net ID: the first 12 hex digits of the model ID's digest |
 | `base` | The build the candidate played against, or a base model's run-scoped name such as `run1/g000` |
 | `base_model` | The first 12 hex digits of a base model's digest, empty for a build base |
 | `decision` | The gate's sequential decision, such as `accept_alt` or `accept_null` |
 | `games`, `score_pct` | Games played and the candidate's score, counting a no-winner game as half |
 | `sealed_mae` | Exported quantized sealed-test MAE, empty without a sealed evaluation |
 | `gate_run_id` | The ledger row's `run_id` |
+| `net_sha256` | The SHA-256 of the archived net file |
+| `teacher` | The net that labeled the training data, or `two-ply-closure` |
+| `method` | The pattern-training method, such as `dense` or `lookup` |
+| `data_positions`, `data_games` | Training positions, and the distinct games they came from; empty when imported data is involved |
+
+Rows recorded before these columns existed are completed from the archived records the next time the index is written.
 
 The archive and the index row are written before the ledger row, so an interrupted promotion can be retried. Existing archive files and index rows are reused only if they match exactly; otherwise promotion stops.
 
-An archived model can be rebuilt for analysis or a later re-gate by configuring a build with `-DPOE2_MINIMAX_MODEL_HEADER=models/candidate-sha256-<header digest>.hpp`.
+Any engine, inference tool, or data tool loads an archived model for analysis or a later match with `--net models/candidate-sha256-<digest>.poe2net`.
 
 ## Comparison recording
 
@@ -511,10 +520,11 @@ Both models must already be in the `models/` archive, so every hash in the recor
 | `recorded_utc` | When the match started, from its manifest |
 | `run`, `comparison` | The recipe run and the comparison's name |
 | `new`, `base` | Each side's run-scoped name, such as `run1/g003` |
-| `new_model`, `base_model` | The first 12 hex digits of each model's header digest |
+| `new_model`, `base_model` | Each model's net ID |
 | `decision` | The sequential decision for `new` against `base` |
 | `games`, `score_pct` | Games played and `new`'s score, counting a no-winner game as half |
 | `run_id` | The ledger row's `run_id` |
+| `new_net_sha256`, `base_net_sha256` | The SHA-256 of each side's net file |
 
 `models/index.csv` stays one row per promoted gate. The ledger convention that the newest accepted gate is the champion applies to gate rows (kind `training-gate`), not to comparison rows (kind `training-comparison`): a comparison that ends in `accept_alt` does not make its new model the champion.
 
@@ -527,7 +537,7 @@ uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION"
 uv run --frozen poe2-train handoff --config "$CONFIG" "$ITERATION" --apply
 ```
 
-Apply requires a promotable candidate, a completed engine gate whose decision is `accept_alt`, a committed ledger row and archive from gate promotion, a clean worktree, and the run lock. It copies the archived header over `engines/minimax/src/frozen_pattern_gain_model.hpp`, atomically and touching nothing else. Review and commit that file.
+Apply requires a promotable candidate, a completed engine gate whose decision is `accept_alt`, a committed ledger row and archive from gate promotion, a clean worktree, and the run lock. It copies the archived header over `engines/minimax/src/frozen_pattern_gain_model.hpp`, atomically and touching nothing else. Review and commit that file. Until the built-in net is itself a net file, only a candidate validated before nets were files can be installed.
 
 ## Lower-level references
 

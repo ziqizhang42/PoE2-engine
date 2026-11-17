@@ -45,7 +45,9 @@ list(GET rows 0 header)
 list(GET rows 1 historical)
 list(GET rows 2 current)
 foreach(column valid opening_seed sequential_model sequential_bound_unit sequential_llr normalized_elo
-               workers_requested workers_used games_discarded)
+               workers_requested workers_used games_discarded new_engine_version new_net_name
+               new_net_id new_net_sha256 base_engine_version base_net_name base_net_id
+               base_net_sha256)
   string(FIND "${header}" "${column}" position)
   if(position EQUAL -1)
     message(FATAL_ERROR "migrated ledger header is missing ${column}")
@@ -57,13 +59,17 @@ string(FIND "${current}" "paired_normalized_elo_gsprt,normalized_elo" current_mo
 if(historical_id EQUAL -1 OR historical_model EQUAL -1 OR current_model EQUAL -1)
   message(FATAL_ERROR "ledger migration did not preserve and classify its rows")
 endif()
-if(NOT historical MATCHES ",1,1,0$" OR NOT current MATCHES ",2,1,0$")
-  message(FATAL_ERROR "ledger migration did not record worker metadata")
+# Greedy engines report no net, so the current row's net columns are empty too.
+set(no_nets ",,,,,,,,")
+if(NOT historical MATCHES ",1,1,0${no_nets}$" OR NOT current MATCHES ",2,1,0${no_nets}$")
+  message(FATAL_ERROR "ledger migration did not record worker and net metadata")
 endif()
 
-string(REGEX REPLACE ",workers_requested,workers_used,games_discarded$" ""
+set(net_columns
+    ",new_engine_version,new_net_name,new_net_id,new_net_sha256,base_engine_version,base_net_name,base_net_id,base_net_sha256")
+string(REGEX REPLACE ",workers_requested,workers_used,games_discarded${net_columns}$" ""
        previous_header "${header}")
-string(REGEX REPLACE ",1,1,0$" "" previous_historical "${historical}")
+string(REGEX REPLACE ",1,1,0${no_nets}$" "" previous_historical "${historical}")
 set(previous_ledger "${TEST_ROOT}/previous-results.csv")
 file(WRITE "${previous_ledger}" "${previous_header}\n${previous_historical}\n")
 execute_process(
@@ -97,7 +103,45 @@ list(GET previous_rows 0 migrated_previous_header)
 list(GET previous_rows 1 migrated_previous_historical)
 list(GET previous_rows 2 previous_current)
 if(NOT previous_row_count EQUAL 3 OR NOT migrated_previous_header STREQUAL header OR
-   NOT migrated_previous_historical MATCHES ",1,1,0$" OR
-   NOT previous_current MATCHES ",2,1,0$")
+   NOT migrated_previous_historical MATCHES ",1,1,0${no_nets}$" OR
+   NOT previous_current MATCHES ",2,1,0${no_nets}$")
   message(FATAL_ERROR "previous ledger schema was not migrated with worker metadata")
+endif()
+
+string(REGEX REPLACE "${net_columns}$" "" workers_header "${header}")
+string(REGEX REPLACE "${no_nets}$" "" workers_historical "${historical}")
+set(workers_ledger "${TEST_ROOT}/workers-results.csv")
+file(WRITE "${workers_ledger}" "${workers_header}\n${workers_historical}\n")
+execute_process(
+  COMMAND "${RUNNER}" eval
+          --new-build "${BUILD_DIR}"
+          --base "${BUILD_DIR}"
+          --new-engine poe2_greedy
+          --base-engine poe2_greedy
+          --games 2
+          --workers 2
+          --timeout-ms 1000
+          --go-depth 1
+          --opening-book "${SOURCE_DIR}/eval/openings/development.txt"
+          --shuffle-openings
+          --opening-seed 1
+          --run-root "${TEST_ROOT}/workers-runs"
+          --kind smoke
+          --ledger "${workers_ledger}"
+  RESULT_VARIABLE workers_result
+  OUTPUT_VARIABLE workers_output
+  ERROR_VARIABLE workers_error
+)
+if(NOT workers_result EQUAL 0)
+  message(FATAL_ERROR
+    "workers ledger eval returned ${workers_result}\n${workers_output}\n${workers_error}"
+  )
+endif()
+file(STRINGS "${workers_ledger}" workers_rows)
+list(LENGTH workers_rows workers_row_count)
+list(GET workers_rows 0 migrated_workers_header)
+list(GET workers_rows 1 migrated_workers_historical)
+if(NOT workers_row_count EQUAL 3 OR NOT migrated_workers_header STREQUAL header OR
+   NOT migrated_workers_historical STREQUAL historical)
+  message(FATAL_ERROR "ledger with worker columns was not migrated with empty net columns")
 endif()

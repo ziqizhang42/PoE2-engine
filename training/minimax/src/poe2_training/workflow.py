@@ -40,10 +40,22 @@ from .shared import (
     sync_path,
     sync_tree,
 )
+from .net_file import (
+    FILE_SUFFIX,
+    PARAMETER_COUNT,
+    TWO_PLY_CLOSURE_TEACHER,
+    NetFileError,
+    decode_net,
+    net_from_header,
+    read_net,
+)
 from .workflow_adapters import (
+    CANDIDATE_NET,
     CANDIDATE_SCHEMA,
+    CANDIDATE_SCHEMA_VERSION,
     COMPARISON_KIND,
     COMPARISON_SCHEMA,
+    COMPARISON_SCHEMA_VERSION,
     GATE_KIND,
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
@@ -58,7 +70,12 @@ from .workflow_adapters import (
     authenticate_source,
     authenticate_training,
     candidate_build_id,
+    candidate_net_name,
+    candidate_net_path,
     candidate_training_datasets,
+    engine_build_id,
+    model_net,
+    model_net_name,
     names_path,
     catch2_cache_directory,
     catch2_candidates,
@@ -73,9 +90,7 @@ from .workflow_adapters import (
     export_command,
     feature_command,
     feature_audit_command,
-    gate_base_binary,
-    gate_base_build_directory,
-    gate_build_directory,
+    resolve_eval_binary,
     label_command,
     label_audit_command,
     label_preflight_command,
@@ -93,7 +108,6 @@ from .workflow_adapters import (
     verified_checkout,
 )
 from .workflow_config import (
-    CANDIDATE_ENGINE,
     MODEL_ARCHIVE_DIRECTORY,
     ComparisonConfig,
     ImportedDatasetConfig,
@@ -112,6 +126,7 @@ from .workflow_config import (
     trained_models_used,
     with_trained_model,
 )
+from .pattern_experiment import open_pattern_report
 from .workflow_state import RunState, now_utc
 from .workflow_ui import (
     WorkflowProgress,
@@ -125,15 +140,27 @@ from .workflow_ui import (
 )
 
 MODEL_ARCHIVE_SCHEMA = "poe2-archived-model"
+# Version 2 records carry the model's net, lineage, and training curve.
+MODEL_ARCHIVE_SCHEMA_VERSION = 2
 MODEL_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "index.csv"
-MODEL_INDEX_HEADER = (
+# Rows recorded before nets were files lack the trailing columns; they are filled in from each
+# model's archived record when the index is next written.
+PREVIOUS_MODEL_INDEX_HEADER = (
     "recorded_utc", "run", "iteration", "model", "base", "base_model", "decision", "games",
     "score_pct", "sealed_mae", "gate_run_id",
 )
+MODEL_INDEX_HEADER = (*PREVIOUS_MODEL_INDEX_HEADER, "net_sha256", "teacher", "method",
+                      "data_positions", "data_games")
 COMPARISON_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "comparisons.csv"
 COMPARISON_INDEX_HEADER = (
     "recorded_utc", "run", "comparison", "new", "new_model", "base", "base_model", "decision",
-    "games", "score_pct", "run_id",
+    "games", "score_pct", "run_id", "new_net_sha256", "base_net_sha256",
+)
+# The match runner's ledger columns that name each side's engine version and net. Saved rows
+# and ledgers from before them read as empty in these columns.
+LEDGER_NET_COLUMNS = (
+    "new_engine_version", "new_net_name", "new_net_id", "new_net_sha256",
+    "base_engine_version", "base_net_name", "base_net_id", "base_net_sha256",
 )
 ITERATION_NON_STAGE_FIELDS = frozenset({"dataset", "depends_on", "status", "blocked_by"})
 
@@ -729,11 +756,30 @@ def describe_not_started(blocked: Sequence[Blocked]) -> list[str]:
             for items in groups.values()]
 
 
-def _candidate_model(model: ModelReference, iteration: IterationConfig,
+def _candidate_model(config: WorkflowConfig, model: ModelReference, iteration: IterationConfig,
                      candidate: dict[str, Any]) -> ModelReference:
-    header = candidate["artifacts"]["model_header"]
-    return replace(model, model_id=candidate_build_id(candidate),
-                   header=iteration.candidate_directory / header["path"])
+    """Return a trained model as its candidate made it: a net file, or a header before nets.
+
+    A candidate from before nets is loaded from its converted net once it is archived.
+    """
+    model_id = candidate_build_id(candidate)
+    net = candidate["artifacts"].get("net")
+    if net is not None:
+        return replace(model, model_id=model_id, header=None,
+                       net=iteration.candidate_directory / net["path"],
+                       net_sha256=net["sha256"], net_name=net["name"])
+    header = iteration.candidate_directory / candidate["artifacts"]["model_header"]["path"]
+    archived = config.repository / MODEL_ARCHIVE_DIRECTORY / f"{model_id}{FILE_SUFFIX}"
+    if not archived.is_file():
+        return replace(model, model_id=model_id, header=header)
+    try:
+        archived_net = read_net(archived)
+    except NetFileError as error:
+        raise WorkflowError(f"archived net of {model.name} is unusable: {error}") from error
+    if archived_net.identity_sha256 != model_id.removeprefix("candidate-sha256-"):
+        raise WorkflowError(f"archived net of {model.name} does not match its model ID: {archived}")
+    return replace(model, model_id=model_id, header=header, net=archived,
+                   net_sha256=archived_net.sha256, net_name=archived_net.name)
 
 
 def _accepted_model(config: WorkflowConfig, model: ModelReference) -> ModelReference:
@@ -746,7 +792,7 @@ def _accepted_model(config: WorkflowConfig, model: ModelReference) -> ModelRefer
         raise WorkflowError(
             f"model {model.name} is not usable: iteration {model.iteration}'s authenticated "
             f"engine gate decided {gate['sequential_decision']}, not accept_alt")
-    return _candidate_model(model, iteration, candidate)
+    return _candidate_model(config, model, iteration, candidate)
 
 
 def _comparison_ready(config: WorkflowConfig, comparison: ComparisonConfig) -> bool:
@@ -766,7 +812,7 @@ def _comparison_model(config: WorkflowConfig, name: str) -> ModelReference:
     if model.iteration is None:
         return _model_by_id(config, model.model_id, "comparison model")
     iteration = config.iteration(model.iteration)
-    return _candidate_model(model, iteration, authenticate_candidate(config, iteration))
+    return _candidate_model(config, model, iteration, authenticate_candidate(config, iteration))
 
 
 def _comparison_models(config: WorkflowConfig,
@@ -843,24 +889,25 @@ def print_plan(config: WorkflowConfig) -> None:
                   f"promotable={str(iteration.candidate_validation.promotable).lower()}")
         if iteration.engine_gate is not None:
             gate = iteration.engine_gate
-            base = (gate.base if gate.base is not None else
+            base = (f"{gate.base} (its own net)" if gate.base is not None else
                     f"{_describe_model(config, _configured_base_model(config, iteration))}, "
-                    "built privately")
-            print(f"  engine gate: {iteration.gate_directory} base={base}")
+                    "its net on the gate's build")
+            print(f"  engine gate: {iteration.gate_directory} new=the candidate's net on one "
+                  f"build of the run's commit base={base}")
     blocked_matches = blocked_comparisons(config, blocked)
     for comparison in config.comparisons:
         print(paint(f"comparison {comparison.name}: {comparison.root}", "bold", "magenta"))
         if comparison.name in blocked_matches:
             print(f"  not started: {blocked_matches[comparison.name].reason}")
         for side, name in (("new", comparison.new), ("base", comparison.base)):
-            print(f"  {side}: {_describe_model(config, config.model(name), accepted=False)}, "
-                  "built privately")
+            print(f"  {side}: {_describe_model(config, config.model(name), accepted=False)}")
+        print("  both nets play on one build of the run's commit")
 
 
 def _describe_model(config: WorkflowConfig, model: ModelReference, *,
                     accepted: bool = True) -> str:
     if model.iteration is None:
-        return f"{config.name}/{model.name} ({model.model_id})"
+        return f"{model.net_name or f'{config.name}/{model.name}'} ({model.model_id})"
     return (f"{config.name}/{model.name} (the candidate of iteration {model.iteration}"
             f"{', once its gate accepts it' if accepted else ''})")
 
@@ -888,8 +935,9 @@ def _model_by_id(config: WorkflowConfig, model_id: str, label: str) -> ModelRefe
     """Return the intact archived model that the recipe's [models] table names by this ID."""
     for model in config.models:
         if model.model_id == model_id:
-            if not model.header.is_file() or sha256_file(model.header) != model.sha256:
-                raise WorkflowError(f"{label} {model.name} is missing or changed: {model.header}")
+            if model.net is None or not model.net.is_file() or (
+                    sha256_file(model.net) != model.net_sha256):
+                raise WorkflowError(f"{label} {model.name} is missing or changed: {model.net}")
             return model
     raise WorkflowError(f"{label} is not named in config.models: {model_id}")
 
@@ -1254,8 +1302,7 @@ class WorkflowRunner:
 
     def _ensure_data_binary(self, stage: str, attempt: int, dataset: ManagedDatasetConfig, *,
                             required_commit: str | None = None) -> None:
-        binary = data_binary(self.config, dataset)
-        teacher = dataset.teacher
+        binary = data_binary(self.config)
         if required_commit is not None and re.fullmatch(
                 r"[0-9a-f]{40}", required_commit) is None:
             raise WorkflowError(
@@ -1270,21 +1317,22 @@ class WorkflowRunner:
                     f"run-local data binary is from commit {ready_commit}, but the "
                     f"completed label shards require {required_commit}")
 
-        def binary_contains(*values: str) -> bool:
+        def binary_contains(commit: str) -> bool:
             try:
                 contents = binary.read_bytes()
             except OSError as error:
                 raise WorkflowError(
                     f"could not authenticate data binary {binary}: {error}") from error
-            return all(value.encode() in contents for value in values)
+            return commit.encode() in contents
 
-        identity = (teacher.sha256,) if teacher is not None else ()
+        if dataset.teacher is not None:
+            model_net(dataset.teacher)
         # A partially completed label corpus must continue with the exact
         # run-local binary that created its earlier shards. Reconfiguring this
         # tree at a later source commit would silently embed a different build
         # identity, which the native feature reader correctly rejects.
         if required_commit is not None and binary.is_file():
-            if binary_contains(required_commit, *identity):
+            if binary_contains(required_commit):
                 self._data_commits[binary] = required_commit
                 return
         if required_commit is not None and required_commit != self.commit:
@@ -1292,26 +1340,20 @@ class WorkflowRunner:
                 f"cannot resume label artifacts created by commit {required_commit}: restore "
                 f"their run-local data binary at {binary}; the current commit is {self.commit}")
 
-        build = data_build_directory(self.config, dataset)
-        model_arguments: list[str] = []
-        if teacher is not None:
-            if not teacher.header.is_file() or sha256_file(teacher.header) != teacher.sha256:
-                raise WorkflowError(
-                    f"teacher model {teacher.name} is missing or changed: {teacher.header}")
-            model_arguments.append(f"-DPOE2_MINIMAX_MODEL_HEADER={teacher.header}")
+        build = data_build_directory(self.config)
         # A build stopped midway may leave truncated outputs with fresh timestamps, so an
         # unfinished build tree is discarded whole and rebuilt rather than resumed.
         self._start_artifact(build)
-        self._configure(stage, "configure", build, model_arguments, attempt)
+        self._configure(stage, "configure", build, [], attempt)
         self._command(stage, "build-data", [
             "cmake", "--build", str(build),
             "--target", "poe2_minimax_data"], attempt=attempt)
         if not binary.is_file():
             raise WorkflowError(f"data binary was not built: {binary}")
-        if not binary_contains(self.commit, *identity):
+        if not binary_contains(self.commit):
             raise WorkflowError(
-                f"data binary does not contain the configured build commit "
-                f"{self.commit}{' and teacher model' if teacher is not None else ''}: {binary}")
+                f"data binary does not contain the configured build commit {self.commit}: "
+                f"{binary}")
         self._finish_artifact(build)
         self._data_commits[binary] = self.commit
 
@@ -1694,20 +1736,11 @@ class WorkflowRunner:
 
         def create(attempt: int) -> None:
             reserve_report_directory(root, CANDIDATE_SCHEMA)
-            command_results: list[CommandResult] = []
+            build, command_results = self._ensure_tools(stage, attempt)
             export = self._command(stage, "export", export_command(
-                sys.executable, self.config, iteration), attempt=attempt)
+                sys.executable, self.config, iteration, **self._net_lineage(iteration)),
+                attempt=attempt)
             command_results.append(export)
-            header = root / "frozen_pattern_gain_model.hpp"
-            build = root / "build"
-            configure = self._configure(
-                stage, "configure", build, [f"-DPOE2_MINIMAX_MODEL_HEADER={header}"], attempt)
-            command_results.append(configure)
-            compile_result = self._command(stage, "build", [
-                "cmake", "--build", str(build), "--target",
-                "poe2_minimax_infer", "poe2_minimax", "poe2_runner",
-            ], attempt=attempt)
-            command_results.append(compile_result)
             inference = build / "engines" / "minimax" / "poe2_minimax_infer"
             engine = build / "engines" / "minimax" / "poe2_minimax"
             parity = self._command(stage, "parity", parity_command(
@@ -1735,15 +1768,12 @@ class WorkflowRunner:
             comparison = next((
                 _parse_key_values(line) for line in search.output.splitlines()
                 if line.startswith("search_benchmark_comparison")), {})
-            artifacts = {
-                "model_header": header, "inference_binary": inference, "engine_binary": engine,
-                "runner_binary": build / "runner" / "poe2_runner",
-            }
-            for name, path in artifacts.items():
-                if not path.is_file():
-                    raise WorkflowError(f"candidate build did not produce {name}: {path}")
+            try:
+                net = read_net(candidate_net_path(iteration))
+            except NetFileError as error:
+                raise WorkflowError(f"candidate export wrote an unusable net: {error}") from error
             report = {
-                "schema": CANDIDATE_SCHEMA, "schema_version": 1,
+                "schema": CANDIDATE_SCHEMA, "schema_version": CANDIDATE_SCHEMA_VERSION,
                 "created_at_utc": now_utc(), "promotable": candidate.promotable,
                 "git_commit": self.commit,
                 "settings": {
@@ -1776,9 +1806,11 @@ class WorkflowRunner:
                 "evaluator_benchmark": evaluator_benchmarks,
                 "search_benchmark": {"evaluators": search_benchmarks,
                                      "comparison": comparison},
-                "artifacts": {
-                    name: {"path": path.relative_to(root).as_posix(),
-                           "sha256": sha256_file(path)} for name, path in artifacts.items()
+                "artifacts": {"net": {"path": CANDIDATE_NET, "sha256": net.sha256,
+                                      "id": net.net_id, "name": net.name, "design": net.design}},
+                "tools": {
+                    name: {"path": self.config.recorded_path(path), "sha256": sha256_file(path)}
+                    for name, path in (("inference_binary", inference), ("engine_binary", engine))
                 },
                 "commands": [{
                     "command": list(item.command),
@@ -1813,45 +1845,38 @@ class WorkflowRunner:
         base_model = _gate_base_model(self.config, iteration)
         if base_model is not None:
             check_model_lineage(self.config, base_model)
-        base_engine_binary = gate_base_binary(self.config, iteration)
         if candidate_stats is None:
             raise WorkflowError("engine gate requires authenticated candidate statistics")
-        header_metadata = candidate_stats.get("artifacts", {}).get("model_header")
-        if not isinstance(header_metadata, dict) or not isinstance(
-                header_metadata.get("sha256"), str) or not isinstance(
-                header_metadata.get("path"), str):
-            raise WorkflowError("candidate report has no authenticated model header")
-        build_id = candidate_build_id(candidate_stats)
-        if base_model is not None and base_model.model_id == build_id:
+        model_id = candidate_build_id(candidate_stats)
+        if base_model is not None and base_model.model_id == model_id:
             raise WorkflowError(
                 f"engine gate for {iteration.name} would play its candidate against itself")
-        build = gate_build_directory(self.config, iteration, candidate_stats)
-        candidate_header = iteration.candidate_directory / header_metadata["path"]
-
-        def require_candidate_header() -> None:
-            if (not candidate_header.is_file() or
-                    sha256_file(candidate_header) != header_metadata["sha256"]):
-                raise WorkflowError(
-                    f"candidate model header is missing or changed: {candidate_header}")
-
-        require_candidate_header()
+        base_build_binary = (resolve_eval_binary(self.config, gate.base, gate.base_engine)
+                             if gate.base is not None else None)
 
         def create(attempt: int) -> None:
+            net_metadata = candidate_stats["artifacts"].get("net")
+            if net_metadata is None:
+                raise WorkflowError(
+                    f"the candidate of {iteration.name} was validated before nets were files; "
+                    "validate it again to gate it")
+            new_net = candidate_net_path(iteration)
+            if not new_net.is_file() or sha256_file(new_net) != net_metadata["sha256"]:
+                raise WorkflowError(f"candidate net is missing or changed: {new_net}")
+            base_net = None if base_model is None else model_net(base_model)
             reserve_report_directory(root, GATE_SCHEMA)
-            self._configure(stage, "configure", build,
-                            [f"-DPOE2_MINIMAX_MODEL_HEADER={candidate_header}"], attempt)
+            build_id = self._engine_build_id()
+            build = root / "builds" / build_id / self.config.build_preset
+            self._configure(stage, "configure", build, [], attempt)
             self._command(stage, "build", ["cmake", "--build", str(build)], attempt=attempt)
             self._command(stage, "test", [
                 "ctest", "--test-dir", str(build), "--output-on-failure"], attempt=attempt)
-            require_candidate_header()
-            if base_model is not None:
-                # Both sides build from this commit, so the gate measures only the weights.
-                self._build_model_engine(
-                    stage, attempt, base_model, gate_base_build_directory(self.config, iteration),
-                    "base", engine=gate.base_engine)
             runner = build / "runner" / "poe2_runner"
-            command = engine_gate_command(self.config, iteration, build, runner)
-            result = self._command(stage, "evaluate", command, attempt=attempt)
+            base_engine = (build / "engines" / gate.base_engine if base_build_binary is None
+                           else base_build_binary)
+            result = self._command(stage, "evaluate", engine_gate_command(
+                self.config, iteration, build, runner, new_net=new_net, base_model=base_model),
+                attempt=attempt)
             run_path = _evaluator_run(self.config, result, root, "engine gate")
             manifest = json.loads((run_path / "manifest.json").read_bytes())
             build_artifacts = {
@@ -1872,12 +1897,17 @@ class WorkflowRunner:
                 "run_id": manifest.get("run_id"),
                 "run_directory": run_path.relative_to(root).as_posix(),
                 "candidate_report_sha256": candidate_stats["report_sha256"],
-                "candidate_build_id": build_id,
+                "candidate_build_id": model_id,
+                "engine_build_id": build_id,
                 "build_directory": build.relative_to(root).as_posix(),
-                "model_header_sha256": header_metadata["sha256"],
+                "new_net": {"path": self.config.recorded_path(new_net),
+                            "sha256": sha256_file(new_net), "model_id": model_id},
+                "base_net": None if base_net is None else {
+                    "path": self.config.recorded_path(base_net),
+                    "sha256": sha256_file(base_net), "model_id": base_model.model_id},
                 "base_engine_artifact": {
-                    "path": self.config.recorded_path(base_engine_binary),
-                    "sha256": sha256_file(base_engine_binary),
+                    "path": self.config.recorded_path(base_engine),
+                    "sha256": sha256_file(base_engine),
                 },
                 "build_artifacts": {
                     name: {"path": path.relative_to(root).as_posix(),
@@ -1894,29 +1924,48 @@ class WorkflowRunner:
         return self._run_simple(stage, root, "engine gate", {
             "candidate": candidate_stats,
             "opening_book_sha256": sha256_file(gate.opening_book),
-            **({"base_engine_sha256": sha256_file(base_engine_binary)} if base_model is None
+            **({"base_engine_sha256": sha256_file(base_build_binary)} if base_model is None
                else {"base_model": base_model.model_id}),
         }, create, authenticate)
 
-    def _build_model_engine(self, stage: str, attempt: int, model: ModelReference, build: Path,
-                            role: str, *, engine: str = CANDIDATE_ENGINE,
-                            runner: bool = False) -> Path:
-        """Build one model's engine privately at this commit, optionally with the match runner."""
-        if model.header is None or not model.header.is_file() or (
-                sha256_file(model.header) != model.sha256):
-            raise WorkflowError(f"model {model.name} is missing or changed: {model.header}")
-        self._configure(stage, f"configure-{role}", build,
-                        [f"-DPOE2_MINIMAX_MODEL_HEADER={model.header}"], attempt)
-        targets = ["poe2_minimax", *(["poe2_runner"] if runner else [])]
-        self._command(stage, f"build-{role}", ["cmake", "--build", str(build), "--target",
-                                                *targets], attempt=attempt)
-        binary = build / "engines" / engine
-        if not binary.is_file():
-            raise WorkflowError(f"{stage} did not build model {model.name}: {binary}")
-        return binary
+    def _engine_build_id(self) -> str:
+        """Return the build ID of this run's commit, as make git-build names it."""
+        completed = subprocess.run(["git", "rev-list", "--count", self.commit],
+                                   cwd=self.config.repository, capture_output=True, text=True,
+                                   check=False)
+        if completed.returncode != 0 or not completed.stdout.strip().isdigit():
+            raise WorkflowError(f"could not count commits up to {self.commit}: "
+                                f"{completed.stderr.strip()}")
+        return engine_build_id(int(completed.stdout), self.commit)
+
+    def _ensure_tools(self, stage: str, attempt: int) -> tuple[Path, list[CommandResult]]:
+        """Build the engine and inference tool in the run's shared build at this commit."""
+        build = data_build_directory(self.config)
+        self._start_artifact(build)
+        results = [self._configure(stage, "configure", build, [], attempt)]
+        results.append(self._command(stage, "build", [
+            "cmake", "--build", str(build), "--target", "poe2_minimax_infer", "poe2_minimax",
+        ], attempt=attempt))
+        self._finish_artifact(build)
+        return build, results
+
+    def _net_lineage(self, iteration: IterationConfig) -> dict[str, str | None]:
+        """Return the teacher, parent, and training date an exported net records."""
+        dataset = self.config.dataset(iteration.dataset)
+        teacher = (dataset.teacher if isinstance(dataset, ManagedDatasetConfig) else None)
+        base = _gate_base_model(self.config, iteration)
+        created = self.state.first_completion_date(f"iteration:{iteration.name}:training")
+        if created is None:
+            raise WorkflowError(f"iteration {iteration.name} has no completed training stage")
+        return {
+            "teacher": (TWO_PLY_CLOSURE_TEACHER if teacher is None else
+                        model_net_name(self.config, teacher)),
+            "parent": None if base is None else model_net_name(self.config, base),
+            "created": created,
+        }
 
     def run_comparison(self, comparison: ComparisonConfig) -> dict[str, Any]:
-        """Play a comparison between both models, each built privately at this commit."""
+        """Play a comparison between both models' nets on one build of this commit."""
         stage = comparison_stage(comparison)
         if not comparison.opening_book.is_file():
             raise WorkflowError(
@@ -1925,30 +1974,32 @@ class WorkflowRunner:
         root = comparison.root
 
         def create(attempt: int) -> None:
+            sides = {"new": comparison_side(self.config, new),
+                     "base": comparison_side(self.config, base)}
             reserve_report_directory(root, COMPARISON_SCHEMA)
-            sides = {"new": comparison_side(self.config, comparison, new),
-                     "base": comparison_side(self.config, comparison, base)}
+            build_id = self._engine_build_id()
+            build = root / "builds" / build_id / self.config.build_preset
+            self._configure(stage, "configure", build, [], attempt)
+            self._command(stage, "build", ["cmake", "--build", str(build), "--target",
+                                           "poe2_minimax", "poe2_runner"], attempt=attempt)
             binaries = {
-                "new_engine_binary": self._build_model_engine(
-                    stage, attempt, new, root / sides["new"]["build_directory"], "new",
-                    runner=True),
-                "base_engine_binary": self._build_model_engine(
-                    stage, attempt, base, root / sides["base"]["build_directory"], "base"),
+                "new_engine_binary": build / "engines" / comparison.new_engine,
+                "base_engine_binary": build / "engines" / comparison.base_engine,
+                "runner_binary": build / "runner" / "poe2_runner",
             }
-            binaries["runner_binary"] = (
-                root / sides["new"]["build_directory"] / "runner" / "poe2_runner")
             result = self._command(stage, "evaluate", comparison_command(
-                self.config, comparison, new.model_id, base.model_id),
-                attempt=attempt)
+                self.config, comparison, build, new, base), attempt=attempt)
             run_path = _evaluator_run(self.config, result, root, "comparison")
             report = {
-                "schema": COMPARISON_SCHEMA, "schema_version": 1,
+                "schema": COMPARISON_SCHEMA, "schema_version": COMPARISON_SCHEMA_VERSION,
                 "created_at_utc": now_utc(), "git_commit": self.commit,
                 "settings": {**match_settings(comparison),
                              "opening_book": self.config.recorded_path(comparison.opening_book)},
                 "opening_book_sha256": sha256_file(comparison.opening_book),
                 "run_id": json.loads((run_path / "manifest.json").read_bytes()).get("run_id"),
                 "run_directory": run_path.relative_to(root).as_posix(),
+                "engine_build_id": build_id,
+                "build_directory": build.relative_to(root).as_posix(),
                 **sides,
                 "build_artifacts": {
                     name: {"path": path.relative_to(root).as_posix(),
@@ -2198,13 +2249,20 @@ def _handoff_candidate(config: WorkflowConfig, iteration_name: str, *,
 
 @dataclass(frozen=True)
 class ArchiveEntry:
-    """One gated model's content-addressed files under the repository's models/ folder."""
+    """One gated model's content-addressed files under the repository's models/ folder.
 
-    header_source: Path
-    header_sha256: str
-    header_path: Path
+    Every model is archived as a net file. A model trained before nets were files also keeps
+    the C++ header its ID was derived from, and its net is converted from that header.
+    """
+
+    model_id: str
+    net: bytes
+    net_path: Path
     metrics_path: Path
     metrics: bytes
+    header_source: Path | None = None
+    header_sha256: str | None = None
+    header_path: Path | None = None
 
 
 def _repository_relative(config: WorkflowConfig, path: Path) -> str:
@@ -2214,17 +2272,48 @@ def _repository_relative(config: WorkflowConfig, path: Path) -> str:
         return str(path)
 
 
+def _training_record(config: WorkflowConfig, iteration: IterationConfig) -> dict[str, Any]:
+    """Return how a model was trained: method, data size, and its selected model's curve."""
+    report = open_pattern_report(iteration.training_directory)
+    selected = report["selection"]["best_model"]
+    model = next(item for item in report["models"] if item.get("name") == selected)
+    training_data = report.get("training_data")
+    positions = (training_data["records"] if isinstance(training_data, dict) else
+                 report["input"]["records"])
+    datasets = [config.dataset(iteration.dataset), *extra_training_datasets(config, iteration)]
+    sources = {dataset.source_directory: dataset.source.trajectories for dataset in datasets
+               if isinstance(dataset, ManagedDatasetConfig)}
+    games = sum(sources.values()) if len(sources) == len(datasets) else None
+    return {"method": report["training"].get("method", "dense"), "positions": positions,
+            "games": games, "curve": model["trace"]}
+
+
 def _archive_entry(config: WorkflowConfig, iteration: IterationConfig,
                    candidate: dict[str, Any]) -> ArchiveEntry:
-    header_metadata = candidate["artifacts"]["model_header"]
     model_id = candidate_build_id(candidate)
     directory = config.repository / MODEL_ARCHIVE_DIRECTORY
+    header_metadata = candidate["artifacts"].get("model_header")
+    if header_metadata is None:
+        net_bytes = candidate_net_path(iteration).read_bytes()
+        if hashlib.sha256(net_bytes).hexdigest() != candidate["artifacts"]["net"]["sha256"]:
+            raise WorkflowError(f"candidate net changed: {candidate_net_path(iteration)}")
+        header_source = None
+    else:
+        header_source = iteration.candidate_directory / header_metadata["path"]
+        net_bytes = _converted_net(config, iteration, header_source)
+    net = decode_net(net_bytes)
     model = candidate["model"]
-    # Only fields fixed by the authenticated candidate belong here, so a retried promotion
-    # regenerates byte-identical metrics and the archive stays idempotent.
+    # Only fields fixed by the authenticated candidate and its run belong here, so a retried
+    # promotion regenerates byte-identical files and the archive stays idempotent.
     record = {
-        "schema": MODEL_ARCHIVE_SCHEMA, "schema_version": 1,
-        "model_id": model_id, "model_header_sha256": header_metadata["sha256"],
+        "schema": MODEL_ARCHIVE_SCHEMA, "schema_version": MODEL_ARCHIVE_SCHEMA_VERSION,
+        "model_id": model_id,
+        **({} if header_metadata is None else
+           {"model_header_sha256": header_metadata["sha256"]}),
+        "net": {"name": net.name, "id": net.net_id, "sha256": net.sha256, "design": net.design,
+                "parameters": PARAMETER_COUNT, "file": f"{model_id}{FILE_SUFFIX}"},
+        "lineage": {"parent": net.metadata.get("parent"), "teacher": net.metadata["teacher"]},
+        "training": _training_record(config, iteration),
         "architecture": model["name"],
         "recipe": {"path": _repository_relative(config, config.path),
                    "run": config.name, "iteration": iteration.name},
@@ -2247,38 +2336,64 @@ def _archive_entry(config: WorkflowConfig, iteration: IterationConfig,
                        "search": candidate["search_benchmark"]},
     }
     return ArchiveEntry(
-        header_source=iteration.candidate_directory / header_metadata["path"],
-        header_sha256=header_metadata["sha256"],
-        header_path=directory / f"{model_id}.hpp",
+        model_id=model_id, net=net_bytes, net_path=directory / f"{model_id}{FILE_SUFFIX}",
         metrics_path=directory / f"{model_id}.json",
         metrics=(json.dumps(record, indent=2, sort_keys=True) + "\n").encode(),
+        header_source=header_source,
+        header_sha256=None if header_metadata is None else header_metadata["sha256"],
+        header_path=None if header_metadata is None else directory / f"{model_id}.hpp",
     )
 
 
+def _converted_net(config: WorkflowConfig, iteration: IterationConfig, header: Path) -> bytes:
+    """Return the net file of a candidate validated before nets were files."""
+    dataset = config.dataset(iteration.dataset)
+    teacher = dataset.teacher if isinstance(dataset, ManagedDatasetConfig) else None
+    base = _gate_base_model(config, iteration)
+    created = RunState(config).first_completion_date(f"iteration:{iteration.name}:training")
+    if created is None:
+        raise WorkflowError(f"iteration {iteration.name} has no completed training stage")
+    try:
+        return net_from_header(
+            header.read_text(encoding="utf-8"), name=candidate_net_name(config, iteration),
+            teacher=(TWO_PLY_CLOSURE_TEACHER if teacher is None else
+                     model_net_name(config, teacher)),
+            parent=None if base is None else model_net_name(config, base), created=created)
+    except (OSError, NetFileError) as error:
+        raise WorkflowError(f"could not convert candidate header {header}: {error}") from error
+
+
 def _archived_model_state(entry: ArchiveEntry) -> bool:
-    """Return whether both archive files exist; reject files that disagree with the candidate."""
-    if entry.header_path.exists() and sha256_file(entry.header_path) != entry.header_sha256:
+    """Return whether every archive file exists; reject files that disagree with the candidate."""
+    if entry.net_path.exists() and entry.net_path.read_bytes() != entry.net:
+        raise WorkflowError(f"archived net differs from the candidate: {entry.net_path}")
+    if entry.header_path is not None and entry.header_path.exists() and (
+            sha256_file(entry.header_path) != entry.header_sha256):
         raise WorkflowError(
             f"archived model header differs from the candidate: {entry.header_path}")
     if entry.metrics_path.exists() and entry.metrics_path.read_bytes() != entry.metrics:
         raise WorkflowError(
             f"archived model metrics differ from the candidate: {entry.metrics_path}")
-    return entry.header_path.is_file() and entry.metrics_path.is_file()
+    return (entry.net_path.is_file() and entry.metrics_path.is_file() and
+            (entry.header_path is None or entry.header_path.is_file()))
 
 
 def _write_archived_model(entry: ArchiveEntry) -> None:
     if _archived_model_state(entry):
         return
     try:
-        contents = entry.header_source.read_bytes()
-        if hashlib.sha256(contents).hexdigest() != entry.header_sha256:
-            raise WorkflowError(
-                f"candidate header changed before archiving: {entry.header_source}")
-        for path, data in ((entry.header_path, contents), (entry.metrics_path, entry.metrics)):
+        files = [(entry.net_path, entry.net), (entry.metrics_path, entry.metrics)]
+        if entry.header_source is not None and entry.header_path is not None:
+            contents = entry.header_source.read_bytes()
+            if hashlib.sha256(contents).hexdigest() != entry.header_sha256:
+                raise WorkflowError(
+                    f"candidate header changed before archiving: {entry.header_source}")
+            files.append((entry.header_path, contents))
+        for path, data in files:
             if not path.exists():
                 atomic_write_bytes(path, data)
     except OSError as error:
-        raise WorkflowError(f"could not archive model {entry.header_path.stem}: {error}") from error
+        raise WorkflowError(f"could not archive model {entry.model_id}: {error}") from error
 
 
 def _games_and_score(saved: dict[str, str]) -> tuple[int, str]:
@@ -2297,17 +2412,56 @@ def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
     games, score = _games_and_score(saved)
     sealed = candidate["model"]["quantized"].get("sealed_test")
     sealed_mae = f"{sealed['mae']:.3f}" if isinstance(sealed, dict) else ""
-    model_digest = candidate["artifacts"]["model_header"]["sha256"]
     base, base_model = saved["base_id"], ""
     model = _gate_base_model(config, iteration)
     if model is not None:
-        # People read the run-scoped generation name; the digest keeps the row exact.
-        base, base_model = f"{config.name}/{model.name}", model.sha256[:12]
+        # People read the generation's name; the ID keeps the row exact.
+        base, base_model = model_net_name(config, model), model.sha256[:12]
+    record = json.loads(_archive_entry(config, iteration, candidate).metrics)
     return [
-        saved["created_at_utc"], config.name, iteration.name, model_digest[:12],
+        saved["created_at_utc"], config.name, iteration.name, record["net"]["id"],
         base, base_model, gate["sequential_decision"], str(games), score,
-        sealed_mae, gate["run_id"],
+        sealed_mae, gate["run_id"], *_index_record_fields(record),
     ]
+
+
+def _index_record_fields(record: dict[str, Any]) -> list[str]:
+    """Return the model-index columns an archived record fills: net hash, teacher, and data."""
+    training = record["training"]
+    return [record["net"]["sha256"], record["lineage"]["teacher"], training["method"],
+            str(training["positions"]), _ledger_scalar(training["games"])]
+
+
+def _migrate_model_index(config: WorkflowConfig) -> None:
+    """Fill the columns rows recorded before nets were files lack, from the archived records."""
+    path = config.repository / MODEL_INDEX_PATH
+    if not path.exists():
+        return
+    try:
+        with path.open(newline="", encoding="utf-8") as source:
+            rows = list(csv.reader(source))
+    except (OSError, UnicodeDecodeError, csv.Error) as error:
+        raise WorkflowError(f"could not read index {path}: {error}") from error
+    if not rows or tuple(rows[0]) != PREVIOUS_MODEL_INDEX_HEADER:
+        return
+    directory = config.repository / MODEL_ARCHIVE_DIRECTORY
+    migrated = [list(MODEL_INDEX_HEADER)]
+    for row in rows[1:]:
+        model = row[PREVIOUS_MODEL_INDEX_HEADER.index("model")]
+        records = sorted(directory.glob(f"candidate-sha256-{model}*.json"))
+        if len(records) != 1:
+            raise WorkflowError(f"index row {model} does not name exactly one archived model")
+        record = json.loads(records[0].read_bytes())
+        if record.get("schema_version") != MODEL_ARCHIVE_SCHEMA_VERSION:
+            raise WorkflowError(f"archived record {records[0].name} predates net files; "
+                                "upgrade it before the index")
+        migrated.append([*row, *_index_record_fields(record)])
+    contents = io.StringIO()
+    csv.writer(contents, lineterminator="\n").writerows(migrated)
+    try:
+        atomic_write_bytes(path, contents.getvalue().encode("utf-8"), replace=True)
+    except OSError as error:
+        raise WorkflowError(f"could not migrate index {path}: {error}") from error
 
 
 def _comparison_index_row(config: WorkflowConfig, comparison: ComparisonConfig,
@@ -2317,8 +2471,9 @@ def _comparison_index_row(config: WorkflowConfig, comparison: ComparisonConfig,
     games, score = _games_and_score(saved)
     return [
         saved["created_at_utc"], config.name, comparison.name,
-        f"{config.name}/{new.name}", new.sha256[:12], f"{config.name}/{base.name}",
+        model_net_name(config, new), new.sha256[:12], model_net_name(config, base),
         base.sha256[:12], match["sequential_decision"], str(games), score, match["run_id"],
+        match["new_net_sha256"], match["base_net_sha256"],
     ]
 
 
@@ -2331,11 +2486,13 @@ def _csv_has_row(path: Path, header: Sequence[str], key: str, row: list[str]) ->
             rows = list(csv.reader(source))
     except (OSError, UnicodeDecodeError, csv.Error) as error:
         raise WorkflowError(f"could not read index {path}: {error}") from error
-    if not rows or tuple(rows[0]) != tuple(header):
+    stored = tuple(rows[0]) if rows else ()
+    if stored != tuple(header) and not (
+            stored == PREVIOUS_MODEL_INDEX_HEADER and tuple(header) == MODEL_INDEX_HEADER):
         raise WorkflowError(f"index has an unexpected header: {path}")
     key_index = list(header).index(key)
     matches = [item for item in rows[1:] if len(item) > key_index and item[key_index] == row[key_index]]
-    if any(item != row for item in matches):
+    if any(item != row[:len(item)] for item in matches):
         raise WorkflowError(
             f"index already records {row[key_index]} with different values: {path}")
     return bool(matches)
@@ -2378,6 +2535,14 @@ def _master_ledger_has_run(config: WorkflowConfig, run_id: str) -> bool:
     return any(len(row) > index and row[index] == run_id for row in rows[1:])
 
 
+def _with_net_columns(header: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """Return ledger rows in the current schema: rows from before nets get empty net columns."""
+    if "new_net_sha256" in header or not header or header[-1] != "games_discarded":
+        return header, rows
+    return ([*header, *LEDGER_NET_COLUMNS],
+            [[*row, *([""] * len(LEDGER_NET_COLUMNS))] for row in rows])
+
+
 def _read_ledger_row(path: Path) -> tuple[list[str], list[str]]:
     try:
         with path.open(newline="", encoding="utf-8") as source:
@@ -2386,7 +2551,8 @@ def _read_ledger_row(path: Path) -> tuple[list[str], list[str]]:
         raise WorkflowError(f"could not read saved ledger row {path}: {error}") from error
     if len(rows) != 2 or not rows[0] or len(rows[0]) != len(rows[1]):
         raise WorkflowError(f"saved engine-gate ledger row is malformed: {path}")
-    return rows[0], rows[1]
+    header, (row,) = _with_net_columns(rows[0], [rows[1]])
+    return header, row
 
 
 def _ledger_scalar(value: Any) -> str:
@@ -2533,6 +2699,9 @@ def _verified_ledger_row(config: WorkflowConfig, match: dict[str, Any], settings
     })
     expected_saved["sequential_model"] = _ledger_scalar(
         manifest["sequential_test_method"])
+    # Matches played before engines reported their nets record none.
+    expected_saved.update({column: _ledger_scalar(manifest.get(column, ""))
+                           for column in LEDGER_NET_COLUMNS})
     expected_saved["analysis_note"] = "paired normalized-Elo GSPRT"
     score_counts = summary.get("statistical_score_rate_counts")
     if not isinstance(score_counts, dict):
@@ -2573,6 +2742,9 @@ def _verified_ledger_row(config: WorkflowConfig, match: dict[str, Any], settings
 def _inspect_master(master: Path, saved: SavedLedgerRow) -> bool:
     """Return whether the master ledger already has this run; reject a schema mismatch."""
     existing = _read_master_ledger(master)
+    if existing:
+        header, rows = _with_net_columns(existing[0], existing[1:])
+        existing = [header, *rows]
     if not existing or existing[0] != saved.header:
         raise WorkflowError(f"master and saved ledger schemas differ: {master}")
     if any(len(item) != len(saved.header) for item in existing[1:]):
@@ -2585,6 +2757,22 @@ def _preview_ledger_row(config: WorkflowConfig, saved: SavedLedgerRow) -> None:
         raise WorkflowError(f"master ledger already contains run ID {saved.run_id}")
 
 
+def _migrate_master_ledger(master: Path) -> None:
+    """Rewrite a ledger from before nets with empty net columns, as the match runner would."""
+    existing = _read_master_ledger(master)
+    if not existing:
+        return
+    header, rows = _with_net_columns(existing[0], existing[1:])
+    if header == existing[0]:
+        return
+    contents = io.StringIO()
+    csv.writer(contents, lineterminator="\n").writerows([header, *rows])
+    try:
+        atomic_write_bytes(master, contents.getvalue().encode("utf-8"), replace=True)
+    except OSError as error:
+        raise WorkflowError(f"could not migrate master ledger {master}: {error}") from error
+
+
 def _append_ledger_row(config: WorkflowConfig, saved: SavedLedgerRow,
                        record_first: Callable[[], None]) -> None:
     """Append a verified row under the ledger lock, after the records that describe it."""
@@ -2594,6 +2782,7 @@ def _append_ledger_row(config: WorkflowConfig, saved: SavedLedgerRow,
         with _ledger_lock(master):
             require_clean_committed(config)
             _preview_ledger_row(config, saved)
+            _migrate_master_ledger(master)
             # Records are written before the row so an interrupted apply retries cleanly: they
             # are idempotent for the same run, while the ledger rejects duplicates.
             record_first()
@@ -2608,9 +2797,13 @@ def _append_ledger_row(config: WorkflowConfig, saved: SavedLedgerRow,
 
 def _is_archived(config: WorkflowConfig, model: ModelReference) -> bool:
     directory = config.repository / MODEL_ARCHIVE_DIRECTORY
-    header = directory / f"{model.model_id}.hpp"
-    return (header.is_file() and (directory / f"{model.model_id}.json").is_file() and
-            sha256_file(header) == model.sha256)
+    net = directory / f"{model.model_id}{FILE_SUFFIX}"
+    if not net.is_file() or not (directory / f"{model.model_id}.json").is_file():
+        return False
+    try:
+        return read_net(net).identity_sha256 == model.sha256
+    except NetFileError:
+        return False
 
 
 def promote_gate(config: WorkflowConfig, iteration_name: str, *, apply: bool = False) -> dict[str, Any]:
@@ -2641,7 +2834,7 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
     gate = authenticate_gate(config, iteration, candidate=candidate)
     assert iteration.engine_gate is not None
     saved = _verified_ledger_row(config, gate, iteration.engine_gate, kind=GATE_KIND,
-                                 new_id=gate["candidate_build_id"], label="gate")
+                                 new_id=gate["new_id"], label="gate")
     archive = _archive_entry(config, iteration, candidate)
     model_index = config.repository / MODEL_INDEX_PATH
     index_row = _model_index_row(config, iteration, candidate, gate, saved.values)
@@ -2649,7 +2842,7 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
                "model_id": gate["candidate_build_id"],
                "sequential_decision": gate["sequential_decision"],
                "saved_row": str(saved.path), "ledger": str(_master_ledger_path(config)),
-               "archived_header": str(archive.header_path),
+               "archived_net": str(archive.net_path),
                "archived_metrics": str(archive.metrics_path),
                "archived": _archived_model_state(archive),
                "model_index": str(model_index),
@@ -2664,6 +2857,7 @@ def _promote_gate(config: WorkflowConfig, iteration_name: str, *,
     def record() -> None:
         _write_archived_model(archive)
         preview["archived"] = True
+        _migrate_model_index(config)
         _append_csv_row(model_index, MODEL_INDEX_HEADER, "gate_run_id", index_row)
         preview["indexed"] = True
 
@@ -2696,7 +2890,7 @@ def _record_comparison(config: WorkflowConfig, name: str, *, apply: bool) -> dic
                 f"promote-gate --apply {model.iteration} and commit the result")
     match = authenticate_comparison(config, comparison, new, base)
     saved = _verified_ledger_row(config, match, comparison, kind=COMPARISON_KIND,
-                                 new_id=new.model_id, label="comparison")
+                                 new_id=match["new_id"], label="comparison")
     index = config.repository / COMPARISON_INDEX_PATH
     row = _comparison_index_row(config, comparison, new, base, match, saved.values)
     preview = {"comparison": name, "run_id": saved.run_id,

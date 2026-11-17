@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 
+from fixture import net_bytes
 from test_workflow_generations import (
     CHAIN,
     RECIPE_FIXTURES,
@@ -28,6 +29,7 @@ from poe2_training.workflow import (
     validate_existing,
     workflow_snapshot,
 )
+from poe2_training.workflow_adapters import engine_build_id
 from poe2_training.workflow_config import (
     CANDIDATE_ENGINE,
     CANDIDATE_ENGINE_ARGS,
@@ -215,13 +217,14 @@ class ComparisonRunTest(ChainFixture):
     def _sides(self):
         models = []
         for name in ("g001", "g000"):
-            header = self.root / f"{name}.hpp"
-            header.write_text(f"// {name}\n", encoding="utf-8")
-            models.append(replace(self._config().model(name), header=header,
-                                  model_id=f"candidate-sha256-{sha256_file(header)}"))
+            net = self.root / f"{name}.poe2net"
+            net.write_bytes(net_bytes(f"chain/{name}"))
+            models.append(replace(self._config().model(name), header=None, net=net,
+                                  net_sha256=sha256_file(net), net_name=f"chain/{name}",
+                                  model_id=f"candidate-sha256-{sha256_file(net)}"))
         return tuple(models)
 
-    def test_a_comparison_builds_both_models_privately_and_a_pause_discards_it(self) -> None:
+    def test_a_comparison_builds_its_commit_once_and_a_pause_discards_it(self) -> None:
         config = self._config()
         comparison = config.comparison("g001-vs-g000")
         new, base = self._sides()
@@ -232,30 +235,27 @@ class ComparisonRunTest(ChainFixture):
 
         def record(_stage: str, operation: str, command, **_options) -> None:
             commands[operation] = list(command)
-            if operation.startswith("build-"):
-                build = command[2]
-                for binary in ("engines/minimax/poe2_minimax", "runner/poe2_runner"):
-                    (comparison.root / build / binary).parent.mkdir(parents=True, exist_ok=True)
-                    (comparison.root / build / binary).write_text("binary\n", encoding="utf-8")
             if operation == "evaluate":
                 raise KeyboardInterrupt
 
         with mock.patch("poe2_training.workflow._comparison_models", return_value=(new, base)), \
+                mock.patch.object(runner, "_engine_build_id",
+                                  return_value=engine_build_id(5, "1" * 40)), \
                 mock.patch.object(runner, "_command", side_effect=record):
             with self.assertRaises(KeyboardInterrupt):
                 runner.run_comparison(comparison)
-        builds = {model.name: comparison.root / "builds" / str(model.model_id) / "debug"
-                  for model in (new, base)}
-        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={new.header}", commands["configure-new"])
-        self.assertIn(str(builds["g001"]), commands["configure-new"])
-        self.assertEqual(commands["build-new"][-2:], ["poe2_minimax", "poe2_runner"])
-        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={base.header}", commands["configure-base"])
-        self.assertEqual(commands["build-base"][-1], "poe2_minimax")
+        build = comparison.root / "builds" / "000005-111111111111" / "debug"
+        self.assertEqual(commands["configure"][4], str(build))
+        self.assertFalse(any(item.startswith("-DPOE2_MINIMAX_MODEL_HEADER")
+                             for item in commands["configure"]))
+        self.assertEqual(commands["build"][-2:], ["poe2_minimax", "poe2_runner"])
         evaluate = commands["evaluate"]
-        self.assertEqual(evaluate[0], str(builds["g001"] / "runner/poe2_runner"))
-        relative = {name: build.relative_to(REPOSITORY).as_posix() for name, build in builds.items()}
-        for flag, value in (("--kind", "training-comparison"), ("--new-build", relative["g001"]),
-                            ("--base", relative["g000"]),
+        self.assertEqual(evaluate[0], str(build / "runner/poe2_runner"))
+        relative = build.relative_to(REPOSITORY).as_posix()
+        for flag, value in (("--kind", "training-comparison"), ("--new-build", relative),
+                            ("--base", relative),
+                            ("--new-net", new.net.relative_to(REPOSITORY).as_posix()),
+                            ("--base-net", base.net.relative_to(REPOSITORY).as_posix()),
                             ("--run-root", (comparison.root / "runs").relative_to(REPOSITORY)
                              .as_posix())):
             self.assertEqual(evaluate[evaluate.index(flag) + 1], value)

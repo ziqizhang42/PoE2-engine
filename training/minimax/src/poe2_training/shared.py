@@ -187,10 +187,10 @@ def open_json_report(
     directory: Path | str,
     *,
     schema: str,
-    schema_version: int = 1,
+    schema_version: int | tuple[int, ...] = 1,
     error_type: type[ValueError] = SharedArtifactError,
 ) -> tuple[dict[str, Any], str]:
-    """Authenticate a standard report.json/COMPLETE create-only artifact."""
+    """Authenticate a standard report.json/COMPLETE create-only artifact of a known version."""
     root = Path(directory).resolve()
 
     def fail(message: str, cause: Exception | None = None) -> None:
@@ -225,7 +225,8 @@ def open_json_report(
     if actual_digest != expected_digest:
         fail(f"report digest differs from COMPLETE: {root}")
     if (not isinstance(report, dict) or report.get("schema") != schema or
-            report.get("schema_version") != schema_version):
+            report.get("schema_version") not in (
+                (schema_version,) if isinstance(schema_version, int) else schema_version)):
         fail(f"report schema is unsupported: {root}")
     authenticate_report_attachments(root, report, error_type=error_type)
     return report, actual_digest

@@ -121,7 +121,7 @@ build/debug/runner/poe2_runner openings generate-systematic \
   --plies 2
 ```
 
-For evaluation runs, one opening is selected for each adjacent side-swapped pair. Selection is a deterministic shuffle without replacement. The default seed is derived from the candidate build ID, baseline build ID, book digest, and eval kind, so the same matchup is replayable while a different candidate receives a different ordering.
+For evaluation runs, one opening is selected for each adjacent side-swapped pair. Selection is a deterministic shuffle without replacement. The default seed is derived from the candidate build ID, baseline build ID, book digest, and eval kind, and from the SHA-256 of any net file a side plays, so the same matchup is replayable while a different candidate receives a different ordering.
 
 `BASE` can be a build id, a build directory, or an engine binary:
 
@@ -136,7 +136,7 @@ make eval-gate BASE=build/by-commit/BASE_BUILD_ID/release/engines/poe2_greedy NE
 Every evaluation run is saved under:
 
 ```text
-build/eval/runs/<timestamp>__<new-id>__<new-engine>__vs__<base-id>__<base-engine>[__args-hashes]/
+build/eval/runs/<timestamp>__<new-id>__<new-engine>__vs__<base-id>__<base-engine>[__args-hashes][__newnet_<net ID>][__basenet_<net ID>]/
 ```
 
 Each run contains:
@@ -159,7 +159,7 @@ The committed master ledger is:
 eval/results.csv
 ```
 
-It stores one summary row per evaluation run. Keep the raw logs in `build/eval/runs/`; they are intentionally not committed. Each row records both artifact identities as `new_id + new_engine + new_engine_args` and `base_id + base_engine + base_engine_args`.
+It stores one summary row per evaluation run. Keep the raw logs in `build/eval/runs/`; they are intentionally not committed. Each row records both artifact identities as `new_id + new_engine + new_engine_args` and `base_id + base_engine + base_engine_args`, and each side's engine and net as reported by the engine: `new_engine_version`, `new_net_name`, `new_net_id`, `new_net_sha256`, and the same four for `base`. A side that played a net file (`--new-net` or `--base-net`, see [runner.md](runner.md#eval-mode)) has its file named in the manifest and the run ID. Rows from before engines reported their nets leave these columns empty; the runner and the training workflow add the empty columns to an older ledger the first time they append to it.
 
 Native evaluation and workflow promotion serialize master-ledger updates through the same persistent `<ledger>.lock` sidecar and append-mode write protocol, so concurrent writers cannot overwrite or interleave rows.
 

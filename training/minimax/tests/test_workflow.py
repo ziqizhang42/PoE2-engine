@@ -18,7 +18,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest import mock
 
-from fixture import moved_repository, repository_temporary_directory, write_feature_fixture
+from fixture import archive_net, net_bytes, moved_repository, repository_temporary_directory, write_feature_fixture
 from test_workflow_generations import V02
 from poe2_training.pattern_suites import pattern_suite
 from poe2_training.shared import (
@@ -48,13 +48,18 @@ from poe2_training.workflow import (
     validate_existing,
     workflow_snapshot,
 )
+from poe2_training.net_file import decode_net
 from poe2_training.workflow_adapters import (
+    CANDIDATE_NET,
     CANDIDATE_SCHEMA,
+    CANDIDATE_SCHEMA_VERSION,
     COMPARISON_KIND,
     COMPARISON_SCHEMA,
+    COMPARISON_SCHEMA_VERSION,
     GATE_KIND,
     GATE_SCHEMA,
     GATE_SCHEMA_VERSION,
+    HEADER_GATE_SCHEMA_VERSION,
     AdapterError,
     authenticate_candidate,
     authenticate_comparison,
@@ -63,16 +68,19 @@ from poe2_training.workflow_adapters import (
     authenticate_label_shard,
     authenticate_training,
     candidate_build_id,
+    candidate_net_name,
+    candidate_net_path,
     comparison_side,
     data_binary,
     data_build_directory,
+    engine_build_id,
     engine_gate_command,
     gate_base_binary,
-    gate_base_build_directory,
     gate_base_model_id,
     gate_build_directory,
     label_command,
     label_shard_path,
+    model_net,
     resolve_eval_binary,
     source_assemble_command,
     source_chunk_command,
@@ -298,12 +306,7 @@ class WorkflowConfigTest(unittest.TestCase):
         for book in ("development.txt", "holdout.txt"):
             (repository / "eval/openings" / book).write_bytes(
                 (REPOSITORY / "eval/openings" / book).read_bytes())
-        header = b"// teacher model fixture\n"
-        model_id = f"candidate-sha256-{hashlib.sha256(header).hexdigest()}"
-        (repository / "models").mkdir()
-        (repository / "models" / f"{model_id}.hpp").write_bytes(header)
-        (repository / "models" / f"{model_id}.json").write_text("{}\n", encoding="utf-8")
-        return repository, model_id
+        return repository, archive_net(repository, "fixture/g000")
 
     @staticmethod
     def _teacher_text(repository: Path, model_id: str, *, teacher: str = "g000") -> str:
@@ -342,7 +345,10 @@ class WorkflowConfigTest(unittest.TestCase):
         plain = load_workflow_config(_write(repository, _managed_config(repository), "plain.toml"))
         dataset, plain_dataset = taught.dataset("main"), plain.dataset("main")
         self.assertEqual(dataset.teacher.model_id, model_id)
-        self.assertEqual(dataset.teacher.header, repository / "models" / f"{model_id}.hpp")
+        net = repository / "models" / f"{model_id}.poe2net"
+        self.assertEqual(dataset.teacher.net, net)
+        self.assertEqual(dataset.teacher.net_name, "fixture/g000")
+        self.assertIsNone(dataset.teacher.header)
         self.assertIsNone(plain_dataset.teacher)
 
         taught_stages, plain_stages = stage_definitions(taught), stage_definitions(plain)
@@ -351,15 +357,15 @@ class WorkflowConfigTest(unittest.TestCase):
             self.assertNotIn("teacher", plain_stages[stage])
             self.assertNotEqual(fingerprint(taught_stages[stage]), fingerprint(plain_stages[stage]))
 
-        self.assertEqual(
-            data_binary(taught, dataset),
-            taught.output_directory / f"build/teacher-{digest[:12]}/debug/runner/poe2_minimax_data")
-        self.assertEqual(data_binary(plain, plain_dataset), data_binary(plain))
+        # Teachers are nets the one run-local data tool loads; no build is private to a model.
+        self.assertEqual(data_binary(taught),
+                         taught.output_directory / "build/debug/runner/poe2_minimax_data")
         for command in (source_chunk_command(taught, dataset, 0, 4),
                         source_assemble_command(taught, dataset),
                         label_command(taught, dataset, 0)):
-            self.assertEqual(command[0], str(data_binary(taught, dataset)))
+            self.assertEqual(command[0], str(data_binary(taught)))
             self.assertEqual(command[command.index("--evaluator") + 1], "pattern-gain")
+            self.assertEqual(command[command.index("--net") + 1], str(net))
         for command in (source_chunk_command(plain, plain_dataset, 0, 4),
                         source_assemble_command(plain, plain_dataset),
                         label_command(plain, plain_dataset, 0)):
@@ -432,10 +438,15 @@ class WorkflowConfigTest(unittest.TestCase):
             load_workflow_config(_write(repository, self._teacher_text(
                 repository, model_id), "unarchived.toml"))
         (repository / "models" / f"{model_id}.json").write_text("{}\n", encoding="utf-8")
-        (repository / "models" / f"{model_id}.hpp").write_text("changed\n", encoding="utf-8")
-        with self.assertRaisesRegex(WorkflowConfigError, "does not match its digest"):
+        net = repository / "models" / f"{model_id}.poe2net"
+        net.write_bytes(net_bytes("fixture/other"))
+        with self.assertRaisesRegex(WorkflowConfigError, "does not match its model ID"):
             load_workflow_config(_write(repository, self._teacher_text(
                 repository, model_id), "changed.toml"))
+        net.write_bytes(b"not a net\n")
+        with self.assertRaisesRegex(WorkflowConfigError, "unusable"):
+            load_workflow_config(_write(repository, self._teacher_text(
+                repository, model_id), "damaged.toml"))
 
     def test_label_and_feature_authentication_require_the_configured_teacher(self) -> None:
         repository, model_id = self._teacher_repository()
@@ -451,6 +462,17 @@ class WorkflowConfigTest(unittest.TestCase):
         manifest_path.write_text(json.dumps(self._label_manifest(
             dataset, evaluator="pattern-gain", model=digest)) + "\n", encoding="utf-8")
         self.assertEqual(authenticate_label_shard(dataset, 0)["teacher"], model_id)
+        # Data a file-loaded net made records the file's hash under its own key.
+        net_manifest = self._label_manifest(dataset, evaluator="pattern-gain")
+        net_manifest["search"]["net_sha256"] = dataset.teacher.net_sha256
+        manifest_path.write_text(json.dumps(net_manifest) + "\n", encoding="utf-8")
+        self.assertEqual(authenticate_label_shard(dataset, 0)["teacher"], model_id)
+        net_manifest["search"]["model_header_sha256"] = digest
+        manifest_path.write_text(json.dumps(net_manifest) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "evaluator is unsupported"):
+            authenticate_label_shard(dataset, 0)
+        manifest_path.write_text(json.dumps(self._label_manifest(
+            dataset, evaluator="pattern-gain", model=digest)) + "\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "teacher differs"):
             authenticate_label_shard(plain.dataset("main"), 0)
         for manifest in (self._label_manifest(dataset),
@@ -460,19 +482,19 @@ class WorkflowConfigTest(unittest.TestCase):
                 authenticate_label_shard(dataset, 0)
 
         dataset.feature_directory.parent.mkdir(parents=True, exist_ok=True)
-        write_feature_fixture(dataset.feature_directory, teacher_sha256=digest)
+        write_feature_fixture(dataset.feature_directory, teacher_sha256=dataset.teacher.net_sha256,
+                              teacher_key="net_sha256")
         self.assertEqual(authenticate_features(dataset)["teacher"], model_id)
         with self.assertRaisesRegex(ValueError, "teacher differs"):
             authenticate_features(plain.dataset("main"))
 
-    def test_teacher_data_binary_is_built_from_the_archived_header(self) -> None:
+    def test_teacher_data_binary_is_the_shared_build_checked_against_its_net(self) -> None:
         repository, model_id = self._teacher_repository()
-        digest = model_id.removeprefix("candidate-sha256-")
         config = load_workflow_config(_write(
             repository, self._teacher_text(repository, model_id), "taught.toml"))
         dataset = config.dataset("main")
         commit = "3" * 40
-        binary = data_binary(config, dataset)
+        binary = data_binary(config)
         commands: list[list[str]] = []
 
         def build(contents: bytes):
@@ -485,17 +507,18 @@ class WorkflowConfigTest(unittest.TestCase):
 
         workflow = WorkflowRunner(config, RunState(config), commit)
         with mock.patch.object(workflow, "_command", side_effect=build(
-                b"fixture\0" + commit.encode() + b"\0" + digest.encode())):
+                b"fixture\0" + commit.encode())):
             workflow._ensure_data_binary("dataset:main:source", 1, dataset)
-        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={dataset.teacher.header}", commands[0])
-        self.assertIn(str(data_build_directory(config, dataset)), commands[0])
+        self.assertFalse(any("POE2_MINIMAX_MODEL_HEADER" in item for item in commands[0]))
+        self.assertIn(str(data_build_directory(config)), commands[0])
         self.assertEqual(workflow._data_commits[binary], commit)
 
         binary.unlink()
+        dataset.teacher.net.write_bytes(b"changed\n")
         other = WorkflowRunner(config, RunState(config), commit)
         with mock.patch.object(other, "_command",
                                side_effect=build(b"fixture\0" + commit.encode())):
-            with self.assertRaisesRegex(WorkflowError, "teacher model"):
+            with self.assertRaisesRegex(ValueError, "missing or changed"):
                 other._ensure_data_binary("dataset:main:source", 1, dataset)
 
     def test_source_chunks_have_a_fixed_size_and_a_short_last_chunk(self) -> None:
@@ -1015,32 +1038,68 @@ class WorkflowPromotionTest(unittest.TestCase):
         """)
         return load_workflow_config(_write(self.root, contents, "promotion.toml"))
 
-    def _candidate(self, features: Path | None = None) -> None:
-        candidate = self.iteration.candidate_validation
-        assert candidate is not None
+    def _training_report(self) -> None:
         training = self.iteration.training_directory
         reserve_report_directory(training, "poe2-minimax-pattern-experiment")
         complete_json_report(training, "poe2-minimax-pattern-experiment", {
-            "schema": "poe2-minimax-pattern-experiment", "schema_version": 1})
+            "schema": "poe2-minimax-pattern-experiment", "schema_version": 1,
+            "training": {"method": "lookup"}, "input": {"records": 12},
+            "selection": {"best_model": "fixture"},
+            "models": [{"name": "fixture", "trace": [{"epoch": 1, "validation_mae": 1.0}]}],
+        })
+
+    def _candidate(self, features: Path | None = None, *, legacy: bool = False,
+                   teacher: str = "two-ply-closure", parent: str | None = None) -> None:
+        """Write a validated candidate: a net file, or a header as before nets were files."""
+        candidate = self.iteration.candidate_validation
+        assert candidate is not None
+        self._training_report()
+        training = self.iteration.training_directory
         root = self.iteration.candidate_directory
         reserve_report_directory(root, CANDIDATE_SCHEMA)
         log = self.config.output_directory / "logs" / f"{self.iteration.name}-fixture.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("candidate fixture\n", encoding="utf-8")
-        artifacts = {}
-        for name, relative in {
-            "model_header": "frozen_pattern_gain_model.hpp",
-            "inference_binary": "build/engines/minimax/poe2_minimax_infer",
-            "engine_binary": "build/engines/minimax/poe2_minimax",
-            "runner_binary": "build/runner/poe2_runner",
-        }.items():
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{self.iteration.name} {name}", encoding="utf-8")
-            artifacts[name] = {"path": relative, "sha256": sha256_file(path)}
         feature_digest = sha256_file((features or self.root / "features") / "features.bin")
+        artifacts: dict[str, dict[str, str]] = {}
+        provenance: dict[str, object] = {}
+        if legacy:
+            # Its net is converted when it is archived, dated by the training stage's completion.
+            RunState(self.config).append(
+                "stage_completed", stage=f"iteration:{self.iteration.name}:training")
+            for name, relative in {
+                "model_header": "frozen_pattern_gain_model.hpp",
+                "inference_binary": "build/engines/minimax/poe2_minimax_infer",
+                "engine_binary": "build/engines/minimax/poe2_minimax",
+                "runner_binary": "build/runner/poe2_runner",
+            }.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if name == "model_header":
+                    header = (REPOSITORY / "models" / f"{V02}.hpp").read_text(encoding="utf-8")
+                    path.write_text(f"{header}// {self.iteration.name} fixture\n",
+                                    encoding="utf-8")
+                else:
+                    path.write_text(f"{self.iteration.name} {name}", encoding="utf-8")
+                artifacts[name] = {"path": relative, "sha256": sha256_file(path)}
+        else:
+            data = net_bytes(
+                candidate_net_name(self.config, self.iteration), teacher=teacher,
+                **({} if parent is None else {"parent": parent}), created="2026-08-19",
+                training_report_sha256=sha256_file(training / "report.json"),
+                feature_binary_sha256=feature_digest)
+            candidate_net_path(self.iteration).write_bytes(data)
+            net = decode_net(data)
+            artifacts["net"] = {"path": CANDIDATE_NET, "sha256": net.sha256, "id": net.net_id,
+                                "name": net.name, "design": net.design}
+            provenance["tools"] = {
+                name: {"path": f"run/build/release/engines/minimax/{binary}",
+                       "sha256": hashlib.sha256(binary.encode()).hexdigest()}
+                for name, binary in (("inference_binary", "poe2_minimax_infer"),
+                                     ("engine_binary", "poe2_minimax"))}
         complete_json_report(root, CANDIDATE_SCHEMA, {
-            "schema": CANDIDATE_SCHEMA, "schema_version": 1,
+            "schema": CANDIDATE_SCHEMA, "schema_version": 1 if legacy else CANDIDATE_SCHEMA_VERSION,
+            **provenance,
             "promotable": candidate.promotable,
             "git_commit": "1" * 40,
             "settings": {
@@ -1113,16 +1172,34 @@ class WorkflowPromotionTest(unittest.TestCase):
 
     def _write_match_run(self, root: Path, settings, *, kind: str, new_id: str, base_id: str,
                          new_engine_path: Path, base_engine_path: str, run_id: str,
-                         decision: str, ledger_overrides: dict[str, str] | None = None):
-        """Write one evaluator run under root/runs/one, as the native runner records it."""
+                         decision: str, ledger_overrides: dict[str, str] | None = None,
+                         nets: dict[str, Path | None] | None = None):
+        """Write one evaluator run under root/runs/one, as the native runner records it.
+
+        nets maps each side to the net file it loaded; without it, the run is one recorded
+        before engines reported their nets, with the ledger columns of that time.
+        """
         master = REPOSITORY / "eval" / "results.csv"
         with master.open(newline="", encoding="utf-8") as source:
             header = next(csv.reader(source))
+        if nets is None:
+            header = header[:header.index("games_discarded") + 1]
         row = [""] * len(header)
         row[header.index("run_id")] = run_id
         run = root / "runs" / "one"
         run.mkdir(parents=True)
+        identities: dict[str, object] = {}
+        for side, net in (nets or {}).items():
+            decoded = None if net is None else decode_net(net.read_bytes())
+            identities.update({
+                f"{side}_net": None if net is None else self._named(net),
+                f"{side}_engine_version": "0.3.0",
+                f"{side}_net_name": "" if decoded is None else decoded.name,
+                f"{side}_net_id": "" if decoded is None else decoded.net_id,
+                f"{side}_net_sha256": "" if decoded is None else decoded.sha256,
+            })
         manifest = {
+            **identities,
             "run_id": run_id,
             "created_at_utc": "20260819T000000Z", "valid": True,
             "kind": kind, "new_id": new_id,
@@ -1203,6 +1280,8 @@ class WorkflowPromotionTest(unittest.TestCase):
             "betting_log_evidence_below_even": "-3.000",
             "workers_requested": str(settings.workers), "workers_used": "1",
             "games_discarded": "0",
+            **{name: value for name, value in identities.items()
+               if name in header and isinstance(value, str)},
         }
         ledger_values.update(ledger_overrides or {})
         for name, value in ledger_values.items():
@@ -1222,6 +1301,67 @@ class WorkflowPromotionTest(unittest.TestCase):
               run_id: str = "workflow-promotion-test-run",
               ledger_overrides: dict[str, str] | None = None,
               decision: str = "accept_alt") -> tuple[list[str], list[str]]:
+        """Write a gate as _run_gate does: one engine build playing the candidate's net."""
+        root = self.iteration.gate_directory
+        candidate = authenticate_candidate(self.config, self.iteration)
+        reserve_report_directory(root, GATE_SCHEMA)
+        model_id = candidate_build_id(candidate)
+        build_id = engine_build_id(1, "2" * 40)
+        build = root / "builds" / build_id / self.config.build_preset
+        new_engine_binary = build / "engines/minimax/poe2_minimax"
+        runner_binary = build / "runner/poe2_runner"
+        for path in (new_engine_binary, runner_binary):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(path.name, encoding="utf-8")
+        gate = self.iteration.engine_gate
+        assert gate is not None
+        new_net = candidate_net_path(self.iteration)
+        base_model_id = gate_base_model_id(self.config, self.iteration)
+        if base_model_id is None:
+            base_engine = resolve_eval_binary(self.config, gate.base or "", gate.base_engine)
+            base_net = None
+        else:
+            base_engine = new_engine_binary
+            base_net = model_net(next(model for model in resolve_trained_models(
+                self.config).models if model.model_id == base_model_id))
+        header, row, run = self._write_match_run(
+            root, gate, kind=GATE_KIND, new_id=build_id,
+            base_id="fixture-base" if base_net is None else build_id,
+            new_engine_path=new_engine_binary,
+            base_engine_path=manifest_base_path or self._named(base_engine), run_id=run_id,
+            decision=decision, ledger_overrides=ledger_overrides,
+            nets={"new": new_net, "base": base_net})
+        complete_json_report(root, GATE_SCHEMA, {
+            "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
+            "git_commit": "2" * 40,
+            "settings": {
+                **recorded_gate_settings(gate),
+                "opening_book": self._named(gate.opening_book),
+            },
+            "opening_book_sha256": sha256_file(gate.opening_book),
+            "run_id": row[header.index("run_id")], "run_directory": "runs/one",
+            "candidate_report_sha256": candidate["report_sha256"],
+            "candidate_build_id": model_id, "engine_build_id": build_id,
+            "build_directory": build.relative_to(root).as_posix(),
+            "new_net": {"path": self._named(new_net), "sha256": sha256_file(new_net),
+                        "model_id": model_id},
+            "base_net": None if base_net is None else {
+                "path": self._named(base_net), "sha256": sha256_file(base_net),
+                "model_id": base_model_id},
+            "base_engine_artifact": {
+                "path": self._named(base_engine), "sha256": sha256_file(base_engine)},
+            "build_artifacts": {
+                name: {"path": path.relative_to(root).as_posix(), "sha256": sha256_file(path)}
+                for name, path in (("new_engine_binary", new_engine_binary),
+                                   ("runner_binary", runner_binary))},
+            "artifacts": {name: sha256_file(run / name) for name in
+                          ("manifest.json", "summary.json", "games.csv", "ledger-row.csv")},
+        })
+        return header, row
+
+    def _header_gate(self, *, run_id: str = "workflow-promotion-test-run",
+                     decision: str = "accept_alt") -> tuple[list[str], list[str]]:
+        """Write a gate as it was played before nets were files: one private build per model."""
         root = self.iteration.gate_directory
         reserve_report_directory(root, GATE_SCHEMA)
         header_digest = sha256_file(
@@ -1243,12 +1383,11 @@ class WorkflowPromotionTest(unittest.TestCase):
             base_engine.parent.mkdir(parents=True, exist_ok=True)
             base_engine.write_text("base model engine\n", encoding="utf-8")
         header, row, run = self._write_match_run(
-            root, gate, kind="training-gate", new_id=build_id,
+            root, gate, kind=GATE_KIND, new_id=build_id,
             base_id=base_model_id or "fixture-base", new_engine_path=new_engine_binary,
-            base_engine_path=manifest_base_path or self._named(base_engine), run_id=run_id,
-            decision=decision, ledger_overrides=ledger_overrides)
+            base_engine_path=self._named(base_engine), run_id=run_id, decision=decision)
         complete_json_report(root, GATE_SCHEMA, {
-            "schema": GATE_SCHEMA, "schema_version": GATE_SCHEMA_VERSION,
+            "schema": GATE_SCHEMA, "schema_version": HEADER_GATE_SCHEMA_VERSION,
             "git_commit": "2" * 40,
             "settings": {
                 **recorded_gate_settings(gate),
@@ -1283,7 +1422,7 @@ class WorkflowPromotionTest(unittest.TestCase):
     def test_non_promotable_candidate_can_be_previewed_but_not_applied(self) -> None:
         self.config = self._config(promotable=False, include_gate=False)
         self.iteration = self.config.iteration("candidate")
-        self._candidate()
+        self._candidate(legacy=True)
         preview = handoff_candidate(self.config, "candidate")
         self.assertFalse(preview["promotable"])
         with self.assertRaisesRegex(WorkflowError, "non-promotable"):
@@ -1306,6 +1445,51 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.assertEqual(
             authenticated["model"]["quantized"]["validation"]["mae"], 1.25)
 
+    def test_candidate_net_must_be_the_one_its_report_names(self) -> None:
+        self._candidate()
+        net = candidate_net_path(self.iteration)
+        original = net.read_bytes()
+        self.assertEqual(authenticate_candidate(self.config, self.iteration)["artifacts"]["net"],
+                         {"path": CANDIDATE_NET, "sha256": sha256_file(net),
+                          "id": sha256_file(net)[:12], "name": "promotion-test/candidate",
+                          "design": "pattern-gain-v1"})
+        for reason, data in {"differs from its report": net_bytes("promotion-test/candidate"),
+                             "unusable": original[:100]}.items():
+            with self.subTest(reason=reason):
+                net.write_bytes(data)
+                with self.assertRaisesRegex(AdapterError, reason):
+                    authenticate_candidate(self.config, self.iteration)
+        net.write_bytes(original)
+        authenticate_candidate(self.config, self.iteration)
+
+    def test_a_candidate_and_gate_from_before_nets_still_authenticate_and_promote(self) -> None:
+        self._candidate(legacy=True)
+        ledger_header, _ = self._header_gate()
+        header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
+        candidate = authenticate_candidate(self.config, self.iteration)
+        model_id = f"candidate-sha256-{sha256_file(header)}"
+        self.assertEqual(candidate_build_id(candidate), model_id)
+        gate = authenticate_gate(self.config, self.iteration)
+        self.assertEqual(gate["new_id"], model_id)
+        repository, isolated = self._isolated_repository(
+            "legacy-repository", ledger_header=ledger_header)
+        with (repository / "eval/results.csv").open("a", newline="", encoding="utf-8") as ledger:
+            csv.writer(ledger, lineterminator="\n").writerow(["earlier"] * len(ledger_header))
+        self._commit_all(repository, "record an earlier match")
+        applied = promote_gate(isolated, "candidate", apply=True)
+        self.assertTrue(applied["applied"])
+        self.assertEqual((repository / "models" / f"{model_id}.hpp").read_bytes(),
+                         header.read_bytes())
+        net = decode_net((repository / "models" / f"{model_id}.poe2net").read_bytes())
+        self.assertEqual((net.name, net.net_id, net.metadata["header_sha256"]),
+                         ("promotion-test/candidate", model_id[17:29], model_id[17:]))
+        with (repository / "eval/results.csv").open(newline="", encoding="utf-8") as source:
+            rows = list(csv.reader(source))
+        net_columns = rows[0][len(ledger_header):]
+        self.assertEqual(net_columns[:2], ["new_engine_version", "new_net_name"])
+        self.assertEqual(len(net_columns), 8)
+        self.assertEqual([row[len(ledger_header):] for row in rows[1:]], [[""] * 8] * 2)
+
     def test_gate_authenticates_relative_base_and_candidate_build_identity(self) -> None:
         base_parent = REPOSITORY / "build/by-commit"
         base_parent.mkdir(parents=True, exist_ok=True)
@@ -1321,14 +1505,14 @@ class WorkflowPromotionTest(unittest.TestCase):
             self._candidate()
             self._gate(manifest_base_path=base_binary.relative_to(REPOSITORY).as_posix())
             authenticated = authenticate_gate(self.config, self.iteration)
-            header_digest = sha256_file(
-                self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp")
-            self.assertEqual(
-                authenticated["candidate_build_id"],
-                f"candidate-sha256-{header_digest}")
+            net_digest = sha256_file(candidate_net_path(self.iteration))
+            self.assertEqual(authenticated["candidate_build_id"], f"candidate-sha256-{net_digest}")
+            self.assertEqual(authenticated["new_net_sha256"], net_digest)
+            self.assertIsNone(authenticated["base_net_sha256"])
             manifest = json.loads(Path(authenticated["run_directory"])
                                   .joinpath("manifest.json").read_bytes())
-            self.assertEqual(manifest["new_id"], authenticated["candidate_build_id"])
+            self.assertEqual(manifest["new_id"], authenticated["engine_build_id"])
+            self.assertEqual(manifest["new_net_sha256"], net_digest)
 
     def test_gate_promotion_rejects_a_ledger_row_that_disagrees_with_manifest(self) -> None:
         self._candidate()
@@ -1359,45 +1543,65 @@ class WorkflowPromotionTest(unittest.TestCase):
         candidate.assert_called_once()
         gate.assert_called_once()
 
-    def _gate_command_log(self) -> list[list[str]]:
-        """Run the gate stage until its first command and return the commands it issued."""
+    def _gate_commands(self) -> dict[str, list[str]]:
+        """Run the gate stage until its match and return the commands it issued by operation."""
         candidate_stats = authenticate_candidate(self.config, self.iteration)
         workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
-        commands: list[list[str]] = []
+        commands: dict[str, list[str]] = {}
 
-        def stop_after_first(_stage: str, _operation: str, command, **_options) -> None:
-            commands.append(list(command))
-            raise WorkflowError("fixture stops the gate")
+        def stop_at_the_match(_stage: str, operation: str, command, **_options) -> None:
+            commands[operation] = list(command)
+            if operation == "evaluate":
+                raise WorkflowError("fixture stops the gate")
 
-        with mock.patch.object(workflow, "_command", side_effect=stop_after_first):
+        with mock.patch.object(workflow, "_command", side_effect=stop_at_the_match), \
+                mock.patch.object(workflow, "_engine_build_id",
+                                  return_value=engine_build_id(7, "1" * 40)):
             with self.assertRaisesRegex(WorkflowError, "fixture stops the gate"):
                 workflow._run_gate(self.iteration, candidate_stats)
         return commands
 
-    def test_engine_gate_builds_the_candidate_header_privately(self) -> None:
+    def test_engine_gate_builds_its_commit_once_and_plays_the_candidate_net(self) -> None:
         self._candidate()
         tracked = REPOSITORY / "engines/minimax/src/frozen_pattern_gain_model.hpp"
         tracked_digest = sha256_file(tracked)
-        commands = self._gate_command_log()
-        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
-        self.assertEqual(commands[0][:2], ["cmake", "--preset"])
-        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={candidate_header}", commands[0])
+        commands = self._gate_commands()
+        build = (self.iteration.gate_directory / "builds" / "000007-111111111111" /
+                 self.config.build_preset)
+        self.assertEqual(commands["configure"][:4],
+                         ["cmake", "--preset", self.config.build_preset, "-B"])
+        self.assertEqual(commands["configure"][4], str(build))
+        self.assertFalse(any(item.startswith("-DPOE2_MINIMAX_MODEL_HEADER")
+                             for item in commands["configure"]))
+        evaluate = commands["evaluate"]
+        self.assertEqual(evaluate[evaluate.index("--new-net") + 1],
+                         candidate_net_path(self.iteration).relative_to(REPOSITORY).as_posix())
+        self.assertEqual(evaluate[evaluate.index("--base") + 1], str(self.root / "base-engine"))
+        self.assertNotIn("--base-net", evaluate)
         self.assertEqual(sha256_file(tracked), tracked_digest)
 
-    def test_engine_gate_rejects_a_changed_candidate_header(self) -> None:
+    def test_engine_gate_rejects_a_changed_candidate_net(self) -> None:
         self._candidate()
         candidate_stats = authenticate_candidate(self.config, self.iteration)
-        (self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp").write_text(
-            "changed\n", encoding="utf-8")
+        candidate_net_path(self.iteration).write_bytes(net_bytes("promotion-test/candidate"))
         workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
         with self.assertRaisesRegex(WorkflowError, "missing or changed"):
             workflow._run_gate(self.iteration, candidate_stats)
 
-    def _with_base_model(self, contents: bytes = b"// base model fixture\n") -> ModelReference:
-        header = self.root / "base-model.hpp"
-        header.write_bytes(contents)
+    def test_engine_gate_refuses_a_candidate_validated_before_nets_were_files(self) -> None:
+        self._candidate(legacy=True)
+        candidate_stats = authenticate_candidate(self.config, self.iteration)
+        workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
+        with self.assertRaisesRegex(WorkflowError, "validated before nets were files"):
+            workflow._run_gate(self.iteration, candidate_stats)
+
+    def _with_base_model(self, data: bytes | None = None) -> ModelReference:
+        net = self.root / "base-model.poe2net"
+        net.write_bytes(data or net_bytes("promotion-test/g000", teacher="two-ply-closure"))
+        decoded = decode_net(net.read_bytes())
         model = ModelReference(
-            name="g000", model_id=f"candidate-sha256-{sha256_file(header)}", header=header)
+            name="g000", model_id=f"candidate-sha256-{decoded.identity_sha256}", header=None,
+            net=net, net_sha256=decoded.sha256, net_name=decoded.name)
         gate = self.iteration.engine_gate
         assert gate is not None
         self.iteration = replace(
@@ -1415,7 +1619,7 @@ class WorkflowPromotionTest(unittest.TestCase):
         iteration = config.iteration("candidate")
         gate = authenticate_gate(config, iteration)
         return _verified_ledger_row(config, gate, iteration.engine_gate, kind=GATE_KIND,
-                                    new_id=gate["candidate_build_id"], label="gate").values
+                                    new_id=gate["new_id"], label="gate").values
 
     def test_relative_records_authenticate_after_the_repository_moves(self) -> None:
         self.relative_records = True
@@ -1441,36 +1645,26 @@ class WorkflowPromotionTest(unittest.TestCase):
         with self.assertRaisesRegex(AdapterError, "candidate validation settings differ"):
             authenticate_candidate(moved, moved.iteration("candidate"))
 
-    def test_engine_gate_builds_its_base_model_from_the_same_commit(self) -> None:
+    def test_engine_gate_plays_its_base_model_net_on_the_same_build(self) -> None:
         self._candidate()
         model = self._with_base_model()
-        candidate_stats = authenticate_candidate(self.config, self.iteration)
-        workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
-        commands: dict[str, list[str]] = {}
-
-        def record(_stage: str, operation: str, command, **_options) -> None:
-            commands[operation] = list(command)
-            if operation == "configure-base":
-                raise WorkflowError("fixture stops the gate")
-
-        with mock.patch.object(workflow, "_command", side_effect=record):
-            with self.assertRaisesRegex(WorkflowError, "fixture stops the gate"):
-                workflow._run_gate(self.iteration, candidate_stats)
-        base_build = gate_base_build_directory(self.config, self.iteration)
-        self.assertEqual(base_build.parent.name, model.model_id)
-        self.assertIn(str(base_build), commands["configure-base"])
-        self.assertIn(f"-DPOE2_MINIMAX_MODEL_HEADER={model.header}", commands["configure-base"])
+        commands = self._gate_commands()
+        build = (self.iteration.gate_directory / "builds" / "000007-111111111111" /
+                 self.config.build_preset)
+        self.assertEqual(commands["configure"][4], str(build))
         self.assertIn("ctest", commands["test"])
-        gate_command = engine_gate_command(
-            self.config, self.iteration, self.root / "build", self.root / "runner")
-        self.assertEqual(gate_command[gate_command.index("--base") + 1],
-                         base_build.relative_to(REPOSITORY).as_posix())
+        evaluate = commands["evaluate"]
+        self.assertEqual(evaluate[evaluate.index("--base") + 1],
+                         build.relative_to(REPOSITORY).as_posix())
+        self.assertEqual(evaluate[evaluate.index("--new-build") + 1],
+                         build.relative_to(REPOSITORY).as_posix())
+        self.assertEqual(evaluate[evaluate.index("--base-net") + 1],
+                         model.net.relative_to(REPOSITORY).as_posix())
 
     def test_engine_gate_rejects_a_base_model_equal_to_its_candidate(self) -> None:
         self._candidate()
         candidate_stats = authenticate_candidate(self.config, self.iteration)
-        self._with_base_model(
-            (self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp").read_bytes())
+        self._with_base_model(candidate_net_path(self.iteration).read_bytes())
         workflow = WorkflowRunner(self.config, RunState(self.config), "1" * 40)
         with self.assertRaisesRegex(WorkflowError, "against itself"):
             workflow._run_gate(self.iteration, candidate_stats)
@@ -1478,9 +1672,11 @@ class WorkflowPromotionTest(unittest.TestCase):
     def test_gate_against_a_base_model_authenticates_and_indexes_its_short_id(self) -> None:
         self._candidate()
         model = self._with_base_model()
-        ledger_header, _ = self._gate(ledger_overrides={"base_id": model.model_id})
+        ledger_header, _ = self._gate()
         authenticated = authenticate_gate(self.config, self.iteration)
-        self.assertEqual(authenticated["manifest"]["base_id"], model.model_id)
+        self.assertEqual(authenticated["manifest"]["base_id"], authenticated["engine_build_id"])
+        self.assertEqual(authenticated["base_net_sha256"], model.net_sha256)
+        self.assertEqual(authenticated["manifest"]["base_net_name"], "promotion-test/g000")
         _, isolated = self._isolated_repository("base-model-repository", ledger_header=ledger_header)
         preview = promote_gate(isolated, "candidate")
         self.assertEqual(preview["index_row"]["base"], "promotion-test/g000")
@@ -1503,7 +1699,8 @@ class WorkflowPromotionTest(unittest.TestCase):
         authenticated = authenticate_gate(self.config, self.iteration)
         self.assertEqual(authenticated["sequential_decision"], "accept_null")
         command = engine_gate_command(
-            self.config, self.iteration, self.root / "build", self.root / "runner")
+            self.config, self.iteration, self.root / "build", self.root / "runner",
+            new_net=candidate_net_path(self.iteration), base_model=None)
         self.assertNotIn("--require-accept-alt", command)
 
     def test_engine_gate_rejects_the_removed_require_accept_alt_field(self) -> None:
@@ -1513,21 +1710,21 @@ class WorkflowPromotionTest(unittest.TestCase):
     def test_handoff_requires_an_engine_gate(self) -> None:
         self.config = self._config(include_gate=False)
         self.iteration = self.config.iteration("candidate")
-        self._candidate()
+        self._candidate(legacy=True)
         with self.assertRaisesRegex(WorkflowError, "no engine gate"):
             handoff_candidate(self.config, "candidate", apply=True)
 
     def test_handoff_rejects_a_gate_that_was_not_won(self) -> None:
-        self._candidate()
-        self._gate(decision="accept_null")
+        self._candidate(legacy=True)
+        self._header_gate(decision="accept_null")
         preview = handoff_candidate(self.config, "candidate")
         self.assertEqual(preview["gate_decision"], "accept_null")
         with self.assertRaisesRegex(WorkflowError, "did not win"):
             handoff_candidate(self.config, "candidate", apply=True)
 
     def test_handoff_installs_only_a_recorded_gate_winner(self) -> None:
-        self._candidate()
-        ledger_header, _ = self._gate()
+        self._candidate(legacy=True)
+        ledger_header, _ = self._header_gate()
         repository, isolated = self._isolated_repository(
             "handoff-repository", ledger_header=ledger_header,
             tracked_header=b"tracked header\n")
@@ -1558,8 +1755,9 @@ class WorkflowPromotionTest(unittest.TestCase):
         ledger_header, _ = self._gate(decision="accept_null")
         repository, isolated = self._isolated_repository(
             "archive-repository", ledger_header=ledger_header)
-        candidate_header = self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp"
-        model_id = f"candidate-sha256-{sha256_file(candidate_header)}"
+        candidate_net = candidate_net_path(self.iteration)
+        net_digest = sha256_file(candidate_net)
+        model_id = f"candidate-sha256-{net_digest}"
 
         preview = promote_gate(isolated, "candidate")
         self.assertFalse(preview["archived"])
@@ -1567,11 +1765,18 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.assertFalse((repository / "models").exists())
         applied = promote_gate(isolated, "candidate", apply=True)
         self.assertTrue(applied["archived"])
-        self.assertEqual(
-            (repository / "models" / f"{model_id}.hpp").read_bytes(),
-            candidate_header.read_bytes())
+        self.assertEqual((repository / "models" / f"{model_id}.poe2net").read_bytes(),
+                         candidate_net.read_bytes())
         metrics = json.loads((repository / "models" / f"{model_id}.json").read_bytes())
         self.assertEqual(metrics["model_id"], model_id)
+        self.assertNotIn("model_header_sha256", metrics)
+        self.assertEqual(metrics["net"], {
+            "name": "promotion-test/candidate", "id": net_digest[:12], "sha256": net_digest,
+            "design": "pattern-gain-v1", "parameters": 5293, "file": f"{model_id}.poe2net"})
+        self.assertEqual(metrics["lineage"], {"parent": None, "teacher": "two-ply-closure"})
+        self.assertEqual(metrics["training"], {
+            "method": "lookup", "positions": 12, "games": None,
+            "curve": [{"epoch": 1, "validation_mae": 1.0}]})
         self.assertEqual(metrics["recipe"], {
             "path": "promotion.toml", "run": "promotion-test", "iteration": "candidate"})
         self.assertEqual(metrics["metrics"]["quantized"]["validation"]["mae"], 1.25)
@@ -1581,18 +1786,20 @@ class WorkflowPromotionTest(unittest.TestCase):
             index = list(csv.DictReader(source))
         self.assertEqual(index, [{
             "recorded_utc": "20260819T000000Z", "run": "promotion-test",
-            "iteration": "candidate", "model": sha256_file(candidate_header)[:12],
+            "iteration": "candidate", "model": net_digest[:12],
             "base": "fixture-base", "base_model": "", "decision": "accept_null", "games": "2",
             "score_pct": "100.0", "sealed_mae": "",
-            "gate_run_id": "workflow-promotion-test-run",
+            "gate_run_id": "workflow-promotion-test-run", "net_sha256": net_digest,
+            "teacher": "two-ply-closure", "method": "lookup", "data_positions": "12",
+            "data_games": "",
         }])
         self.assertTrue(applied["indexed"])
         status = subprocess.run(
             ["git", "status", "--short", "--untracked-files=all"], cwd=repository,
             check=True, capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(sorted(status), [
-            " M eval/results.csv", f"?? models/{model_id}.hpp", f"?? models/{model_id}.json",
-            "?? models/index.csv"])
+            " M eval/results.csv", f"?? models/{model_id}.json",
+            f"?? models/{model_id}.poe2net", "?? models/index.csv"])
 
     def test_promotion_reuses_an_identical_archive_after_an_interruption(self) -> None:
         self._candidate()
@@ -1627,8 +1834,8 @@ class WorkflowPromotionTest(unittest.TestCase):
                 "w", newline="", encoding="utf-8") as destination:
             writer = csv.writer(destination, lineterminator="\n")
             writer.writerow(MODEL_INDEX_HEADER)
-            writer.writerow(["other"] * (len(MODEL_INDEX_HEADER) - 1) +
-                            ["workflow-promotion-test-run"])
+            writer.writerow(["workflow-promotion-test-run" if name == "gate_run_id" else "other"
+                             for name in MODEL_INDEX_HEADER])
         with self.assertRaisesRegex(WorkflowError, "different values"):
             promote_gate(isolated, "candidate")
 
@@ -1639,8 +1846,8 @@ class WorkflowPromotionTest(unittest.TestCase):
             "conflict-repository", ledger_header=ledger_header)
         model_id = candidate_build_id(authenticate_candidate(isolated, self.iteration))
         (repository / "models").mkdir()
-        (repository / "models" / f"{model_id}.hpp").write_text("other\n", encoding="utf-8")
-        with self.assertRaisesRegex(WorkflowError, "differs from the candidate"):
+        (repository / "models" / f"{model_id}.poe2net").write_text("other\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkflowError, "archived net differs from the candidate"):
             promote_gate(isolated, "candidate")
 
     def _chain_config(self):
@@ -1679,17 +1886,21 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.config, self.iteration = chain, chain.iteration("candidate")
         self._candidate()
         ledger_header, _ = self._gate(run_id="parent-gate")
-        parent_digest = sha256_file(
-            self.iteration.candidate_directory / "frozen_pattern_gain_model.hpp")
+        parent_digest = sha256_file(candidate_net_path(self.iteration))
         resolved = resolve_trained_models(chain)
-        self.assertEqual(resolved.trained_model("candidate").model_id,
-                         f"candidate-sha256-{parent_digest}")
+        parent = resolved.trained_model("candidate")
+        self.assertEqual(parent.model_id, f"candidate-sha256-{parent_digest}")
+        self.assertEqual((parent.net, parent.net_name),
+                         (candidate_net_path(self.iteration), "promotion-test/candidate"))
         features = resolved.dataset("child").feature_directory
         features.parent.mkdir(parents=True)
-        write_feature_fixture(features, teacher_sha256=parent_digest)
+        write_feature_fixture(features, teacher_sha256=parent_digest, teacher_key="net_sha256")
         self.config, self.iteration = resolved, resolved.iteration("child")
-        self._candidate(features)
+        self._candidate(features, teacher="promotion-test/candidate",
+                        parent="promotion-test/candidate")
         self._gate(run_id="child-gate", decision="accept_null")
+        self.assertEqual(authenticate_gate(self.config, self.iteration)["base_net_sha256"],
+                         parent_digest)
         self.config = chain
 
         repository, isolated = self._isolated_repository(
@@ -1706,6 +1917,8 @@ class WorkflowPromotionTest(unittest.TestCase):
             (repository / "models" / f"{applied['model_id']}.json").read_bytes())
         self.assertEqual(metrics["teacher"], {
             "evaluator": "pattern-gain", "model_id": f"candidate-sha256-{parent_digest}"})
+        self.assertEqual(metrics["lineage"], {
+            "parent": "promotion-test/candidate", "teacher": "promotion-test/candidate"})
 
     def _comparison_config(self):
         """Return a gated iteration and a comparison of its model with the archived v0.2."""
@@ -1743,29 +1956,33 @@ class WorkflowPromotionTest(unittest.TestCase):
         """Write a complete comparison as run_comparison records it."""
         root = comparison.root
         reserve_report_directory(root, COMPARISON_SCHEMA)
-        sides = {"new": comparison_side(self.config, comparison, new),
-                 "base": comparison_side(self.config, comparison, base)}
+        sides = {side: {**comparison_side(self.config, model), "net": self._named(model_net(model))}
+                 for side, model in (("new", new), ("base", base))}
+        build_id = engine_build_id(3, "3" * 40)
+        build = root / "builds" / build_id / self.config.build_preset
         binaries = {
-            "new_engine_binary":
-                root / sides["new"]["build_directory"] / "engines/minimax/poe2_minimax",
-            "base_engine_binary":
-                root / sides["base"]["build_directory"] / "engines/minimax/poe2_minimax",
-            "runner_binary": root / sides["new"]["build_directory"] / "runner/poe2_runner",
+            "new_engine_binary": build / "engines/minimax/poe2_minimax",
+            "base_engine_binary": build / "engines/minimax/poe2_minimax",
+            "runner_binary": build / "runner/poe2_runner",
         }
         for name, binary in binaries.items():
             binary.parent.mkdir(parents=True, exist_ok=True)
-            binary.write_text(name, encoding="utf-8")
+            binary.write_text(binary.name, encoding="utf-8")
         _, _, run = self._write_match_run(
-            root, comparison, kind=COMPARISON_KIND, new_id=new.model_id, base_id=base.model_id,
+            root, comparison, kind=COMPARISON_KIND, new_id=build_id, base_id=build_id,
             new_engine_path=binaries["new_engine_binary"],
             base_engine_path=self._named(binaries["base_engine_binary"].resolve()),
-            run_id="comparison-run", decision="accept_alt")
+            run_id="comparison-run", decision="accept_alt",
+            nets={"new": model_net(new), "base": model_net(base)})
         complete_json_report(root, COMPARISON_SCHEMA, {
-            "schema": COMPARISON_SCHEMA, "schema_version": 1, "git_commit": "3" * 40,
+            "schema": COMPARISON_SCHEMA, "schema_version": COMPARISON_SCHEMA_VERSION,
+            "git_commit": "3" * 40,
             "settings": {**match_settings(comparison),
                          "opening_book": self._named(comparison.opening_book)},
             "opening_book_sha256": sha256_file(comparison.opening_book),
-            "run_id": "comparison-run", "run_directory": "runs/one", **sides,
+            "run_id": "comparison-run", "run_directory": "runs/one",
+            "engine_build_id": build_id, "build_directory": build.relative_to(root).as_posix(),
+            **sides,
             "build_artifacts": {name: {"path": binary.relative_to(root).as_posix(),
                                        "sha256": sha256_file(binary)}
                                 for name, binary in binaries.items()},
@@ -1789,7 +2006,7 @@ class WorkflowPromotionTest(unittest.TestCase):
         repository, isolated = self._isolated_repository(
             "comparison-repository", ledger_header=ledger_header)
         (repository / "models").mkdir()
-        for suffix in (".hpp", ".json"):
+        for suffix in (".poe2net", ".json"):
             shutil.copy(REPOSITORY / "models" / f"{V02}{suffix}", repository / "models")
         self._commit_all(repository, "archive g000")
         with self.assertRaisesRegex(WorkflowError, "promote candidate first"):
@@ -1800,9 +2017,11 @@ class WorkflowPromotionTest(unittest.TestCase):
         self.assertEqual(preview["index_row"], {
             "recorded_utc": "20260819T000000Z", "run": "promotion-test",
             "comparison": "candidate-vs-g000", "new": "promotion-test/candidate",
-            "new_model": new.sha256[:12], "base": "promotion-test/g000",
+            "new_model": new.sha256[:12], "base": "run1/g000",
             "base_model": V02.removeprefix("candidate-sha256-")[:12], "decision": "accept_alt",
-            "games": "2", "score_pct": "100.0", "run_id": "comparison-run"})
+            "games": "2", "score_pct": "100.0", "run_id": "comparison-run",
+            "new_net_sha256": sha256_file(candidate_net_path(self.iteration)),
+            "base_net_sha256": sha256_file(REPOSITORY / "models" / f"{V02}.poe2net")})
         self.assertTrue(record_comparison(isolated, "candidate-vs-g000", apply=True)["applied"])
         with (repository / "eval/results.csv").open(newline="", encoding="utf-8") as source:
             self.assertEqual([row["kind"] for row in csv.DictReader(source)],

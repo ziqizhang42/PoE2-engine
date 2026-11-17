@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "poe2/match_runner.hpp"
@@ -40,6 +41,10 @@ struct EvalOptions {
   std::string base_engine;
   std::string new_engine_args;
   std::string base_engine_args;
+  std::string new_net;
+  std::string base_net;
+  match_runner::EngineIdentity new_identity;
+  match_runner::EngineIdentity base_identity;
   std::string preset = "release";
   std::string run_root = "build/eval/runs";
   std::string ledger = "eval/results.csv";
@@ -190,11 +195,16 @@ void print_go_limits(const engine::EngineLimits& limits, std::ostream& output) {
   return quoted;
 }
 
-[[nodiscard]] std::string engine_command(const fs::path& engine_path, std::string_view args) {
+[[nodiscard]] std::string engine_command(const fs::path& engine_path, std::string_view args,
+                                         std::string_view net) {
   std::string command = shell_quote(engine_path.string());
   if (!args.empty()) {
     command += ' ';
     command += args;
+  }
+  if (!net.empty()) {
+    command += " --net ";
+    command += shell_quote(net);
   }
 
   return command;
@@ -416,9 +426,12 @@ class LedgerFileLock {
   return hash;
 }
 
+// Nets join the material only when a side loads one, so seeds derived before nets were files
+// are unchanged.
 [[nodiscard]] std::uint64_t derive_opening_seed(std::string_view new_id, std::string_view base_id,
-                                                std::string_view book_digest,
-                                                std::string_view kind) {
+                                                std::string_view book_digest, std::string_view kind,
+                                                std::string_view new_net_sha256,
+                                                std::string_view base_net_sha256) {
   std::string material;
   const auto append_part = [&](std::string_view part) {
     material += std::to_string(part.size());
@@ -430,6 +443,10 @@ class LedgerFileLock {
   append_part(base_id);
   append_part(book_digest);
   append_part(kind);
+  if (!new_net_sha256.empty() || !base_net_sha256.empty()) {
+    append_part(new_net_sha256);
+    append_part(base_net_sha256);
+  }
   return fnv1a64(material);
 }
 
@@ -476,6 +493,14 @@ class LedgerFileLock {
   if (!options.base_engine_args.empty()) {
     suffix += "__baseargs_";
     suffix += fnv1a64_hex(options.base_engine_args);
+  }
+  if (!options.new_net.empty()) {
+    suffix += "__newnet_";
+    suffix += options.new_identity.net_id;
+  }
+  if (!options.base_net.empty()) {
+    suffix += "__basenet_";
+    suffix += options.base_identity.net_id;
   }
 
   return suffix;
@@ -559,6 +584,12 @@ void write_command_file(const fs::path& path, const EvalOptions& options,
   }
   if (!options.base_engine_args.empty()) {
     output << " --base-engine-args " << shell_quote(options.base_engine_args);
+  }
+  if (!options.new_net.empty()) {
+    output << " --new-net " << shell_quote(options.new_net);
+  }
+  if (!options.base_net.empty()) {
+    output << " --base-net " << shell_quote(options.base_net);
   }
   output << " --preset " << shell_quote(options.preset) << " --kind " << shell_quote(options.kind)
          << " --run-root " << shell_quote(options.run_root);
@@ -703,6 +734,27 @@ void write_games_csv(const fs::path& path, const match_runner::SeriesResult& res
   }
 }
 
+void write_optional_string(std::ostream& output, std::string_view text) {
+  if (text.empty()) {
+    output << "null";
+  } else {
+    output << "\"" << json_escape(text) << "\"";
+  }
+}
+
+// Each side's net file, if one was given, and what its engine reported: empty strings when an
+// engine from before net files reports nothing.
+void write_side_json(std::ostream& output, std::string_view side, std::string_view net,
+                     const match_runner::EngineIdentity& identity) {
+  output << "  \"" << side << "_net\": ";
+  write_optional_string(output, net);
+  output << ",\n"
+         << "  \"" << side << "_engine_version\": \"" << json_escape(identity.version) << "\",\n"
+         << "  \"" << side << "_net_name\": \"" << json_escape(identity.net_name) << "\",\n"
+         << "  \"" << side << "_net_id\": \"" << json_escape(identity.net_id) << "\",\n"
+         << "  \"" << side << "_net_sha256\": \"" << json_escape(identity.net_sha256) << "\",\n";
+}
+
 void write_manifest_json(const fs::path& path, const EvalOptions& options,
                          const match_runner::SeriesResult& result, std::string_view timestamp,
                          std::string_view run_id, std::string_view new_id, std::string_view base_id,
@@ -723,8 +775,10 @@ void write_manifest_json(const fs::path& path, const EvalOptions& options,
          << "  \"base_engine\": \"" << json_escape(options.base_engine) << "\",\n"
          << "  \"base_engine_args\": \"" << json_escape(options.base_engine_args) << "\",\n"
          << "  \"new_engine_path\": \"" << json_escape(new_engine_path.string()) << "\",\n"
-         << "  \"base_engine_path\": \"" << json_escape(base_engine_path.string()) << "\",\n"
-         << "  \"opening_book\": ";
+         << "  \"base_engine_path\": \"" << json_escape(base_engine_path.string()) << "\",\n";
+  write_side_json(output, "new", options.new_net, options.new_identity);
+  write_side_json(output, "base", options.base_net, options.base_identity);
+  output << "  \"opening_book\": ";
   if (options.series.opening_book.path.empty()) {
     output << "null";
   } else {
@@ -841,7 +895,7 @@ constexpr std::string_view kPreviousLedgerHeader =
     "sequential_upper_bound,normalized_elo,betting_log_evidence_above_even,"
     "betting_log_evidence_below_even";
 
-constexpr std::string_view kLedgerHeader =
+constexpr std::string_view kWorkersLedgerHeader =
     "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
     "base_engine_args,games_requested,games_played,"
     "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
@@ -854,6 +908,26 @@ constexpr std::string_view kLedgerHeader =
     "unique_openings,sequential_model,sequential_bound_unit,sequential_llr,sequential_lower_bound,"
     "sequential_upper_bound,normalized_elo,betting_log_evidence_above_even,"
     "betting_log_evidence_below_even,workers_requested,workers_used,games_discarded";
+
+constexpr std::string_view kLedgerHeader =
+    "run_id,created_at_utc,kind,new_id,new_engine,new_engine_args,base_id,base_engine,"
+    "base_engine_args,games_requested,games_played,"
+    "engine_one_wins,engine_two_wins,no_winner,engine_one_score_pct,confidence_low_pct,"
+    "confidence_high_pct,sequential_decision,sequential_null,sequential_alt,opening_book,opening_"
+    "book_digest,"
+    "opening_count,go_depth,go_movetime_ms,go_nodes,timeout_ms,run_dir,analysis_version,"
+    "statistical_unit,statistical_samples,statistical_games,pair_score_0,pair_score_0_5,"
+    "pair_score_1,pair_score_1_5,pair_score_2,confidence_method,sequential_test_method,"
+    "analysis_note,valid,invalid_reason,opening_seed,opening_seed_source,opening_sampling,"
+    "unique_openings,sequential_model,sequential_bound_unit,sequential_llr,sequential_lower_bound,"
+    "sequential_upper_bound,normalized_elo,betting_log_evidence_above_even,"
+    "betting_log_evidence_below_even,workers_requested,workers_used,games_discarded,"
+    "new_engine_version,new_net_name,new_net_id,new_net_sha256,base_engine_version,base_net_name,"
+    "base_net_id,base_net_sha256";
+
+// Rows recorded before engines reported their nets leave these columns empty: the net then is
+// the one compiled into the build the row names.
+constexpr std::string_view kNetColumnsForEarlierRows = ",,,,,,,,";
 
 [[nodiscard]] std::vector<std::string> parse_csv_fields(std::string_view row) {
   std::vector<std::string> fields;
@@ -894,7 +968,8 @@ void migrate_ledger_if_needed(const fs::path& path) {
     return;
   }
   const bool is_legacy = header == kLegacyLedgerHeader;
-  if (!is_legacy && header != kPreviousLedgerHeader) {
+  const bool has_workers = header == kWorkersLedgerHeader;
+  if (!is_legacy && !has_workers && header != kPreviousLedgerHeader) {
     throw std::runtime_error{"unsupported ledger schema: " + path.string()};
   }
 
@@ -939,7 +1014,10 @@ void migrate_ledger_if_needed(const fs::path& path) {
         write_csv_field(output, additions[index]);
       }
     }
-    output << ",1,1,0\n";
+    if (!has_workers) {
+      output << ",1,1,0";
+    }
+    output << kNetColumnsForEarlierRows << '\n';
   }
   output.close();
   if (!output) {
@@ -1054,12 +1132,41 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
   output << ',' << score_text(result.betting_log_evidence_above_even) << ','
          << score_text(result.betting_log_evidence_below_even) << ',' << result.workers_requested
          << ',' << result.workers_used << ',' << result.games_discarded;
+  for (const match_runner::EngineIdentity* identity :
+       {&options.new_identity, &options.base_identity}) {
+    for (const std::string* field :
+         {&identity->version, &identity->net_name, &identity->net_id, &identity->net_sha256}) {
+      output << ',';
+      write_csv_field(output, *field);
+    }
+  }
   output << '\n';
   output.close();
   if (!output) {
     throw std::runtime_error{"failed to append " + path.string()};
   }
   sync_path(path);
+}
+
+// A side given a net must prove it loaded it before any game. Without one, an engine that fails
+// its handshake is left to the series, which records the evaluation as invalid.
+[[nodiscard]] match_runner::EngineIdentity side_identity(const std::string& command,
+                                                         std::string_view net,
+                                                         std::chrono::milliseconds timeout) {
+  try {
+    match_runner::EngineIdentity identity = match_runner::query_engine_identity(command, timeout);
+    if (!net.empty() && identity.net_sha256.empty()) {
+      throw std::invalid_argument{"engine given --net " + std::string{net} +
+                                  " did not report a net"};
+    }
+    return identity;
+  } catch (const std::runtime_error& error) {
+    if (!net.empty()) {
+      throw std::invalid_argument{"engine could not use net " + std::string{net} + ": " +
+                                  error.what()};
+    }
+    return {};
+  }
 }
 
 [[nodiscard]] EvalOptions parse_eval_options(int argc, char** argv) {
@@ -1112,6 +1219,13 @@ void append_ledger_row(const fs::path& path, const EvalOptions& options,
         throw std::invalid_argument{"--base-engine-args requires an argument string"};
       }
       options.base_engine_args = argv[++index];
+      continue;
+    }
+    if (argument == "--new-net" || argument == "--base-net") {
+      if (index + 1 >= argc) {
+        throw std::invalid_argument{std::string{argument} + " requires a net file"};
+      }
+      (argument == "--new-net" ? options.new_net : options.base_net) = argv[++index];
       continue;
     }
     if (argument == "--preset") {
@@ -1323,10 +1437,20 @@ int run_eval(int argc, char** argv) {
       resolve_engine_binary(options.base, options.base_engine, options.preset);
   const std::string new_id = build_id_from_build_dir(new_build, options.preset);
   const std::string base_id = id_from_eval_input(options.base, options.preset);
+  options.series.engine_one_command =
+      engine_command(new_engine_path, options.new_engine_args, options.new_net);
+  options.series.engine_two_command =
+      engine_command(base_engine_path, options.base_engine_args, options.base_net);
+  options.new_identity = side_identity(options.series.engine_one_command, options.new_net,
+                                       options.series.move_timeout);
+  options.base_identity = side_identity(options.series.engine_two_command, options.base_net,
+                                        options.series.move_timeout);
   options.opening_book_digest = opening_book_digest(options.series.opening_book);
   if (!options.series.opening_seed.has_value()) {
-    options.series.opening_seed =
-        derive_opening_seed(new_id, base_id, options.opening_book_digest, options.kind);
+    options.series.opening_seed = derive_opening_seed(
+        new_id, base_id, options.opening_book_digest, options.kind,
+        options.new_net.empty() ? std::string_view{} : options.new_identity.net_sha256,
+        options.base_net.empty() ? std::string_view{} : options.base_identity.net_sha256);
     options.opening_seed_source = "derived";
   }
   options.resolved_opening_seed = options.series.opening_seed.value_or(0);
@@ -1336,9 +1460,6 @@ int run_eval(int argc, char** argv) {
       run_id_component(options.new_engine) + "__vs__" + run_id_build_component(base_id) + "__" +
       run_id_component(options.base_engine) + engine_args_run_id_suffix(options));
   const ReservedRunDirectory run = reserve_run_directory(options.run_root, base_run_id);
-
-  options.series.engine_one_command = engine_command(new_engine_path, options.new_engine_args);
-  options.series.engine_two_command = engine_command(base_engine_path, options.base_engine_args);
 
   write_command_file(run.path / "command.txt", options, new_engine_path, base_engine_path);
 

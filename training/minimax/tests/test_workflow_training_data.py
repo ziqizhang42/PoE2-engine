@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import textwrap
 import unittest
 from dataclasses import replace
 from unittest import mock
 
-from fixture import write_feature_fixture
+from fixture import net_bytes, write_feature_fixture
 from test_workflow_generations import CHAIN, DEFAULTS, V02, ChainFixture, _record_gate
+from poe2_training.shared import complete_json_report, reserve_report_directory
 from poe2_training.workflow import (
     WorkflowError,
     WorkflowRunner,
@@ -15,8 +17,10 @@ from poe2_training.workflow import (
     blocked_iterations,
 )
 from poe2_training.workflow_adapters import (
+    CANDIDATE_NET,
     AdapterError,
     _authenticate_training_data,
+    candidate_net_path,
     label_command,
     training_command,
 )
@@ -279,8 +283,19 @@ class TrainingDataRecipeTest(ChainFixture):
     def test_the_archive_lists_training_datasets_only_when_there_are_several(self) -> None:
         config = self._windowed()
         iteration = config.iteration("g003")
+        iteration.candidate_directory.mkdir(parents=True)
+        net = net_bytes("chain/g003", teacher="chain/g002", parent="chain/g002")
+        candidate_net_path(iteration).write_bytes(net)
+        reserve_report_directory(iteration.training_directory, "poe2-minimax-pattern-experiment")
+        complete_json_report(iteration.training_directory, "poe2-minimax-pattern-experiment", {
+            "schema": "poe2-minimax-pattern-experiment", "schema_version": 1,
+            "training": {"method": "lookup"}, "training_data": {"records": 40},
+            "selection": {"best_model": "fixture"},
+            "models": [{"name": "fixture", "trace": [{"epoch": 1}]}],
+        })
         candidate = {
-            "artifacts": {"model_header": {"sha256": "d" * 64, "path": "model.hpp"}},
+            "artifacts": {"net": {"sha256": hashlib.sha256(net).hexdigest(),
+                                  "path": CANDIDATE_NET}},
             "model": {"name": "fixture", "float": {}, "quantized": {}}, "git_commit": "1" * 40,
             "created_at_utc": "now", "corpus_id": "c", "teacher": None,
             "feature_binary_sha256": "e" * 64, "training_report_sha256": "f" * 64,
@@ -289,6 +304,10 @@ class TrainingDataRecipeTest(ChainFixture):
         }
         plain = json.loads(_archive_entry(config, iteration, candidate).metrics)
         self.assertNotIn("training_datasets", plain)
+        # v02 is imported features, whose games are not known here.
+        self.assertEqual(plain["training"], {"method": "lookup", "positions": 40, "games": None,
+                                             "curve": [{"epoch": 1}]})
+        self.assertEqual(plain["lineage"], {"parent": "chain/g002", "teacher": "chain/g002"})
         listed = json.loads(_archive_entry(config, iteration, {
             **candidate, "training_datasets": [{"corpus_id": "a"}, {"corpus_id": "b"}]}).metrics)
         self.assertEqual(listed["training_datasets"], [{"corpus_id": "a"}, {"corpus_id": "b"}])

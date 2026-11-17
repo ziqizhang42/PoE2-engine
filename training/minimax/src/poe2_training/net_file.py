@@ -35,6 +35,9 @@ TRAILER_BYTES = 32
 MAXIMUM_METADATA_BYTES = 16384
 MAXIMUM_INTERCEPT = 1 << 24
 FILE_SUFFIX = ".poe2net"
+# Learned values per net: intercepts, line weights, and gain weights. The knots are fixed by the design.
+PARAMETER_COUNT = PLY_COUNT + LINE_KNOT_COUNT * ORBIT_COUNT + GAIN_KNOT_COUNT * GAIN_FEATURE_COUNT
+TWO_PLY_CLOSURE_TEACHER = "two-ply-closure"
 
 _KEY = re.compile(r"[a-z][a-z0-9_]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -69,9 +72,13 @@ class NetFile:
         return self.metadata["name"]
 
     @property
+    def identity_sha256(self) -> str:
+        """The hash that identifies the net: of its C++ header for converted nets, else its file."""
+        return self.metadata.get("header_sha256") or self.sha256
+
+    @property
     def net_id(self) -> str:
-        """The 12-digit ID: of the converted header for legacy nets, else of the file."""
-        return (self.metadata.get("header_sha256") or self.sha256)[:12]
+        return self.identity_sha256[:12]
 
 
 def _require(condition: bool, message: str) -> None:
@@ -235,3 +242,33 @@ def parameters_from_header(text: str) -> tuple[PatternGainParameters, dict[str, 
         gain_weights=arrays["kGainWeights"])
     _validate_parameters(parameters)
     return parameters, strings
+
+
+def net_metadata(*, name: str, teacher: str, corpus: str, corpus_digest: str,
+                 feature_binary_sha256: str, created: str, training_report_sha256: str,
+                 parent: str | None = None, header_sha256: str | None = None) -> dict[str, str]:
+    """Return the metadata the training workflow records in every net it writes."""
+    _require(re.fullmatch(r"\d{4}-\d{2}-\d{2}", created) is not None,
+             f"net creation date must be YYYY-MM-DD: {created!r}")
+    metadata = {
+        "name": name, "teacher": teacher, "corpus": corpus, "corpus_digest": corpus_digest,
+        "feature_binary_sha256": feature_binary_sha256, "created": created,
+        "training_report_sha256": training_report_sha256,
+    }
+    if parent is not None:
+        metadata["parent"] = parent
+    if header_sha256 is not None:
+        metadata["header_sha256"] = header_sha256
+    return metadata
+
+
+def net_from_header(text: str, *, name: str, teacher: str, created: str,
+                    parent: str | None = None) -> bytes:
+    """Convert a generated C++ model header into the net file that keeps its ID."""
+    parameters, strings = parameters_from_header(text)
+    return encode_net(parameters, net_metadata(
+        name=name, teacher=teacher, parent=parent, created=created,
+        corpus=strings["kCorpusId"], corpus_digest=strings["kCorpusDigest"],
+        feature_binary_sha256=strings["kFeatureBinarySha256"],
+        training_report_sha256=strings["kReportSha256"],
+        header_sha256=hashlib.sha256(text.encode()).hexdigest()))

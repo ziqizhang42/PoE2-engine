@@ -171,6 +171,35 @@ def main() -> int:
     refresh_integrity(legacy)
     assert auditor.audit_dataset(legacy).teacher_records == 1
 
+    # A learned teacher is named by its net file's hash, or by its header's before net files.
+    digest = "a" * 64
+    for name, keys, expected in (
+            ("net-teacher", {"net_sha256": digest}, None),
+            ("header-teacher", {"model_header_sha256": digest}, None),
+            ("two-digests", {"net_sha256": digest, "model_header_sha256": digest},
+             "exactly one digest"),
+            ("no-digest", {}, "exactly one digest"),
+            ("bad-digest", {"net_sha256": "A" * 64}, "search.net_sha256")):
+        taught = temporary_root / name
+        shutil.copytree(golden, taught)
+        taught_manifest_path = taught / "manifest.json"
+        taught_manifest = json.loads(taught_manifest_path.read_text(encoding="utf-8"))
+        taught_manifest["search"].update({"evaluator": "pattern-gain", **keys})
+        taught_manifest_path.write_text(json.dumps(taught_manifest), encoding="utf-8")
+        refresh_integrity(taught)
+        if expected is None:
+            assert auditor.audit_dataset(taught).teacher_records == 1
+        else:
+            expect_invalid(auditor, taught, expected)
+    closure_with_net = temporary_root / "closure-with-net"
+    shutil.copytree(golden, closure_with_net)
+    closure_manifest_path = closure_with_net / "manifest.json"
+    closure_manifest = json.loads(closure_manifest_path.read_text(encoding="utf-8"))
+    closure_manifest["search"]["net_sha256"] = digest
+    closure_manifest_path.write_text(json.dumps(closure_manifest), encoding="utf-8")
+    refresh_integrity(closure_with_net)
+    expect_invalid(auditor, closure_with_net, "requires pattern-gain")
+
     incomplete = temporary_root / "incomplete"
     shutil.copytree(golden, incomplete)
     (incomplete / "COMPLETE").rename(incomplete / "INCOMPLETE")

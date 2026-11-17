@@ -198,6 +198,15 @@ class RunState:
                     snapshot=relative, config_path=str(self.config.path))
         return revision, snapshot, True
 
+    def first_completion_date(self, stage: str) -> str | None:
+        """Return the UTC date a stage first completed, which later attempts do not move."""
+        for event in self.events:
+            if event["type"] == "stage_completed" and event.get("stage") == stage:
+                time_utc = event.get("time_utc")
+                if isinstance(time_utc, str) and len(time_utc) >= 10:
+                    return time_utc[:10]
+        return None
+
     def stage_state(self) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
         for event in self.events:

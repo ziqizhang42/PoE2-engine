@@ -215,15 +215,22 @@ def _trajectory_range(trajectory_count: int, shard_count: int,
 
 
 def _check_search_evaluator(owner: dict[str, Any], label: str) -> None:
-    """Require a supported search evaluator; sources written before teachers omit it."""
+    """Require a supported search evaluator; sources written before teachers omit it.
+
+    A pattern-gain source names its net by exactly one digest: net_sha256 for a net file, or
+    model_header_sha256 for a net compiled from a C++ header, as sources made before nets were
+    files record it.
+    """
     evaluator = owner.get("evaluator", "two-ply-closure")
-    model = owner.get("model_header_sha256")
+    digests = {key: owner[key] for key in ("net_sha256", "model_header_sha256") if key in owner}
     if evaluator == "pattern-gain":
-        _require(isinstance(model, str) and re.fullmatch(r"[0-9a-f]{64}", model) is not None,
-                 f"{label}.model_header_sha256 must be a SHA-256 hex digest")
+        _require(len(digests) == 1, f"{label} must name its net by exactly one digest")
+        key, digest = next(iter(digests.items()))
+        _require(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+                 f"{label}.{key} must be a SHA-256 hex digest")
     else:
         _require(evaluator == "two-ply-closure", f"{label}.evaluator is unknown")
-        _require(model is None, f"{label}.model_header_sha256 requires pattern-gain")
+        _require(not digests, f"{label} names a net, which requires pattern-gain")
 
 
 def _parse_record(value: dict[str, Any], label: str) -> ParsedRecord:

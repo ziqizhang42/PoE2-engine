@@ -13,6 +13,7 @@ from typing import Any, Callable, Sequence
 
 from .artifact import FeatureArtifact, open_feature_artifact
 from .baseline import open_baseline_report
+from .net_file import FILE_SUFFIX, NetFileError, read_net
 from .pattern_evaluation import open_pattern_evaluation
 from .pattern_experiment import (
     FROZEN_PATTERN_GAIN_FRACTIONAL_BITS,
@@ -36,10 +37,17 @@ from .workflow_config import (
 
 
 CANDIDATE_SCHEMA = "poe2-training-candidate"
+# Version 2 candidates are net files checked with the run's shared build; version 1 candidates
+# were C++ headers built privately.
+CANDIDATE_SCHEMA_VERSION = 2
 GATE_SCHEMA = "poe2-training-engine-gate"
-# Version 2 gates build the candidate header privately instead of the tracked engine header.
-GATE_SCHEMA_VERSION = 2
+# Version 3 gates play net files on one engine build. Version 2 gates built the candidate's
+# C++ header privately.
+GATE_SCHEMA_VERSION = 3
+HEADER_GATE_SCHEMA_VERSION = 2
 COMPARISON_SCHEMA = "poe2-training-comparison"
+# Version 2 comparisons play both nets on one engine build.
+COMPARISON_SCHEMA_VERSION = 2
 # Ledger kinds; only gate rows decide champions and chains.
 GATE_KIND = "training-gate"
 COMPARISON_KIND = "training-comparison"
@@ -86,20 +94,9 @@ def _require_report_layout(directory: Path, label: str,
              f"{label} has unexpected output files: {directory}")
 
 
-def data_build_directory(config: WorkflowConfig,
-                         dataset: ManagedDatasetConfig | None = None) -> Path:
-    """Return the run-local build tree, private to the dataset's teacher model when it has one.
-
-    A teacher this recipe trains is named by its iteration, so the plan knows the path before
-    the model exists; the binary still embeds and is checked against the model digest.
-    """
-    root = config.output_directory / "build"
-    if dataset is not None and dataset.teacher is not None:
-        teacher = dataset.teacher
-        name = (teacher.sha256[:12] if teacher.iteration is None else
-                f"iteration-{teacher.iteration}")
-        root = root / f"teacher-{name}"
-    return root / config.build_preset
+def data_build_directory(config: WorkflowConfig) -> Path:
+    """Return the run's build tree. Teachers are nets the data tool loads, so one serves all."""
+    return config.output_directory / "build" / config.build_preset
 
 
 def configured_elsewhere(build: Path, repository: Path) -> str | None:
@@ -122,8 +119,8 @@ def configured_elsewhere(build: Path, repository: Path) -> str | None:
     return None
 
 
-def data_binary(config: WorkflowConfig, dataset: ManagedDatasetConfig | None = None) -> Path:
-    return data_build_directory(config, dataset) / "runner" / "poe2_minimax_data"
+def data_binary(config: WorkflowConfig) -> Path:
+    return data_build_directory(config) / "runner" / "poe2_minimax_data"
 
 
 @dataclass(frozen=True)
@@ -150,8 +147,7 @@ def catch2_cache_directory(config: WorkflowConfig, pin: PinnedCheckout) -> Path:
 
 def catch2_candidates(config: WorkflowConfig) -> list[Path]:
     """Return Catch2 checkouts already on disk, the run's private builds before the repository's."""
-    builds = [data_build_directory(config, dataset) for dataset in config.datasets
-              if isinstance(dataset, ManagedDatasetConfig)]
+    builds = [data_build_directory(config)]
     for iteration in config.iterations:
         builds.append(iteration.candidate_directory / "build")
         builds.extend(sorted(iteration.gate_directory.glob("builds/*/*")))
@@ -187,17 +183,47 @@ def verified_checkout(path: Path, pin: PinnedCheckout) -> bool:
 
 
 def _evaluator_arguments(dataset: ManagedDatasetConfig) -> list[str]:
-    return [] if dataset.teacher is None else ["--evaluator", "pattern-gain"]
+    teacher = dataset.teacher
+    if teacher is None:
+        return []
+    if teacher.net is None and teacher.iteration is not None:
+        net = f"<net of {teacher.name} once iteration {teacher.iteration}'s gate accepts it>"
+    else:
+        net = str(model_net(teacher))
+    return ["--evaluator", "pattern-gain", "--net", net]
 
 
 def candidate_build_id(candidate: dict[str, Any]) -> str:
-    """Return the native evaluator identity for one authenticated candidate model."""
-    header = candidate.get("artifacts", {}).get("model_header")
-    _require(isinstance(header, dict) and
-             isinstance(header.get("sha256"), str) and
-             re.fullmatch(r"[0-9a-f]{64}", header["sha256"]) is not None,
-             "candidate report has no valid model-header digest")
-    return f"candidate-sha256-{header['sha256']}"
+    """Return the model ID of one authenticated candidate: its net's, or its header's before nets."""
+    artifacts = candidate.get("artifacts", {})
+    identity = artifacts.get("net") if "net" in artifacts else artifacts.get("model_header")
+    _require(isinstance(identity, dict) and
+             isinstance(identity.get("sha256"), str) and
+             re.fullmatch(r"[0-9a-f]{64}", identity["sha256"]) is not None,
+             "candidate report has no valid net or model-header digest")
+    return f"candidate-sha256-{identity['sha256']}"
+
+
+def candidate_net_name(config: WorkflowConfig, iteration: IterationConfig) -> str:
+    """Return the name of the net an iteration trains: <run>/<iteration>."""
+    return f"{config.name}/{iteration.name}"
+
+
+def model_net_name(config: WorkflowConfig, model: ModelReference) -> str:
+    """Return a model's net name: its file's, or <run>/<iteration> for one this recipe trains."""
+    if model.net_name is not None:
+        return model.net_name
+    _require(model.iteration is not None, f"model {model.name} has no net")
+    return f"{config.name}/{model.iteration}"
+
+
+def model_net(model: ModelReference) -> Path:
+    """Return the intact net file of a model, or explain why it cannot be loaded."""
+    _require(model.net is not None and model.net_sha256 is not None,
+             f"model {model.name} has no net file; archive it with promote-gate --apply first")
+    _require(model.net.is_file() and sha256_file(model.net) == model.net_sha256,
+             f"net of model {model.name} is missing or changed: {model.net}")
+    return model.net
 
 
 def private_build_directory(config: WorkflowConfig, root: Path, model_id: str) -> Path:
@@ -229,15 +255,6 @@ def gate_base_build_directory(config: WorkflowConfig, iteration: IterationConfig
     model_id = gate_base_model_id(config, iteration)
     _require(model_id is not None, "gate has no base model")
     return private_build_directory(config, iteration.gate_directory, model_id)
-
-
-def gate_base_input(config: WorkflowConfig, iteration: IterationConfig) -> str:
-    """Return the evaluator --base argument: an existing build or the base model's private build."""
-    gate = iteration.engine_gate
-    _require(gate is not None, "iteration has no engine gate")
-    if gate.base is None:
-        return config.recorded_path(gate_base_build_directory(config, iteration))
-    return gate.base
 
 
 def gate_base_binary(config: WorkflowConfig, iteration: IterationConfig) -> Path:
@@ -306,7 +323,7 @@ def source_chunk_commit(path: Path) -> str:
 def source_chunk_command(config: WorkflowConfig, dataset: ManagedDatasetConfig,
                          begin: int, end: int) -> list[str]:
     return [
-        str(data_binary(config, dataset)), "source-chunk",
+        str(data_binary(config)), "source-chunk",
         "--output-dir", str(source_chunk_path(dataset, begin, end)),
         "--trajectory-begin", str(begin), "--trajectory-end", str(end),
         *_source_arguments(dataset),
@@ -315,7 +332,7 @@ def source_chunk_command(config: WorkflowConfig, dataset: ManagedDatasetConfig,
 
 def source_assemble_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> list[str]:
     return [
-        str(data_binary(config, dataset)), "source-assemble",
+        str(data_binary(config)), "source-assemble",
         "--output-dir", str(dataset.source_directory),
         "--chunks", str(source_chunks_directory(dataset)),
         *_source_arguments(dataset),
@@ -369,7 +386,7 @@ def label_command(config: WorkflowConfig, dataset: ManagedDatasetConfig,
                   index: int) -> list[str]:
     labels = dataset.labels
     command = [
-        str(data_binary(config, dataset)), "labels", "--input", str(dataset.source_directory),
+        str(data_binary(config)), "labels", "--input", str(dataset.source_directory),
         "--source-shard", str(index), "--output-dir", str(label_shard_path(dataset, index)),
         "--mode", labels.mode, "--nodes", str(labels.nodes),
         "--hash-mb", str(labels.hash_mb), "--workers", str(labels.workers),
@@ -400,7 +417,7 @@ def label_preflight_command(python: str, config: WorkflowConfig,
 
 def feature_command(config: WorkflowConfig, dataset: ManagedDatasetConfig) -> list[str]:
     return [
-        str(data_binary(config, dataset)), "features",
+        str(data_binary(config)), "features",
         "--source", str(dataset.source_directory),
         "--labels", str(dataset.labels_directory), "--output-dir",
         str(dataset.feature_directory),
@@ -458,13 +475,24 @@ def evaluation_command(python: str, config: WorkflowConfig,
     return command
 
 
-def export_command(python: str, config: WorkflowConfig,
-                   iteration: IterationConfig) -> list[str]:
-    return [
-        python, str(config.repository / "tools" / "export_minimax_pattern_gain.py"),
-        "--experiment", str(iteration.training_directory), "--output",
-        str(iteration.candidate_directory / "frozen_pattern_gain_model.hpp"),
+CANDIDATE_NET = f"net{FILE_SUFFIX}"
+
+
+def candidate_net_path(iteration: IterationConfig) -> Path:
+    return iteration.candidate_directory / CANDIDATE_NET
+
+
+def export_command(python: str, config: WorkflowConfig, iteration: IterationConfig, *,
+                   teacher: str, created: str, parent: str | None) -> list[str]:
+    command = [
+        python, "-m", "poe2_training.net_export", "--experiment",
+        str(iteration.training_directory), "--output", str(candidate_net_path(iteration)),
+        "--name", candidate_net_name(config, iteration), "--teacher", teacher,
+        "--created", created,
     ]
+    if parent is not None:
+        command.extend(("--parent", parent))
+    return command
 
 
 def parity_command(python: str, dataset: DatasetConfig, iteration: IterationConfig,
@@ -474,7 +502,8 @@ def parity_command(python: str, dataset: DatasetConfig, iteration: IterationConf
     return [
         python, "-m", "poe2_training.pattern_integration", "--dataset",
         str(dataset.feature_directory), "--experiment", str(iteration.training_directory),
-        "--inference-binary", str(binary), "--samples", str(candidate.samples),
+        "--inference-binary", str(binary), "--net", str(candidate_net_path(iteration)),
+        "--samples", str(candidate.samples),
         "--symmetry-samples", str(candidate.symmetry_samples),
         "--benchmark-iterations", str(candidate.benchmark_iterations),
     ]
@@ -486,14 +515,16 @@ def search_benchmark_command(python: str, config: WorkflowConfig,
     _require(candidate is not None, "iteration has no candidate validation")
     return [
         python, str(config.repository / "tools" / "benchmark_minimax_search.py"),
-        "--engine", str(engine), "--opening-book", str(candidate.opening_book),
+        "--engine", str(engine), "--net", str(candidate_net_path(iteration)),
+        "--opening-book", str(candidate.opening_book),
         "--positions", str(candidate.search_positions),
         "--movetime-ms", str(candidate.search_movetime_ms), "--seed", str(iteration.training.seed),
     ]
 
 
 def match_command(config: WorkflowConfig, settings: MatchConfig, *, runner: Path,
-                  new_build: Path, base: str, kind: str, root: Path) -> list[str]:
+                  new_build: Path, base: str, kind: str, root: Path,
+                  new_net: Path | None = None, base_net: Path | None = None) -> list[str]:
     """Return the evaluator command for one match, recorded under root/runs without a ledger.
 
     The evaluator runs in the repository and records paths as given, so they are given
@@ -517,6 +548,9 @@ def match_command(config: WorkflowConfig, settings: MatchConfig, *, runner: Path
         command.extend(("--new-engine-args", settings.new_engine_args))
     if settings.base_engine_args:
         command.extend(("--base-engine-args", settings.base_engine_args))
+    for flag, net in (("--new-net", new_net), ("--base-net", base_net)):
+        if net is not None:
+            command.extend((flag, config.recorded_path(net)))
     if settings.opening_seed is not None:
         command.extend(("--opening-seed", str(settings.opening_seed)))
     if settings.sequential_stop:
@@ -524,22 +558,30 @@ def match_command(config: WorkflowConfig, settings: MatchConfig, *, runner: Path
     return command
 
 
-def engine_gate_command(config: WorkflowConfig, iteration: IterationConfig,
-                        build: Path, runner: Path) -> list[str]:
+def engine_gate_command(config: WorkflowConfig, iteration: IterationConfig, build: Path,
+                        runner: Path, *, new_net: Path,
+                        base_model: ModelReference | None) -> list[str]:
+    """Return the gate's match: the candidate's net against its base, on one engine build.
+
+    A base model is its net on the same build; a configured base build plays its own net.
+    """
     gate = iteration.engine_gate
     _require(gate is not None, "iteration has no engine gate")
+    if base_model is None:
+        return match_command(config, gate, runner=runner, new_build=build, base=gate.base or "",
+                             kind=GATE_KIND, root=iteration.gate_directory, new_net=new_net)
     return match_command(config, gate, runner=runner, new_build=build,
-                         base=gate_base_input(config, iteration), kind=GATE_KIND,
-                         root=iteration.gate_directory)
+                         base=config.recorded_path(build), kind=GATE_KIND,
+                         root=iteration.gate_directory, new_net=new_net,
+                         base_net=model_net(base_model))
 
 
-def comparison_command(config: WorkflowConfig, comparison: ComparisonConfig,
-                       new_id: str, base_id: str) -> list[str]:
-    new_build = private_build_directory(config, comparison.root, new_id)
+def comparison_command(config: WorkflowConfig, comparison: ComparisonConfig, build: Path,
+                       new: ModelReference, base: ModelReference) -> list[str]:
     return match_command(
-        config, comparison, runner=new_build / "runner" / "poe2_runner", new_build=new_build,
-        base=config.recorded_path(private_build_directory(config, comparison.root, base_id)),
-        kind=COMPARISON_KIND, root=comparison.root)
+        config, comparison, runner=build / "runner" / "poe2_runner", new_build=build,
+        base=config.recorded_path(build), kind=COMPARISON_KIND, root=comparison.root,
+        new_net=model_net(new), base_net=model_net(base))
 
 
 def _manifest(path: Path) -> dict[str, Any]:
@@ -552,16 +594,31 @@ def _manifest(path: Path) -> dict[str, Any]:
 
 
 def recorded_teacher(search: dict[str, Any], label: str) -> str | None:
-    """Return the archived model ID a manifest's search used, or None for two-ply closure."""
+    """Return the net a manifest's search used, or None for two-ply closure.
+
+    Data made with a net file records its file hash as net_sha256, named here
+    net-sha256-<hash>. Data made before nets were files records the model header compiled into
+    the data tool, which is the model's ID.
+    """
     evaluator = search.get("evaluator", "two-ply-closure")
-    model = search.get("model_header_sha256")
+    header = search.get("model_header_sha256")
+    net = search.get("net_sha256")
     if evaluator in {"two-ply-closure", "b"}:
-        _require(model is None, f"{label} records a model without a learned evaluator")
+        _require(header is None and net is None,
+                 f"{label} records a model without a learned evaluator")
         return None
-    _require(evaluator == "pattern-gain" and isinstance(model, str) and
-             re.fullmatch(r"[0-9a-f]{64}", model) is not None,
+    digest = net if header is None else header
+    _require(evaluator == "pattern-gain" and (header is None) != (net is None) and
+             isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
              f"{label} search evaluator is unsupported")
-    return f"candidate-sha256-{model}"
+    return f"candidate-sha256-{digest}" if net is None else f"net-sha256-{digest}"
+
+
+def _teacher_matches(recorded: str | None, dataset: ManagedDatasetConfig) -> bool:
+    teacher = dataset.teacher
+    if teacher is None or recorded is None:
+        return teacher is None and recorded is None
+    return recorded in {_expected_teacher(dataset), f"net-sha256-{teacher.net_sha256}"}
 
 
 def _expected_teacher(dataset: ManagedDatasetConfig) -> str | None:
@@ -598,7 +655,7 @@ def authenticate_source(dataset: ManagedDatasetConfig) -> dict[str, Any]:
         "random": expected.random_weight, "immediate_gain": expected.greedy_weight,
         "opponent_aware": expected.opponent_weight, "noisy_search": expected.search_weight,
     }, "position source policy mixture differs from configuration")
-    _require(recorded_teacher(generator, "position source") == _expected_teacher(dataset),
+    _require(_teacher_matches(recorded_teacher(generator, "position source"), dataset),
              "position source teacher differs from configuration")
     build = manifest.get("build")
     _require(isinstance(build, dict) and build.get("git_dirty") is False,
@@ -645,7 +702,7 @@ def authenticate_label_shard(dataset: ManagedDatasetConfig, index: int) -> dict[
              search.get("symmetry") is True and
              search.get("two_ply_closure") is True,
              f"label shard {index} search semantics are unsupported")
-    _require(recorded_teacher(search, f"label shard {index}") == _expected_teacher(dataset),
+    _require(_teacher_matches(recorded_teacher(search, f"label shard {index}"), dataset),
              f"label shard {index} teacher differs from configuration")
     _require(build.get("git_dirty") is False and
              isinstance(build.get("git_commit"), str) and
@@ -684,8 +741,9 @@ def authenticate_features(dataset: DatasetConfig, *, require_clean: bool = True)
     _require(isinstance(label_search, dict), "feature manifest has no label search record")
     teacher = recorded_teacher(label_search, "feature artifact")
     if isinstance(dataset, ManagedDatasetConfig):
-        _require(teacher == _expected_teacher(dataset),
+        _require(_teacher_matches(teacher, dataset),
                  "feature artifact teacher differs from configuration")
+        teacher = _expected_teacher(dataset)
     return {
         "binary_sha256": artifact.binary_digest,
         "manifest_sha256": artifact.manifest_digest,
@@ -819,15 +877,83 @@ def authenticate_evaluation(config: WorkflowConfig,
     }
 
 
+def _authenticate_candidate_header(iteration: IterationConfig,
+                                   report: dict[str, Any]) -> dict[str, Any]:
+    """Authenticate the private build of a candidate validated before nets were files."""
+    artifacts = report.get("artifacts")
+    _require(isinstance(artifacts, dict), "candidate artifact map is missing")
+    expected_artifacts = {
+        "model_header": "frozen_pattern_gain_model.hpp",
+        "inference_binary": "build/engines/minimax/poe2_minimax_infer",
+        "engine_binary": "build/engines/minimax/poe2_minimax",
+        "runner_binary": "build/runner/poe2_runner",
+    }
+    _require(set(artifacts) == set(expected_artifacts),
+             "candidate artifact map has missing or unexpected entries")
+    for name, metadata in artifacts.items():
+        _require(isinstance(metadata, dict) and isinstance(metadata.get("path"), str) and
+                 isinstance(metadata.get("sha256"), str),
+                 f"candidate artifact {name} metadata is malformed")
+        _require(metadata["path"] == expected_artifacts[name],
+                 f"candidate artifact {name} has an unexpected path")
+        path = (iteration.candidate_directory / metadata["path"]).resolve()
+        _require(iteration.candidate_directory in path.parents and path.is_file(),
+                 f"candidate artifact is missing or escapes its root: {name}")
+        _require(sha256_file(path) == metadata["sha256"],
+                 f"candidate artifact digest differs: {name}")
+    return artifacts
+
+
+def _authenticate_candidate_net(config: WorkflowConfig, iteration: IterationConfig,
+                                report: dict[str, Any],
+                                feature: dict[str, Any]) -> dict[str, Any]:
+    """Authenticate a candidate's net file against its report and training provenance.
+
+    The tools that checked it ran from the run's shared build, which later commits rebuild, so
+    the report records their digests as provenance rather than as artifacts.
+    """
+    artifacts = report.get("artifacts")
+    _require(isinstance(artifacts, dict) and set(artifacts) == {"net"},
+             "candidate artifact map must hold exactly its net")
+    metadata = artifacts["net"]
+    _require(isinstance(metadata, dict) and metadata.get("path") == CANDIDATE_NET and
+             isinstance(metadata.get("sha256"), str),
+             "candidate net metadata is malformed")
+    try:
+        net = read_net(candidate_net_path(iteration))
+    except NetFileError as error:
+        raise AdapterError(f"candidate net is unusable: {error}") from error
+    _require(net.sha256 == metadata["sha256"], "candidate net digest differs from its report")
+    _require(metadata == {"path": CANDIDATE_NET, "sha256": net.sha256, "id": net.net_id,
+                          "name": net.name, "design": net.design},
+             "candidate net metadata differs from the net file")
+    _require(net.name == candidate_net_name(config, iteration) and
+             "header_sha256" not in net.metadata,
+             f"candidate net is not named {candidate_net_name(config, iteration)}")
+    _require(net.metadata.get("training_report_sha256") == report.get("training_report_sha256") and
+             net.metadata.get("feature_binary_sha256") == feature["binary_sha256"],
+             "candidate net was exported from a different training report or corpus")
+    tools = report.get("tools")
+    _require(isinstance(tools, dict) and set(tools) == {"inference_binary", "engine_binary"} and
+             all(isinstance(item, dict) and isinstance(item.get("path"), str) and
+                 isinstance(item.get("sha256"), str) for item in tools.values()),
+             "candidate tool provenance is malformed")
+    return artifacts
+
+
 def authenticate_candidate(config: WorkflowConfig,
                            iteration: IterationConfig) -> dict[str, Any]:
+    """Authenticate a candidate: a net file (schema 2), or a C++ header from before nets (1)."""
     candidate = iteration.candidate_validation
     _require(candidate is not None, "iteration has no candidate validation")
     report, report_digest = open_json_report(
         iteration.candidate_directory, schema=CANDIDATE_SCHEMA,
-        error_type=AdapterError)
+        schema_version=(1, CANDIDATE_SCHEMA_VERSION), error_type=AdapterError)
+    with_net = report.get("schema_version") == CANDIDATE_SCHEMA_VERSION
     names = {path.name for path in iteration.candidate_directory.iterdir()}
-    _require(names == {"COMPLETE", "report.json", "frozen_pattern_gain_model.hpp", "build"},
+    expected_names = ({"COMPLETE", "report.json", CANDIDATE_NET} if with_net else
+                      {"COMPLETE", "report.json", "frozen_pattern_gain_model.hpp", "build"})
+    _require(names == expected_names,
              f"candidate has unexpected output files: {iteration.candidate_directory}")
     _require(report.get("promotable") == candidate.promotable,
              "candidate promotable setting differs from configuration")
@@ -875,27 +1001,10 @@ def authenticate_candidate(config: WorkflowConfig,
         _require(isinstance(float_metrics.get("sealed_test"), dict) and
                  isinstance(quantized_metrics.get("sealed_test"), dict),
                  "candidate float or quantized sealed-test metrics are missing")
-    artifacts = report.get("artifacts")
-    _require(isinstance(artifacts, dict), "candidate artifact map is missing")
-    expected_artifacts = {
-        "model_header": "frozen_pattern_gain_model.hpp",
-        "inference_binary": "build/engines/minimax/poe2_minimax_infer",
-        "engine_binary": "build/engines/minimax/poe2_minimax",
-        "runner_binary": "build/runner/poe2_runner",
-    }
-    _require(set(artifacts) == set(expected_artifacts),
-             "candidate artifact map has missing or unexpected entries")
-    for name, metadata in artifacts.items():
-        _require(isinstance(metadata, dict) and isinstance(metadata.get("path"), str) and
-                 isinstance(metadata.get("sha256"), str),
-                 f"candidate artifact {name} metadata is malformed")
-        _require(metadata["path"] == expected_artifacts[name],
-                 f"candidate artifact {name} has an unexpected path")
-        path = (iteration.candidate_directory / metadata["path"]).resolve()
-        _require(iteration.candidate_directory in path.parents and path.is_file(),
-                 f"candidate artifact is missing or escapes its root: {name}")
-        _require(sha256_file(path) == metadata["sha256"],
-                 f"candidate artifact digest differs: {name}")
+    if with_net:
+        artifacts = _authenticate_candidate_net(config, iteration, report, feature)
+    else:
+        artifacts = _authenticate_candidate_header(iteration, report)
     parity = report.get("parity")
     _require(isinstance(parity, dict) and parity.get("passed") is True,
              "candidate did not pass exact Python/C++ parity")
@@ -982,8 +1091,13 @@ def _authenticate_build_artifacts(root: Path, report: dict[str, Any],
 def _authenticate_match_run(config: WorkflowConfig, root: Path, report: dict[str, Any],
                             settings: MatchConfig, recorded: dict[str, Any], *, label: str,
                             kind: str, new_id: str, base_id: str | None,
-                            new_engine_path: Path, base_engine_path: Path) -> dict[str, Any]:
-    """Authenticate a match report's settings and its single evaluator run against both sides."""
+                            new_engine_path: Path, base_engine_path: Path,
+                            nets: dict[str, Path | None] | None = None) -> dict[str, Any]:
+    """Authenticate a match report's settings and its single evaluator run against both sides.
+
+    nets, for matches between net files, maps each side to the file it loaded, or to None for a
+    base build that plays its own net.
+    """
     recorded_settings = report.get("settings")
     _require(isinstance(recorded_settings, dict) and
              {key: value for key, value in recorded_settings.items() if key != "opening_book"} ==
@@ -1053,6 +1167,13 @@ def _authenticate_match_run(config: WorkflowConfig, root: Path, report: dict[str
     if settings.opening_seed is not None:
         _require(manifest.get("opening_seed") == settings.opening_seed,
                  f"{label} opening seed differs from configuration")
+    for side, net in (nets or {}).items():
+        recorded = manifest.get(f"{side}_net")
+        _require(recorded is None if net is None else names_path(config, recorded, net),
+                 f"{label} {side} side loaded a different net file")
+        if net is not None:
+            _require(manifest.get(f"{side}_net_sha256") == sha256_file(net),
+                     f"{label} {side} side reported a different net")
     decision = manifest.get("sequential_decision")
     _require(isinstance(decision, str) and bool(decision),
              f"{label} manifest has no sequential decision")
@@ -1070,11 +1191,108 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
     _require(iteration.engine_gate is not None, "iteration has no engine gate")
     if candidate is None:
         candidate = authenticate_candidate(config, iteration)
-    build_id = candidate_build_id(candidate)
-    build = gate_build_directory(config, iteration, candidate)
     report, digest = open_json_report(
         iteration.gate_directory, schema=GATE_SCHEMA,
-        schema_version=GATE_SCHEMA_VERSION, error_type=AdapterError)
+        schema_version=(HEADER_GATE_SCHEMA_VERSION, GATE_SCHEMA_VERSION), error_type=AdapterError)
+    if report["schema_version"] == HEADER_GATE_SCHEMA_VERSION:
+        return _authenticate_header_gate(config, iteration, candidate, report, digest)
+    return _authenticate_net_gate(config, iteration, candidate, report, digest)
+
+
+def engine_build_id(count: int, commit: str) -> str:
+    """Return the ID a build of commit has under build/by-commit: count-shortsha."""
+    return f"{count:06d}-{commit[:12]}"
+
+
+def _authenticate_shared_build(root: Path, report: dict[str, Any], preset: str,
+                               label: str) -> tuple[str, Path]:
+    """Return the engine build ID and directory a match built once from its commit."""
+    build_id = report.get("engine_build_id")
+    commit = report.get("git_commit")
+    _require(isinstance(build_id, str) and isinstance(commit, str) and
+             re.fullmatch(r"[0-9]{6}-[0-9a-f]{12}", build_id) is not None and
+             build_id.endswith(commit[:12]),
+             f"{label} engine build ID is malformed")
+    build = root / "builds" / build_id / preset
+    _require(report.get("build_directory") == build.relative_to(root).as_posix(),
+             f"{label} has the wrong build layout")
+    builds = {path.name for path in (root / "builds").iterdir()}
+    _require(builds == {build_id}, f"{label} has unexpected builds: {root / 'builds'}")
+    return build_id, build
+
+
+def _authenticate_net_gate(config: WorkflowConfig, iteration: IterationConfig,
+                           candidate: dict[str, Any], report: dict[str, Any],
+                           digest: str) -> dict[str, Any]:
+    """Authenticate a gate between net files: one engine build, the candidate's net on one side."""
+    gate = iteration.engine_gate
+    assert gate is not None
+    names = {path.name for path in iteration.gate_directory.iterdir()}
+    _require(names == {"COMPLETE", "report.json", "builds", "runs"},
+             f"engine gate has unexpected output files: {iteration.gate_directory}")
+    _require(report.get("candidate_report_sha256") == candidate["report_sha256"],
+             "engine gate references a different candidate report")
+    model_id = candidate_build_id(candidate)
+    _require(report.get("candidate_build_id") == model_id and "net" in candidate["artifacts"],
+             "engine gate played a different candidate")
+    build_id, build = _authenticate_shared_build(
+        iteration.gate_directory, report, config.build_preset, "engine gate")
+    build_relative = build.relative_to(iteration.gate_directory)
+    build_paths = _authenticate_build_artifacts(iteration.gate_directory, report, {
+        "new_engine_binary": (build_relative / "engines" / gate.new_engine).as_posix(),
+        "runner_binary": (build_relative / "runner" / "poe2_runner").as_posix(),
+    }, "engine-gate")
+    new_net = candidate_net_path(iteration)
+    base_model_id = gate_base_model_id(config, iteration)
+    if base_model_id is None:
+        base_engine_path = resolve_eval_binary(config, gate.base or "", gate.base_engine)
+        base_net: Path | None = None
+    else:
+        base_engine_path = (build / "engines" / gate.base_engine).resolve()
+        base_net = model_net(_gate_base_reference(config, iteration))
+    base_metadata = report.get("base_engine_artifact")
+    _require(isinstance(base_metadata, dict) and
+             names_path(config, base_metadata.get("path"), base_engine_path) and
+             isinstance(base_metadata.get("sha256"), str) and
+             sha256_file(base_engine_path) == base_metadata["sha256"],
+             "engine-gate base engine artifact is missing or changed")
+    expected_nets = {"new_net": (new_net, model_id), "base_net": (base_net, base_model_id)}
+    for key, (net, net_model_id) in expected_nets.items():
+        recorded = report.get(key)
+        _require(recorded is None if net is None else
+                 isinstance(recorded, dict) and set(recorded) == {"path", "sha256", "model_id"} and
+                 names_path(config, recorded["path"], net) and
+                 recorded["sha256"] == sha256_file(net) and recorded["model_id"] == net_model_id,
+                 "engine gate played different nets than its candidate and base")
+    match = _authenticate_match_run(
+        config, iteration.gate_directory, report, gate, recorded_gate_settings(gate),
+        label="engine-gate", kind=GATE_KIND, new_id=build_id,
+        base_id=build_id if base_model_id is not None else None,
+        new_engine_path=build_paths["new_engine_binary"], base_engine_path=base_engine_path,
+        nets={"new": new_net, "base": base_net})
+    return {"report_sha256": digest, "candidate_build_id": model_id, "new_id": build_id,
+            "engine_build_id": build_id, "new_net_sha256": sha256_file(new_net),
+            "base_net_sha256": None if base_net is None else sha256_file(base_net), **match}
+
+
+def _gate_base_reference(config: WorkflowConfig, iteration: IterationConfig) -> ModelReference:
+    """Return the resolved model a gate's base names."""
+    gate = iteration.engine_gate
+    assert gate is not None
+    if gate.base_iteration is not None:
+        return config.trained_model(gate.base_iteration)
+    for model in config.models:
+        if model.model_id == gate.base_model:
+            return model
+    raise AdapterError(f"engine-gate base model is not named in config.models: {gate.base_model}")
+
+
+def _authenticate_header_gate(config: WorkflowConfig, iteration: IterationConfig,
+                              candidate: dict[str, Any], report: dict[str, Any],
+                              digest: str) -> dict[str, Any]:
+    """Authenticate a gate played before nets were files: one private build per model."""
+    build_id = candidate_build_id(candidate)
+    build = gate_build_directory(config, iteration, candidate)
     names = {path.name for path in iteration.gate_directory.iterdir()}
     _require(names == {"COMPLETE", "report.json", "builds", "runs"},
              f"engine gate has unexpected output files: {iteration.gate_directory}")
@@ -1108,45 +1326,52 @@ def authenticate_gate(config: WorkflowConfig, iteration: IterationConfig, *,
         config, iteration.gate_directory, report, gate, recorded_gate_settings(gate),
         label="engine-gate", kind=GATE_KIND, new_id=build_id, base_id=base_model_id,
         new_engine_path=build_paths["new_engine_binary"], base_engine_path=base_engine_path)
-    return {"report_sha256": digest, "candidate_build_id": build_id, **match}
+    return {"report_sha256": digest, "candidate_build_id": build_id, "new_id": build_id, **match}
 
 
-def comparison_side(config: WorkflowConfig, comparison: ComparisonConfig,
-                    model: ModelReference) -> dict[str, str]:
-    """Return how a comparison report records one side: its name, model, and private build."""
+def comparison_side(config: WorkflowConfig, model: ModelReference) -> dict[str, str]:
+    """Return how a comparison report records one side: its name, model, and net."""
     _require(model.model_id is not None, f"comparison model {model.name} is not available")
-    return {"name": model.name, "model_id": model.model_id,
-            "build_directory": private_build_directory(config, comparison.root, model.model_id)
-            .relative_to(comparison.root).as_posix()}
+    net = model_net(model)
+    return {"name": model.name, "model_id": model.model_id, "net": config.recorded_path(net),
+            "net_sha256": sha256_file(net)}
 
 
 def authenticate_comparison(config: WorkflowConfig, comparison: ComparisonConfig,
                             new: ModelReference, base: ModelReference) -> dict[str, Any]:
-    """Authenticate a completed comparison between the two models it resolved to."""
+    """Authenticate a completed comparison between the nets of the two models it resolved to."""
     root = comparison.root
-    report, digest = open_json_report(root, schema=COMPARISON_SCHEMA, error_type=AdapterError)
+    report, digest = open_json_report(root, schema=COMPARISON_SCHEMA,
+                                      schema_version=COMPARISON_SCHEMA_VERSION,
+                                      error_type=AdapterError)
     names = {path.name for path in root.iterdir()}
     _require(names == {"COMPLETE", "report.json", "builds", "runs"},
              f"comparison has unexpected output files: {root}")
-    sides = {"new": comparison_side(config, comparison, new),
-             "base": comparison_side(config, comparison, base)}
-    _require(report.get("new") == sides["new"] and report.get("base") == sides["base"],
-             f"comparison {comparison.name} was played between different models")
-    builds = {path.name for path in (root / "builds").iterdir()}
-    _require(builds == {new.model_id, base.model_id},
-             f"comparison has unexpected private builds: {root / 'builds'}")
+    sides = {"new": comparison_side(config, new), "base": comparison_side(config, base)}
+    for side, model in (("new", new), ("base", base)):
+        recorded = report.get(side)
+        expected = sides[side]
+        _require(isinstance(recorded, dict) and set(recorded) == set(expected) and
+                 all(recorded[key] == expected[key] for key in expected if key != "net") and
+                 names_path(config, recorded["net"], model_net(model)),
+                 f"comparison {comparison.name} was played between different models")
+    build_id, build = _authenticate_shared_build(root, report, config.build_preset, "comparison")
+    build_relative = build.relative_to(root).as_posix()
     build_paths = _authenticate_build_artifacts(root, report, {
-        "new_engine_binary": f"{sides['new']['build_directory']}/engines/{comparison.new_engine}",
-        "base_engine_binary":
-            f"{sides['base']['build_directory']}/engines/{comparison.base_engine}",
-        "runner_binary": f"{sides['new']['build_directory']}/runner/poe2_runner",
+        "new_engine_binary": f"{build_relative}/engines/{comparison.new_engine}",
+        "base_engine_binary": f"{build_relative}/engines/{comparison.base_engine}",
+        "runner_binary": f"{build_relative}/runner/poe2_runner",
     }, "comparison")
     match = _authenticate_match_run(
         config, root, report, comparison, match_settings(comparison), label="comparison",
-        kind=COMPARISON_KIND, new_id=new.model_id, base_id=base.model_id,
+        kind=COMPARISON_KIND, new_id=build_id, base_id=build_id,
         new_engine_path=build_paths["new_engine_binary"],
-        base_engine_path=build_paths["base_engine_binary"])
-    return {"report_sha256": digest, "new_id": new.model_id, "base_id": base.model_id, **match}
+        base_engine_path=build_paths["base_engine_binary"],
+        nets={"new": model_net(new), "base": model_net(base)})
+    return {"report_sha256": digest, "new_id": build_id, "base_id": build_id,
+            "engine_build_id": build_id, "new_model_id": new.model_id,
+            "base_model_id": base.model_id, "new_net_sha256": sides["new"]["net_sha256"],
+            "base_net_sha256": sides["base"]["net_sha256"], **match}
 
 
 STAGE_ADAPTERS: dict[str, StageAdapter] = {
