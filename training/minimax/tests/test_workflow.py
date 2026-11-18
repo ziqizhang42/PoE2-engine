@@ -304,7 +304,7 @@ class WorkflowConfigTest(unittest.TestCase):
         (repository / "CMakePresets.json").write_bytes(
             (REPOSITORY / "CMakePresets.json").read_bytes())
         (repository / "eval/openings").mkdir(parents=True)
-        for book in ("development.txt", "holdout.txt"):
+        for book in ("development-v2.txt", "holdout-v2.txt"):
             (repository / "eval/openings" / book).write_bytes(
                 (REPOSITORY / "eval/openings" / book).read_bytes())
         return repository, archive_net(repository, "fixture/g000")
@@ -1643,7 +1643,7 @@ class WorkflowPromotionTest(unittest.TestCase):
         for config in (self.config, moved):
             values = self._saved_gate_row(config)
             self.assertEqual((values["run_dir"], values["opening_book"]),
-                             (runs, "eval/openings/holdout.txt"))
+                             (runs, "eval/openings/holdout-v2.txt"))
         self.assertEqual(stage_fingerprints(moved), stage_fingerprints(self.config))
 
     def test_absolute_records_authenticate_only_where_they_were_written(self) -> None:

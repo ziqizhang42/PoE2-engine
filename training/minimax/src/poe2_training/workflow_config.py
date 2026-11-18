@@ -204,7 +204,7 @@ class CandidateValidationConfig:
     samples: int = 4096
     symmetry_samples: int = 512
     benchmark_iterations: int = 100
-    opening_book: Path = Path("eval/openings/development.txt")
+    opening_book: Path = Path("eval/openings/development-v2.txt")
     search_positions: int = 32
     search_movetime_ms: int = 100
 
@@ -217,7 +217,7 @@ class MatchConfig:
     base_engine: str = CANDIDATE_ENGINE
     new_engine_args: str = CANDIDATE_ENGINE_ARGS
     base_engine_args: str = CANDIDATE_ENGINE_ARGS
-    opening_book: Path = Path("eval/openings/holdout.txt")
+    opening_book: Path = Path("eval/openings/holdout-v2.txt")
     games: int = 2000
     workers: int = 1
     timeout_ms: int = 1000
@@ -645,7 +645,7 @@ def _parse_candidate(repository: Path, value: Any, field: str) -> CandidateValid
     _unknown(table, {"promotable", "samples", "symmetry_samples", "benchmark_iterations",
                      "opening_book", "search_positions", "search_movetime_ms"}, field)
     opening = _repository_path(
-        repository, _string(table, "opening_book", field, "eval/openings/development.txt"),
+        repository, _string(table, "opening_book", field, "eval/openings/development-v2.txt"),
         f"{field}.opening_book")
     _require(opening.is_file(), f"{field}.opening_book is not a file: {opening}")
     return CandidateValidationConfig(
@@ -676,7 +676,7 @@ def _parse_match(repository: Path, output: Path, table: dict[str, Any],
     _require(sequential_alt > sequential_null,
              f"{field}.sequential_alt must be greater than sequential_null")
     opening_book = _repository_path(
-        repository, _string(table, "opening_book", field, "eval/openings/holdout.txt"),
+        repository, _string(table, "opening_book", field, "eval/openings/holdout-v2.txt"),
         f"{field}.opening_book")
     _require(opening_book.is_file(),
              f"{field}.opening_book is not a file: {opening_book}")

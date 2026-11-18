@@ -44,7 +44,7 @@ This target:
 Default gate settings:
 
 ```text
-BOOK=eval/openings/holdout.txt
+BOOK=eval/openings/holdout-v2.txt
 GAMES=2000
 WORKERS=1
 SEQUENTIAL_NULL=0
@@ -92,16 +92,23 @@ The new build is always the current `HEAD` build, not the newest directory under
 
 ## Opening Suites
 
-The committed corpus is divided into two books:
+Each corpus is divided into a development book and a holdout book. `eval-smoke` uses the development book and `eval-gate` the holdout book of the balanced corpus ([Balanced Books](#balanced-books)):
+
+```text
+eval/openings/development-v2.txt
+eval/openings/holdout-v2.txt
+```
+
+The rule-generated corpus stays committed. Results recorded up to 2026-11-18 used it, and `run1`'s recipe names it:
 
 ```text
 eval/openings/development.txt
 eval/openings/holdout.txt
 ```
 
-`eval-smoke` uses the development book and `eval-gate` uses the holdout book.
+A score on one corpus cannot be compared with a score on the other: the same difference between two engines shows as about twice the normalized Elo on the balanced books. Every row of `eval/results.csv` names its book and the book's digest.
 
-Regenerate both books atomically with:
+Regenerate both rule-generated books atomically with:
 
 ```bash
 build/debug/runner/poe2_runner openings generate-corpus \
@@ -141,7 +148,7 @@ eval/openings/holdout-v2.txt
 eval/openings/balance-correction-v2.txt
 ```
 
-They are not the defaults yet; pass them with `BOOK=` or `SMOKE_BOOK=`, or `--opening-book`.
+They are the default books of `eval-gate`, `eval-smoke`, and training recipes that name no book. The gate's alternative stays at 20 normalized Elo, which on these books is a difference about half as large as on the rule-generated ones: a gate accepts a real improvement about 2.3 times sooner, takes as long as before to reject a change with no effect, and passes smaller gains. `SEQUENTIAL_ALT=40` is the same real difference as 20 was on the rule-generated books.
 
 `poe2_runner openings generate-balanced` builds both books:
 
@@ -242,7 +249,7 @@ NEW_BUILD=build/by-commit/NEW_BUILD_ID/release
   --new-engine poe2_greedy \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \
-  --opening-book eval/openings/holdout.txt \
+  --opening-book eval/openings/holdout-v2.txt \
   --shuffle-openings \
   --games 2000 \
   --workers 8 \

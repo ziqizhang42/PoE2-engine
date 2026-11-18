@@ -72,7 +72,7 @@ build/debug/runner/poe2_runner series \
   --workers 4 \
   --timeout-ms 1000 \
   --go-movetime-ms 100 \
-  --opening-book eval/openings/development.txt \
+  --opening-book eval/openings/development-v2.txt \
   --shuffle-openings \
   --opening-seed 0 \
   --summary-only \
@@ -124,7 +124,7 @@ build/release/runner/poe2_runner eval \
   --new-engine poe2_greedy \
   --base-engine poe2_random_legal \
   --base-engine-args '--seed 1' \
-  --opening-book eval/openings/holdout.txt \
+  --opening-book eval/openings/holdout-v2.txt \
   --shuffle-openings \
   --games 2000 \
   --workers 4 \

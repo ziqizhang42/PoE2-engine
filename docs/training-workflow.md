@@ -175,6 +175,7 @@ A compact recipe is shorthand only. It expands into the long form described belo
 - Every other generation needs a `parent`, which names an earlier generation, and a `seed`. It becomes a dataset and an iteration, both named after the generation. The parent is the dataset's `teacher` and the gate's `base_model`.
 - `seed` is both the position-source seed and the training seed, and the corpus ID is `poe2-<run>-<generation>-v1`. A generation's own `[generations.source]` or `[generations.training]` can override either.
 - `[defaults.TABLE]` holds settings for any of `source`, `labels`, `features`, `training`, `sealed_evaluation`, `candidate_validation`, and `engine_gate`. A generation's `[generations.TABLE]` overrides them key by key. Defaults cannot set a corpus ID or seed, and no table sets a gate base. A table absent from both is omitted; every trained generation needs candidate validation and an engine gate.
+- A recipe that names its opening books keeps them. `run1` names the rule-generated books in its defaults, and its recorded generations are fingerprinted with them, so a later generation moves to the balanced books ([evaluation.md](evaluation.md#balanced-books)) with `opening_book` in its own `[generations.engine_gate]`. Comparisons start from `[defaults.engine_gate]`, so they stay on the book the earlier ones used.
 - Every trained generation is also a model of the recipe named after itself, so later generations can name it as their parent.
 
 #### Chains
@@ -383,7 +384,7 @@ promotable = true
 samples = 4096
 symmetry_samples = 512
 benchmark_iterations = 100
-opening_book = "eval/openings/development.txt"
+opening_book = "eval/openings/development-v2.txt"
 search_positions = 32
 search_movetime_ms = 100
 ```
@@ -397,7 +398,7 @@ A promotable candidate can be gated against an existing engine build:
 base = "BASE_BUILD_ID"
 base_engine = "minimax/poe2_minimax"
 base_engine_args = "--evaluator pattern-gain"
-opening_book = "eval/openings/holdout.txt"
+opening_book = "eval/openings/holdout-v2.txt"
 games = 2000
 workers = 6
 timeout_ms = 1000

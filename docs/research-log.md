@@ -47,8 +47,8 @@ build, 2,000 games on each book:
 | g002's margin per game | +0.52 | +0.44 |
 | Normalized Elo | 37 | 75 |
 
-Conclusion: the balanced books are not the default yet. A score on one book cannot be
-compared with a score on the other. With the gate's alternative left at 20 normalized Elo, the
+Conclusion: gates use the balanced books by default from here on, with the alternative left
+at 20 normalized Elo. A score on one book cannot be compared with a score on the other. With the gate's alternative left at 20 normalized Elo, the
 log-likelihood ratio grew 2.3 times as fast on the balanced book in both pairs of matches, so
 a real improvement is accepted that much sooner; a change with no effect takes as long to
 reject as before, and the gate passes differences half as large. An alternative of 40 on the

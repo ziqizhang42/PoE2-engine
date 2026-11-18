@@ -163,7 +163,7 @@ opening sample:
 ```bash
 python3 tools/benchmark_minimax_search.py \
   --engine build/release/engines/minimax/poe2_minimax \
-  --opening-book eval/openings/development.txt \
+  --opening-book eval/openings/development-v2.txt \
   --positions 32 \
   --movetime-ms 100
 ```
