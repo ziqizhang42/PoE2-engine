@@ -4,6 +4,43 @@ Experiments that answered a question about what to try next, newest first. Each 
 the question, what was measured, and the conclusion drawn from it. Release notes are in
 `CHANGELOG.md`; game results are in `eval/results.csv` and `models/`.
 
+## 2026-11-18: do openings chosen for balance make a match say more?
+
+Yes, about 4.6 times as much per game. On the rule-generated books the opening decides most
+games: over 41,000 games the first player won 61% and led by 8.1 points before the 5.5
+handicap, the same opening gave nearly the same lead in different matches (correlation 0.99),
+and one engine won both games of only 7% of pairs. Ways of choosing openings, each tested on
+development openings it was not fitted on:
+
+| Openings kept | Share kept | Pairs one engine won outright |
+|---|---:|---:|
+| All | 100% | 7.2% |
+| Score gap centred on its even point (-3 to +1) | 91% | 7.6% |
+| Depth-1 search predicts within 2 points | 20% | 23.4% |
+| 200,000-node search predicts within 2 points | 20% | 26.1% |
+| Two or more earlier games ended within 2 points | 17% | 32.6% |
+
+The raw search over-rates the first player by about 3 points in openings of 2 to 6 plies and
+about 1 point in longer ones, so the prediction is the score corrected by a line fitted for
+each length. Books built with the 200,000-node rule were then played by the same two engines
+as a match on the old development book, 4,000 games each:
+
+| | Old development book | `development-v2` |
+|---|---:|---:|
+| Pairs one engine won outright | 9.1% | 32.3% |
+| First player wins | 60.5% | 51.4% |
+| Better engine's score | 52.8% | 60.5% |
+| Better engine's margin per game | +0.59 | +0.61 |
+| Normalized Elo | 46 | 98 |
+
+Conclusion: a gate on the balanced books should need far fewer games; they are not the
+default yet. A score on one book cannot be compared with a score on the other, and the gate's
+alternative of 20 normalized Elo is a difference about half as large on the balanced book. An opening's lead correlated
+0.94 to 0.96 between neighbouring generations and 0.85 between v0.2 and g002, so refit the
+correction and regenerate after a large change. The first player's lead did not move with
+three times the thinking time (-0.13 points, standard error 0.07), which puts the even
+handicap for engines of this strength near 7.5.
+
 ## 2026-11-18: which search changes add strength at a fixed time?
 
 Searching late moves less deeply does; the others tried do not. Each change played the build

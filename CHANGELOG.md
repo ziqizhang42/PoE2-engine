@@ -7,6 +7,10 @@
 - The search is about 1.6 times faster and returns the same results. It updates the evaluator's inputs move by move instead of recomputing them at every position, and starts loading a position's table entry before it needs it. Searches to a fixed node count or depth return the same moves, scores, and node counts, every evaluation has the same value, and labels are byte for byte the same. At 100 ms a move it beat the previous build 780-740 over 1,520 games (51.3%, 95% interval 49.6% to 53.1%).
 - Timed searches look deeper. At each position the engine searches its first four moves at full depth and tries the rest two plies shallower, searching again in full any move that beats the best so far. Searches to a fixed node count or depth are unchanged, so labels are the same. The depth a timed search reports is that of its first moves; later moves may have been searched less deeply. At 100 ms a move it beat the previous build 204-182 over 386 games (52.8%, 95% interval 50.3% to 56.3%).
 
+### Evaluation
+
+- Balanced opening books `eval/openings/development-v2.txt` and `eval/openings/holdout-v2.txt`, about 4,000 openings each. An opening is kept only when a 200,000-node search, corrected for each opening length from match results, predicts a result within 2 points of even. Between the same two engines over 4,000 games, the share of opening pairs that one engine won outright rose from 9% on the old development book to 32%, and the first player's win rate fell from 60% to 51%. `poe2_runner openings fit-balance` refits the correction and `openings generate-balanced` regenerates the books byte for byte ([docs/evaluation.md](docs/evaluation.md)). Gates still use the old books.
+
 ## 0.3.2 - 2026-11-17 · net run1/g002
 
 - The built-in net is `run1/g002` (`232a3cc37caf`), the second generation of `run1`. `run1/g001` taught it: its data is 303,534 positions from 40,000 generated games, all labeled by g001. It beat g001 204-182 over 386 games at 100 ms a move (52.8%, 95% interval 50.3% to 56.3%).
