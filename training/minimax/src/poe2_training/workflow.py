@@ -143,19 +143,27 @@ MODEL_ARCHIVE_SCHEMA = "poe2-archived-model"
 # Version 2 records carry the model's net, lineage, and training curve.
 MODEL_ARCHIVE_SCHEMA_VERSION = 2
 MODEL_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "index.csv"
-# Rows recorded before nets were files lack the trailing columns; they are filled in from each
-# model's archived record when the index is next written.
+# Rows recorded before nets were files lack the columns from net_sha256 on, and rows recorded
+# before a second pair of opening books lack opening_book. They are filled in from each
+# model's archived record and from the master ledger when the index is next written.
 PREVIOUS_MODEL_INDEX_HEADER = (
     "recorded_utc", "run", "iteration", "model", "base", "base_model", "decision", "games",
     "score_pct", "sealed_mae", "gate_run_id",
 )
-MODEL_INDEX_HEADER = (*PREVIOUS_MODEL_INDEX_HEADER, "net_sha256", "teacher", "method",
-                      "data_positions", "data_games")
+BOOKLESS_MODEL_INDEX_HEADER = (*PREVIOUS_MODEL_INDEX_HEADER, "net_sha256", "teacher", "method",
+                               "data_positions", "data_games")
+# A score depends on the opening book it was played on, so each row names its book.
+MODEL_INDEX_HEADER = (*BOOKLESS_MODEL_INDEX_HEADER, "opening_book")
 COMPARISON_INDEX_PATH = MODEL_ARCHIVE_DIRECTORY / "comparisons.csv"
-COMPARISON_INDEX_HEADER = (
+BOOKLESS_COMPARISON_INDEX_HEADER = (
     "recorded_utc", "run", "comparison", "new", "new_model", "base", "base_model", "decision",
     "games", "score_pct", "run_id", "new_net_sha256", "base_net_sha256",
 )
+COMPARISON_INDEX_HEADER = (*BOOKLESS_COMPARISON_INDEX_HEADER, "opening_book")
+EARLIER_INDEX_HEADERS = {
+    MODEL_INDEX_HEADER: (PREVIOUS_MODEL_INDEX_HEADER, BOOKLESS_MODEL_INDEX_HEADER),
+    COMPARISON_INDEX_HEADER: (BOOKLESS_COMPARISON_INDEX_HEADER,),
+}
 # The match runner's ledger columns that name each side's engine version and net. Saved rows
 # and ledgers from before them read as empty in these columns.
 LEDGER_NET_COLUMNS = (
@@ -2445,7 +2453,7 @@ def _model_index_row(config: WorkflowConfig, iteration: IterationConfig,
     return [
         saved["created_at_utc"], config.name, iteration.name, record["net"]["id"],
         base, base_model, gate["sequential_decision"], str(games), score,
-        sealed_mae, gate["run_id"], *_index_record_fields(record),
+        sealed_mae, gate["run_id"], *_index_record_fields(record), saved["opening_book"],
     ]
 
 
@@ -2456,9 +2464,31 @@ def _index_record_fields(record: dict[str, Any]) -> list[str]:
             str(training["positions"]), _ledger_scalar(training["games"])]
 
 
-def _migrate_model_index(config: WorkflowConfig) -> None:
-    """Fill the columns rows recorded before nets were files lack, from the archived records."""
-    path = config.repository / MODEL_INDEX_PATH
+def _archived_record_fields(config: WorkflowConfig, model: str) -> list[str]:
+    directory = config.repository / MODEL_ARCHIVE_DIRECTORY
+    records = sorted(directory.glob(f"candidate-sha256-{model}*.json"))
+    if len(records) != 1:
+        raise WorkflowError(f"index row {model} does not name exactly one archived model")
+    record = json.loads(records[0].read_bytes())
+    if record.get("schema_version") != MODEL_ARCHIVE_SCHEMA_VERSION:
+        raise WorkflowError(f"archived record {records[0].name} predates net files; "
+                            "upgrade it before the index")
+    return _index_record_fields(record)
+
+
+def _ledger_opening_books(config: WorkflowConfig) -> dict[str, str]:
+    """Return the opening book of every run in the master ledger, by run ID."""
+    rows = _read_master_ledger(_master_ledger_path(config))
+    if not rows or "run_id" not in rows[0] or "opening_book" not in rows[0]:
+        raise WorkflowError("master ledger has no run_id or opening_book column")
+    run, book = rows[0].index("run_id"), rows[0].index("opening_book")
+    return {row[run]: row[book] for row in rows[1:] if len(row) > max(run, book)}
+
+
+def _migrate_index(config: WorkflowConfig, relative: Path, header: Sequence[str],
+                   run_column: str) -> None:
+    """Bring an index written with an earlier header up to date, from records and the ledger."""
+    path = config.repository / relative
     if not path.exists():
         return
     try:
@@ -2466,26 +2496,32 @@ def _migrate_model_index(config: WorkflowConfig) -> None:
             rows = list(csv.reader(source))
     except (OSError, UnicodeDecodeError, csv.Error) as error:
         raise WorkflowError(f"could not read index {path}: {error}") from error
-    if not rows or tuple(rows[0]) != PREVIOUS_MODEL_INDEX_HEADER:
+    stored = tuple(rows[0]) if rows else ()
+    if stored not in EARLIER_INDEX_HEADERS[tuple(header)]:
         return
-    directory = config.repository / MODEL_ARCHIVE_DIRECTORY
-    migrated = [list(MODEL_INDEX_HEADER)]
+    books = _ledger_opening_books(config)
+    migrated = [list(header)]
     for row in rows[1:]:
-        model = row[PREVIOUS_MODEL_INDEX_HEADER.index("model")]
-        records = sorted(directory.glob(f"candidate-sha256-{model}*.json"))
-        if len(records) != 1:
-            raise WorkflowError(f"index row {model} does not name exactly one archived model")
-        record = json.loads(records[0].read_bytes())
-        if record.get("schema_version") != MODEL_ARCHIVE_SCHEMA_VERSION:
-            raise WorkflowError(f"archived record {records[0].name} predates net files; "
-                                "upgrade it before the index")
-        migrated.append([*row, *_index_record_fields(record)])
+        if stored == PREVIOUS_MODEL_INDEX_HEADER:
+            row = [*row, *_archived_record_fields(config, row[stored.index("model")])]
+        run_id = row[stored.index(run_column)]
+        if run_id not in books:
+            raise WorkflowError(f"index row {run_id} is not in the master ledger: {path}")
+        migrated.append([*row, books[run_id]])
     contents = io.StringIO()
     csv.writer(contents, lineterminator="\n").writerows(migrated)
     try:
         atomic_write_bytes(path, contents.getvalue().encode("utf-8"), replace=True)
     except OSError as error:
         raise WorkflowError(f"could not migrate index {path}: {error}") from error
+
+
+def _migrate_model_index(config: WorkflowConfig) -> None:
+    _migrate_index(config, MODEL_INDEX_PATH, MODEL_INDEX_HEADER, "gate_run_id")
+
+
+def _migrate_comparison_index(config: WorkflowConfig) -> None:
+    _migrate_index(config, COMPARISON_INDEX_PATH, COMPARISON_INDEX_HEADER, "run_id")
 
 
 def _comparison_index_row(config: WorkflowConfig, comparison: ComparisonConfig,
@@ -2497,7 +2533,7 @@ def _comparison_index_row(config: WorkflowConfig, comparison: ComparisonConfig,
         saved["created_at_utc"], config.name, comparison.name,
         model_net_name(config, new), new.sha256[:12], model_net_name(config, base),
         base.sha256[:12], match["sequential_decision"], str(games), score, match["run_id"],
-        match["new_net_sha256"], match["base_net_sha256"],
+        match["new_net_sha256"], match["base_net_sha256"], saved["opening_book"],
     ]
 
 
@@ -2511,8 +2547,7 @@ def _csv_has_row(path: Path, header: Sequence[str], key: str, row: list[str]) ->
     except (OSError, UnicodeDecodeError, csv.Error) as error:
         raise WorkflowError(f"could not read index {path}: {error}") from error
     stored = tuple(rows[0]) if rows else ()
-    if stored != tuple(header) and not (
-            stored == PREVIOUS_MODEL_INDEX_HEADER and tuple(header) == MODEL_INDEX_HEADER):
+    if stored != tuple(header) and stored not in EARLIER_INDEX_HEADERS[tuple(header)]:
         raise WorkflowError(f"index has an unexpected header: {path}")
     key_index = list(header).index(key)
     matches = [item for item in rows[1:] if len(item) > key_index and item[key_index] == row[key_index]]
@@ -2930,6 +2965,7 @@ def _record_comparison(config: WorkflowConfig, name: str, *, apply: bool) -> dic
         return preview
 
     def record() -> None:
+        _migrate_comparison_index(config)
         _append_csv_row(index, COMPARISON_INDEX_HEADER, "run_id", row)
         preview["indexed"] = True
 

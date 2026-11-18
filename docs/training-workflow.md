@@ -498,6 +498,7 @@ The JSON (schema version 2) records the net's name, ID, SHA-256, design, and par
 | `teacher` | The net that labeled the training data, or `two-ply-closure` |
 | `method` | The pattern-training method, such as `dense` or `lookup` |
 | `data_positions`, `data_games` | Training positions, and the distinct games they came from; empty when imported data is involved |
+| `opening_book` | The opening book the gate was played on. Scores on different books cannot be compared ([evaluation.md](evaluation.md#opening-suites)) |
 
 Rows recorded before these columns existed are completed from the archived records the next time the index is written.
 
@@ -526,6 +527,7 @@ Both models must already be in the `models/` archive, so every hash in the recor
 | `games`, `score_pct` | Games played and `new`'s score, counting a no-winner game as half |
 | `run_id` | The ledger row's `run_id` |
 | `new_net_sha256`, `base_net_sha256` | The SHA-256 of each side's net file |
+| `opening_book` | The opening book the comparison was played on |
 
 `models/index.csv` stays one row per promoted gate. The ledger convention that the newest accepted gate is the champion applies to gate rows (kind `training-gate`), not to comparison rows (kind `training-comparison`): a comparison that ends in `accept_alt` does not make its new model the champion.
 

@@ -29,6 +29,9 @@ from poe2_training.shared import (
     write_report_attachment,
 )
 from poe2_training.workflow import (
+    BOOKLESS_COMPARISON_INDEX_HEADER,
+    BOOKLESS_MODEL_INDEX_HEADER,
+    COMPARISON_INDEX_HEADER,
     MODEL_INDEX_HEADER,
     CommandExecutionError,
     CommandResult,
@@ -37,6 +40,7 @@ from poe2_training.workflow import (
     WorkflowError,
     _comparison_models,
     _dependency_order,
+    _migrate_comparison_index,
     _verified_ledger_row,
     check_model_lineage,
     handoff_candidate,
@@ -1833,6 +1837,7 @@ class WorkflowPromotionTest(unittest.TestCase):
             "gate_run_id": "workflow-promotion-test-run", "net_sha256": net_digest,
             "teacher": "two-ply-closure", "method": "lookup", "data_positions": "12",
             "data_games": "",
+            "opening_book": self._named(self.iteration.engine_gate.opening_book),
         }])
         self.assertTrue(applied["indexed"])
         status = subprocess.run(
@@ -1879,6 +1884,73 @@ class WorkflowPromotionTest(unittest.TestCase):
                              for name in MODEL_INDEX_HEADER])
         with self.assertRaisesRegex(WorkflowError, "different values"):
             promote_gate(isolated, "candidate")
+
+    def _index_from_before_books_were_named(self, repository: Path, name: str,
+                                            header: tuple[str, ...], run_column: str) -> None:
+        (repository / "models").mkdir(exist_ok=True)
+        with (repository / "models" / name).open(
+                "w", newline="", encoding="utf-8") as destination:
+            csv.writer(destination, lineterminator="\n").writerows([
+                header, ["earlier-run" if column == run_column else "earlier"
+                         for column in header]])
+
+    @staticmethod
+    def _ledger_row(repository: Path, ledger_header: list[str], **values: str) -> None:
+        with (repository / "eval/results.csv").open(
+                "a", newline="", encoding="utf-8") as destination:
+            csv.writer(destination, lineterminator="\n").writerow(
+                [values.get(column, "") for column in ledger_header])
+
+    def test_promotion_fills_the_opening_book_of_earlier_index_rows(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate()
+        repository, isolated = self._isolated_repository(
+            "bookless-index-repository", ledger_header=ledger_header)
+        self._ledger_row(repository, ledger_header, run_id="earlier-run",
+                         opening_book="eval/openings/holdout.txt")
+        self._index_from_before_books_were_named(
+            repository, "index.csv", BOOKLESS_MODEL_INDEX_HEADER, "gate_run_id")
+        self._commit_all(repository, "an index from before books were named")
+        self.assertFalse(promote_gate(isolated, "candidate")["indexed"])
+        promote_gate(isolated, "candidate", apply=True)
+        with (repository / "models" / "index.csv").open(newline="", encoding="utf-8") as source:
+            index = list(csv.DictReader(source))
+        self.assertEqual(
+            [(row["gate_run_id"], row["opening_book"]) for row in index],
+            [("earlier-run", "eval/openings/holdout.txt"),
+             ("workflow-promotion-test-run",
+              self._named(self.iteration.engine_gate.opening_book))])
+        self.assertEqual(index[0]["data_games"], "earlier")
+
+    def test_promotion_rejects_an_earlier_index_row_the_ledger_lacks(self) -> None:
+        self._candidate()
+        ledger_header, _ = self._gate()
+        repository, isolated = self._isolated_repository(
+            "unledgered-index-repository", ledger_header=ledger_header)
+        self._index_from_before_books_were_named(
+            repository, "index.csv", BOOKLESS_MODEL_INDEX_HEADER, "gate_run_id")
+        self._commit_all(repository, "an index row without a ledger row")
+        with self.assertRaisesRegex(WorkflowError, "earlier-run is not in the master ledger"):
+            promote_gate(isolated, "candidate", apply=True)
+
+    def test_an_earlier_comparison_index_gains_the_opening_book(self) -> None:
+        ledger_header = ["run_id", "opening_book"]
+        repository, isolated = self._isolated_repository(
+            "bookless-comparisons-repository", ledger_header=ledger_header)
+        self._ledger_row(repository, ledger_header, run_id="earlier-run",
+                         opening_book="eval/openings/holdout.txt")
+        self._index_from_before_books_were_named(
+            repository, "comparisons.csv", BOOKLESS_COMPARISON_INDEX_HEADER, "run_id")
+        _migrate_comparison_index(isolated)
+        with (repository / "models" / "comparisons.csv").open(
+                newline="", encoding="utf-8") as source:
+            index = list(csv.reader(source))
+        self.assertEqual(tuple(index[0]), COMPARISON_INDEX_HEADER)
+        self.assertEqual(index[1][-2:], ["earlier", "eval/openings/holdout.txt"])
+        _migrate_comparison_index(isolated)
+        with (repository / "models" / "comparisons.csv").open(
+                newline="", encoding="utf-8") as source:
+            self.assertEqual(list(csv.reader(source)), index)
 
     def test_promotion_rejects_a_conflicting_archive(self) -> None:
         self._candidate()
@@ -2062,7 +2134,8 @@ class WorkflowPromotionTest(unittest.TestCase):
             "base_model": V02.removeprefix("candidate-sha256-")[:12], "decision": "accept_alt",
             "games": "2", "score_pct": "100.0", "run_id": "comparison-run",
             "new_net_sha256": sha256_file(candidate_net_path(self.iteration)),
-            "base_net_sha256": sha256_file(REPOSITORY / "models" / f"{V02}.poe2net")})
+            "base_net_sha256": sha256_file(REPOSITORY / "models" / f"{V02}.poe2net"),
+            "opening_book": self._named(comparison.opening_book)})
         self.assertTrue(record_comparison(isolated, "candidate-vs-g000", apply=True)["applied"])
         with (repository / "eval/results.csv").open(newline="", encoding="utf-8") as source:
             self.assertEqual([row["kind"] for row in csv.DictReader(source)],

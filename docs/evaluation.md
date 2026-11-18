@@ -106,7 +106,7 @@ eval/openings/development.txt
 eval/openings/holdout.txt
 ```
 
-A score on one corpus cannot be compared with a score on the other: the same difference between two engines shows as about twice the normalized Elo on the balanced books. Every row of `eval/results.csv` names its book and the book's digest.
+A score on one corpus cannot be compared with a score on the other: the same difference between two engines shows as about twice the normalized Elo on the balanced books. Every row of `eval/results.csv` names its book and the book's digest, and every row of `models/index.csv` and `models/comparisons.csv` names its book.
 
 Regenerate both rule-generated books atomically with:
 
