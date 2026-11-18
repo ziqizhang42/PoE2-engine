@@ -90,6 +90,29 @@ make eval-gate \
 
 The new build is always the current `HEAD` build, not the newest directory under `build/by-commit/`. Choose `BASE` explicitly; both engine names are required. `GAMES` must be even and cannot exceed twice the number of opening records. `OPENING_SEED=<n>` overrides the derived sampling seed when exact manual control is needed.
 
+## Release Comparison
+
+When a release holds more than one gated change, each gate compares one step with the step before it and none compares the release with the previous release. One fixed-length match does, recorded in the ledger with kind `comparison`:
+
+```bash
+NEW=build/by-commit/NEW_BUILD_ID/release
+"$NEW/runner/poe2_runner" eval \
+  --new-build "$NEW" \
+  --base PREVIOUS_RELEASE_BUILD_ID \
+  --new-engine minimax/poe2_minimax \
+  --base-engine minimax/poe2_minimax \
+  --preset release \
+  --kind comparison \
+  --opening-book eval/openings/holdout-v2.txt \
+  --shuffle-openings \
+  --games 2000 \
+  --workers 6 \
+  --timeout-ms 1000 \
+  --go-movetime-ms 100
+```
+
+Without `--sequential-stop` every game is played. A comparison describes a difference and decides nothing: the champion is the newest accepted row of kind `gate` or `training-gate`, whatever a comparison row says.
+
 ## Opening Suites
 
 Each corpus is divided into a development book and a holdout book. `eval-smoke` uses the development book and `eval-gate` the holdout book of the balanced corpus ([Balanced Books](#balanced-books)):
@@ -162,7 +185,7 @@ The correction comes from match results. `poe2_runner openings fit-balance` read
 
 `fit-balance` also checks the rule on openings it did not fit: it fits on half of the openings, split by position hash, and reports on the other half the bias of the corrected prediction by length, the share of openings kept, the share of outright pairs on kept and on all openings, and how often the first player won on kept openings. The file records this check. For `balance-correction-v2.txt`, fitted on 18 matches on `development.txt` (40,998 games, 8,451 openings) between v0.3.2 builds playing `run1/g002`: the rule kept 20.4% of held-out openings, outright pairs were 27.2% on kept openings against 7.8% on all, and the first player won 48.9% of games on kept openings.
 
-Each book's header records the seed, the engine version and net, the node budget, the table size, the correction file with its digest and constants, the threshold, the quota, the previous books with their digests, and for each length the number of openings kept, of candidates searched, and of openings inherited from a previous book. Each opening line ends with its search score and predicted lead as a comment.
+Each book's header records the seed, the engine version and net the correction was fitted with, the node budget, the table size, the correction file with its digest and constants, the threshold, the quota, the previous books with their digests, and for each length the number of openings kept, of candidates searched, and of openings inherited from a previous book. Each opening line ends with its search score and predicted lead as a comment.
 
 Regenerate both books byte for byte from the repository root (about 3 minutes with 8 workers; the paths are recorded as given, so use these):
 
@@ -183,7 +206,7 @@ build/release/runner/poe2_runner openings generate-balanced \
   --workers 8
 ```
 
-The engine must be one whose fixed-node search matches v0.3.2 with `run1/g002`. Refit the correction from finished matches on the development book, for example when the champion's net changes, and give the new correction and books new names so earlier results stay comparable:
+The engine must be one whose fixed-node search matches v0.3.2 with `run1/g002`; v0.4.0 is one, since its reductions apply only to timed searches. Refit the correction from finished matches on the development book, for example when the champion's net changes, and give the new correction and books new names so earlier results stay comparable:
 
 ```bash
 build/release/runner/poe2_runner openings fit-balance \

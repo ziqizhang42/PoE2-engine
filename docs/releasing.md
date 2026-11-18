@@ -7,6 +7,7 @@
    - The middle number is for new capabilities in the engine or tools. The last is for a release without them: a bug fix or a new built-in net.
    - `poe2-train handoff --apply` already raised the last number when it installed a net ([nets.md](nets.md#the-built-in-net)), so two engines with different built-in nets never share a version. Prefer installing a net on a tagged release, so that the next release changes only the net.
    - The release section's heading names the version, the date, and the built-in net, as in `## 0.3.1 - 2026-11-17 · net run1/g001`.
+   - When the release holds more than one gated change, play and record one comparison against the previous release ([evaluation.md](evaluation.md#release-comparison)) and quote it in the release section.
    - A section describes the difference from the previous release. Edit and merge its entries as work lands instead of appending dated ones, and drop an entry when what it describes is removed again. How things work belongs in `docs/`, results in `eval/results.csv` and `models/`, and experiment findings in [research-log.md](research-log.md).
 
 2. Run the native Debug and Release checks and build the packaged WebAssembly artifact:
