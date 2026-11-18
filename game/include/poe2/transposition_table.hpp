@@ -51,6 +51,8 @@ class TranspositionTable final {
   [[nodiscard]] std::optional<TranspositionEntry> probe(PositionKey key,
                                                         PositionHash hash) const noexcept;
   [[nodiscard]] std::optional<TranspositionEntry> probe(const Position& position) const noexcept;
+  // Starts loading the bucket a later probe or store of `hash` will read.
+  void prefetch(PositionHash hash) const noexcept;
 
  private:
   static constexpr std::size_t kWays = 2;

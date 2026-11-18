@@ -193,6 +193,12 @@ std::optional<TranspositionEntry> TranspositionTable::probe(PositionKey key,
   return std::nullopt;
 }
 
+void TranspositionTable::prefetch(PositionHash hash) const noexcept {
+  if (!buckets_.empty()) {
+    __builtin_prefetch(&buckets_[bucket_index(hash, buckets_.size())]);
+  }
+}
+
 bool TranspositionTable::occupied(const PackedEntry& entry) noexcept {
   return (entry.flags & kOccupiedMask) != 0;
 }

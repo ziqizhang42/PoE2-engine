@@ -113,6 +113,8 @@ class SearchState final {
     return entry;
   }
 
+  void prefetch(PositionHash hash) const noexcept { table_.prefetch(hash); }
+
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
   void record_alpha_beta_cutoff(Player player, int move_index, int depth,
                                 int previously_searched_move) noexcept {
@@ -708,6 +710,9 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
         return true;
       }
       state.record_symmetry_prunes(std::popcount(equivalent_moves) - 1);
+    }
+    if constexpr (UseTable) {
+      state.prefetch(child_view.hash);
     }
 
     MoveUndo undo;
