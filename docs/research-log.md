@@ -67,6 +67,9 @@ Ordering by history first needs 23% to 25% fewer nodes to reach the same depth, 
 fixed-node searches and so labels, and on top of the reductions it scored 50.7% over 2,000
 games (49.4% to 52.2%). Conclusion: more reduction was better at every step, so 3 plies is
 worth trying. History-first ordering belongs at the start of a run, where labels start fresh.
+So does trying the reductions in fixed-node searches: whether they give better labels for the
+same nodes is not measured. The check is to label a sample both ways and compare both with
+exact results late in the game.
 
 ## 2026-11-18: what does a faster search with the same results buy?
 
