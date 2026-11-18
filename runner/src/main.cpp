@@ -224,7 +224,18 @@ void print_usage(std::ostream& output) {
       << "  poe2_runner openings generate-corpus --development-out <path> --holdout-out <path>\n"
       << "                                       --count <n> --plies <list> --seed <n>\n"
       << "                                       [--max-score-gap <n>]\n"
-      << "  poe2_runner openings generate-systematic --out <path> --plies 2\n";
+      << "  poe2_runner openings generate-systematic --out <path> --plies 2\n"
+      << "  poe2_runner openings fit-balance --run <dir> [--run <dir> ...] --engine <path>\n"
+      << "                                   --out <path> [--net <path>] [--nodes <n>]\n"
+      << "                                   [--hash-mb <n>] [--workers <n>]\n"
+      << "                                   [--min-openings <n>] [--threshold <points>]\n"
+      << "  poe2_runner openings generate-balanced --development-out <path> --holdout-out <path>\n"
+      << "                                         --correction <path> --engine <path>\n"
+      << "                                         --plies <list> --per-length <n> --seed <n>\n"
+      << "                                         [--net <path>] [--threshold <points>]\n"
+      << "                                         [--max-score-gap <n>] [--workers <n>]\n"
+      << "                                         [--previous-development <path>]\n"
+      << "                                         [--previous-holdout <path>]\n";
 }
 
 [[nodiscard]] poe2::match_runner::MatchOptions parse_match_options(int argc, char** argv) {

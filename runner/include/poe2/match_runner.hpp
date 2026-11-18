@@ -174,6 +174,8 @@ struct GsprtAnalysis {
 [[nodiscard]] std::string format_opening_moves(const std::vector<std::string>& moves);
 [[nodiscard]] OpeningBook parse_opening_book_text(std::string_view path, std::string_view text);
 [[nodiscard]] OpeningBook load_opening_book(std::string_view path);
+// "fnv1a64:" and 16 hex digits of the file's bytes, the digest eval records for its book.
+[[nodiscard]] std::string file_digest(std::string_view path);
 
 void print_state(const Position& position, std::ostream& output);
 void print_final(const GameResult& result, std::ostream& output);

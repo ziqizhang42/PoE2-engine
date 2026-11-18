@@ -450,38 +450,12 @@ class LedgerFileLock {
   return fnv1a64(material);
 }
 
-[[nodiscard]] std::string file_digest(const fs::path& path) {
-  if (path.empty()) {
-    return {};
-  }
-
-  std::ifstream input{path, std::ios::binary};
-  if (!input) {
-    throw std::runtime_error{"failed to read " + path.string()};
-  }
-
-  std::uint64_t hash = 14695981039346656037ULL;
-  char buffer[4096];
-  while (input) {
-    input.read(buffer, sizeof(buffer));
-    const std::streamsize bytes = input.gcount();
-    for (std::streamsize index = 0; index < bytes; ++index) {
-      hash ^= static_cast<unsigned char>(buffer[index]);
-      hash *= 1099511628211ULL;
-    }
-  }
-
-  std::ostringstream output;
-  output << "fnv1a64:" << std::hex << std::setw(16) << std::setfill('0') << hash;
-  return output.str();
-}
-
 [[nodiscard]] std::string opening_book_digest(const match_runner::OpeningBook& opening_book) {
   if (opening_book.path.empty()) {
     return {};
   }
 
-  return file_digest(opening_book.path);
+  return match_runner::file_digest(opening_book.path);
 }
 
 [[nodiscard]] std::string engine_args_run_id_suffix(const EvalOptions& options) {

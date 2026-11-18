@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -16,12 +16,15 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "poe2/match_runner.hpp"
 #include "poe2/move.hpp"
+#include "poe2/opening_balance.hpp"
+#include "poe2/opening_generation.hpp"
 #include "poe2/symmetry.hpp"
 
 namespace poe2::runner_cli {
@@ -52,12 +55,35 @@ struct OpeningCorpusOptions {
   std::uint64_t seed = 0;
 };
 
-struct GeneratedOpening {
-  int plies = 0;
-  std::vector<std::string> moves;
-  PositionKey canonical_key;
-  std::uint64_t partition_hash = 0;
+struct FitBalanceOptions {
+  std::vector<fs::path> runs;
+  fs::path engine_path;
+  fs::path net_path;
+  fs::path output_path;
+  match_runner::BalanceSearch search;
+  int workers = 1;
+  int min_openings = 30;
+  double threshold = 2.0;
 };
+
+struct BalancedCorpusOptions {
+  fs::path development_output_path;
+  fs::path holdout_output_path;
+  fs::path correction_path;
+  fs::path engine_path;
+  fs::path net_path;
+  std::optional<fs::path> previous_development_path;
+  std::optional<fs::path> previous_holdout_path;
+  std::vector<int> plies;
+  int per_length = 0;
+  double threshold = 2.0;
+  int max_score_gap = 4;
+  std::uint64_t seed = 0;
+  int workers = 1;
+};
+
+constexpr std::chrono::milliseconds kHandshakeTimeout{30000};
+constexpr std::size_t kCandidateBatch = 256;
 
 [[nodiscard]] std::optional<int> parse_positive_int(std::string_view text) {
   std::istringstream input{std::string{text}};
@@ -94,62 +120,6 @@ void create_parent_directories(const fs::path& path) {
   }
 }
 
-[[nodiscard]] std::string position_key_text(PositionKey key) {
-  std::ostringstream output;
-  output << key.low << ':' << key.high;
-  return output.str();
-}
-
-[[nodiscard]] std::vector<Move> legal_moves(const Position& position) {
-  std::vector<Move> moves;
-  Bitboard bits = position.legal_moves();
-  while (bits != 0) {
-    const int index = std::countr_zero(bits);
-    moves.push_back(Move{.square = square_from_index(index)});
-    bits &= bits - Bitboard{1};
-  }
-
-  return moves;
-}
-
-[[nodiscard]] std::optional<GeneratedOpening> generate_opening_line(
-    std::mt19937_64& rng, int plies, int max_score_gap,
-    std::unordered_set<std::string>& seen_positions) {
-  Position position;
-  std::vector<std::string> moves;
-  moves.reserve(static_cast<std::size_t>(plies));
-
-  for (int ply = 0; ply < plies; ++ply) {
-    const std::vector<Move> candidates = legal_moves(position);
-    if (candidates.empty()) {
-      return std::nullopt;
-    }
-
-    std::uniform_int_distribution<std::size_t> distribution{0, candidates.size() - 1};
-    const Move move = candidates[distribution(rng)];
-    if (!position.play(move.square)) {
-      return std::nullopt;
-    }
-    moves.push_back(format_move(move));
-  }
-
-  const ScoreByPlayer scores = position.scores();
-  if (std::abs(scores.player_one - scores.player_two) > max_score_gap) {
-    return std::nullopt;
-  }
-
-  const CanonicalPositionKey canonical = canonicalize_position_key(position.key());
-  if (!seen_positions.insert(position_key_text(canonical.key)).second) {
-    return std::nullopt;
-  }
-
-  return GeneratedOpening{
-      .plies = plies,
-      .moves = std::move(moves),
-      .canonical_key = canonical.key,
-  };
-}
-
 void write_generated_opening_book(const OpeningGenerateOptions& options) {
   if (options.output_path.empty()) {
     throw std::invalid_argument{"missing --out"};
@@ -182,8 +152,8 @@ void write_generated_opening_book(const OpeningGenerateOptions& options) {
   int generated = 0;
   const int max_attempts = std::max(options.count * 1000, 1000);
   for (int attempt = 0; attempt < max_attempts && generated < options.count; ++attempt) {
-    std::optional<GeneratedOpening> opening =
-        generate_opening_line(rng, options.plies, options.max_score_gap, seen_positions);
+    std::optional<match_runner::GeneratedOpening> opening = match_runner::generate_random_opening(
+        rng, options.plies, options.max_score_gap, seen_positions);
     if (!opening.has_value()) {
       continue;
     }
@@ -196,56 +166,6 @@ void write_generated_opening_book(const OpeningGenerateOptions& options) {
     throw std::runtime_error{"only generated " + std::to_string(generated) + " of " +
                              std::to_string(options.count) + " requested openings"};
   }
-}
-
-[[nodiscard]] std::uint64_t hash_opening(std::uint64_t seed, int plies, PositionKey key) noexcept {
-  std::uint64_t hash = 14695981039346656037ULL;
-  const auto mix = [&](std::uint64_t value) {
-    for (int byte = 0; byte < 8; ++byte) {
-      hash ^= static_cast<unsigned char>(value & 0xffU);
-      hash *= 1099511628211ULL;
-      value >>= 8U;
-    }
-  };
-  mix(seed);
-  mix(static_cast<std::uint64_t>(plies));
-  mix(key.low);
-  mix(key.high);
-  return hash;
-}
-
-[[nodiscard]] std::vector<GeneratedOpening> generate_systematic_two_ply_openings() {
-  std::vector<GeneratedOpening> openings;
-  std::unordered_set<std::string> seen_positions;
-  for (int first_index = 0; first_index < kCellCount; ++first_index) {
-    for (int second_index = 0; second_index < kCellCount; ++second_index) {
-      if (first_index == second_index) {
-        continue;
-      }
-
-      Position position;
-      const Move first{.square = square_from_index(first_index)};
-      const Move second{.square = square_from_index(second_index)};
-      if (!position.play(first.square) || !position.play(second.square)) {
-        throw std::runtime_error{"failed to generate legal 2-ply opening"};
-      }
-
-      const CanonicalPositionKey canonical = canonicalize_position_key(position.key());
-      if (!seen_positions.insert(position_key_text(canonical.key)).second) {
-        continue;
-      }
-      openings.push_back(GeneratedOpening{
-          .plies = 2,
-          .moves = {format_move(first), format_move(second)},
-          .canonical_key = canonical.key,
-      });
-    }
-  }
-  if (openings.size() != 315) {
-    throw std::runtime_error{"generated " + std::to_string(openings.size()) +
-                             " systematic 2-ply openings; expected 315"};
-  }
-  return openings;
 }
 
 [[nodiscard]] std::string plies_text(const std::vector<int>& plies) {
@@ -261,14 +181,14 @@ void write_generated_opening_book(const OpeningGenerateOptions& options) {
 
 void write_corpus_partition(const fs::path& path, std::string_view partition,
                             const OpeningCorpusOptions& options,
-                            const std::vector<GeneratedOpening>& openings) {
+                            const std::vector<match_runner::GeneratedOpening>& openings) {
   std::ofstream output{path, std::ios::trunc};
   if (!output) {
     throw std::runtime_error{"failed to write " + path.string()};
   }
 
   std::map<int, int> depth_counts;
-  for (const GeneratedOpening& opening : openings) {
+  for (const match_runner::GeneratedOpening& opening : openings) {
     ++depth_counts[opening.plies];
   }
   output << "# poe2 opening suite\n"
@@ -283,7 +203,7 @@ void write_corpus_partition(const fs::path& path, std::string_view partition,
     output << "# depth_count_" << depth << '=' << count << '\n';
   }
   output << "startpos\n";
-  for (const GeneratedOpening& opening : openings) {
+  for (const match_runner::GeneratedOpening& opening : openings) {
     output << match_runner::format_opening_moves(opening.moves) << '\n';
   }
 }
@@ -323,11 +243,11 @@ void write_opening_corpus(const OpeningCorpusOptions& options) {
     extra = std::max(extra - 1, 0);
   }
 
-  std::map<int, std::vector<GeneratedOpening>> strata;
-  strata[2] = generate_systematic_two_ply_openings();
+  std::map<int, std::vector<match_runner::GeneratedOpening>> strata;
+  strata[2] = match_runner::generate_systematic_two_ply_openings();
   std::unordered_set<std::string> seen_positions;
-  for (const GeneratedOpening& opening : strata[2]) {
-    seen_positions.insert(position_key_text(opening.canonical_key));
+  for (const match_runner::GeneratedOpening& opening : strata[2]) {
+    seen_positions.insert(match_runner::canonical_key_text(opening.canonical_key));
   }
 
   std::mt19937_64 rng{options.seed};
@@ -339,8 +259,8 @@ void write_opening_corpus(const OpeningCorpusOptions& options) {
     const int max_attempts = std::max(target * 2000, 100000);
     for (int attempt = 0; attempt < max_attempts && static_cast<int>(strata[depth].size()) < target;
          ++attempt) {
-      std::optional<GeneratedOpening> opening =
-          generate_opening_line(rng, depth, options.max_score_gap, seen_positions);
+      std::optional<match_runner::GeneratedOpening> opening =
+          match_runner::generate_random_opening(rng, depth, options.max_score_gap, seen_positions);
       if (opening.has_value()) {
         strata[depth].push_back(std::move(*opening));
       }
@@ -358,24 +278,26 @@ void write_opening_corpus(const OpeningCorpusOptions& options) {
     development_extras -= static_cast<int>(openings.size()) / 2;
   }
 
-  std::vector<GeneratedOpening> development;
-  std::vector<GeneratedOpening> holdout;
+  std::vector<match_runner::GeneratedOpening> development;
+  std::vector<match_runner::GeneratedOpening> holdout;
   development.reserve(static_cast<std::size_t>(options.count / 2));
   holdout.reserve(static_cast<std::size_t>(options.count / 2));
   for (auto& [depth, openings] : strata) {
-    for (GeneratedOpening& opening : openings) {
-      opening.partition_hash = hash_opening(options.seed, depth, opening.canonical_key);
+    for (match_runner::GeneratedOpening& opening : openings) {
+      opening.partition_hash =
+          match_runner::hash_opening(options.seed, depth, opening.canonical_key);
     }
-    std::sort(openings.begin(), openings.end(),
-              [](const GeneratedOpening& lhs, const GeneratedOpening& rhs) {
-                if (lhs.partition_hash != rhs.partition_hash) {
-                  return lhs.partition_hash < rhs.partition_hash;
-                }
-                if (lhs.canonical_key.low != rhs.canonical_key.low) {
-                  return lhs.canonical_key.low < rhs.canonical_key.low;
-                }
-                return lhs.canonical_key.high < rhs.canonical_key.high;
-              });
+    std::sort(
+        openings.begin(), openings.end(),
+        [](const match_runner::GeneratedOpening& lhs, const match_runner::GeneratedOpening& rhs) {
+          if (lhs.partition_hash != rhs.partition_hash) {
+            return lhs.partition_hash < rhs.partition_hash;
+          }
+          if (lhs.canonical_key.low != rhs.canonical_key.low) {
+            return lhs.canonical_key.low < rhs.canonical_key.low;
+          }
+          return lhs.canonical_key.high < rhs.canonical_key.high;
+        });
 
     int development_count = static_cast<int>(openings.size()) / 2;
     if ((openings.size() % 2) != 0 && development_extras > 0) {
@@ -460,7 +382,7 @@ void write_systematic_opening_book(const OpeningSystematicOptions& options) {
       }
 
       const CanonicalPositionKey canonical = canonicalize_position_key(position.key());
-      if (!seen_positions.insert(position_key_text(canonical.key)).second) {
+      if (!seen_positions.insert(match_runner::canonical_key_text(canonical.key)).second) {
         continue;
       }
 
@@ -473,6 +395,310 @@ void write_systematic_opening_book(const OpeningSystematicOptions& options) {
     throw std::runtime_error{"generated " + std::to_string(generated) +
                              " systematic 2-ply openings; expected 315"};
   }
+}
+
+void write_text_atomically(const fs::path& path, std::string_view text) {
+  create_parent_directories(path);
+  fs::path temporary = path;
+  temporary += ".tmp";
+  try {
+    {
+      std::ofstream output{temporary, std::ios::binary | std::ios::trunc};
+      output << text;
+      if (!output.flush()) {
+        throw std::runtime_error{"failed to write " + temporary.string()};
+      }
+    }
+    fs::rename(temporary, path);
+  } catch (...) {
+    std::error_code ignored;
+    fs::remove(temporary, ignored);
+    throw;
+  }
+}
+
+[[nodiscard]] fs::path run_games_file(const fs::path& run) {
+  if (!fs::is_regular_file(run / "summary.json")) {
+    throw std::invalid_argument{"run has no summary.json: " + run.string()};
+  }
+  return run / "games.csv";
+}
+
+void fit_balance(const FitBalanceOptions& options) {
+  if (options.runs.empty()) {
+    throw std::invalid_argument{"fit-balance needs at least one --run"};
+  }
+  if (options.engine_path.empty()) {
+    throw std::invalid_argument{"missing --engine"};
+  }
+  if (options.output_path.empty()) {
+    throw std::invalid_argument{"missing --out"};
+  }
+
+  std::vector<fs::path> games_files;
+  games_files.reserve(options.runs.size());
+  for (const fs::path& run : options.runs) {
+    games_files.push_back(run_games_file(run));
+  }
+  const std::vector<match_runner::OpeningRecord> records =
+      match_runner::collect_opening_records(games_files);
+  if (records.empty()) {
+    throw std::runtime_error{"the runs contain no normal games from an opening"};
+  }
+
+  const std::string command = match_runner::balance_engine_command(
+      options.engine_path.string(), options.search, options.net_path.string());
+  match_runner::CorrectionRecord record{
+      .engine = match_runner::query_engine_identity(command, kHandshakeTimeout),
+      .search = options.search,
+  };
+  std::vector<std::vector<std::string>> openings;
+  openings.reserve(records.size());
+  for (const match_runner::OpeningRecord& opening : records) {
+    openings.push_back(opening.moves);
+  }
+  const std::vector<int> scores =
+      match_runner::search_opening_scores(command, options.search.nodes, openings, options.workers);
+
+  std::vector<match_runner::LeadSample> samples;
+  samples.reserve(records.size());
+  long long games = 0;
+  for (std::size_t index = 0; index < records.size(); ++index) {
+    const match_runner::OpeningRecord& opening = records[index];
+    samples.push_back(match_runner::LeadSample{
+        .plies = opening.plies(),
+        .points = match_runner::first_player_points(scores[index], opening.plies()),
+        .lead = opening.mean_lead(),
+    });
+    games += opening.games;
+  }
+  record.correction = match_runner::fit_lead_correction(samples, options.min_openings);
+  if (record.correction.by_plies.empty()) {
+    throw std::runtime_error{"no opening length has --min-openings openings"};
+  }
+
+  std::vector<std::string> notes{"fitted on " + std::to_string(games) + " games of " +
+                                 std::to_string(records.size()) + " openings from " +
+                                 std::to_string(games_files.size()) + " runs:"};
+  for (const fs::path& games_file : games_files) {
+    notes.push_back("  " + games_file.parent_path().filename().string() + ' ' +
+                    match_runner::file_digest(games_file.string()));
+  }
+  for (std::string& line : match_runner::describe_held_out(
+           match_runner::check_held_out(records, scores, options.threshold, options.min_openings),
+           options.threshold)) {
+    notes.push_back(std::move(line));
+  }
+
+  const std::string text = match_runner::format_correction_record(record, notes);
+  write_text_atomically(options.output_path, text);
+  std::cout << text << "correction_written path=" << options.output_path.string()
+            << " openings=" << records.size() << " games=" << games << '\n';
+}
+
+using PreviousPartitions = std::unordered_map<std::string, match_runner::BookPartition>;
+
+[[nodiscard]] PreviousPartitions previous_partitions(const BalancedCorpusOptions& options) {
+  PreviousPartitions previous;
+  const auto add = [&](const std::optional<fs::path>& path, match_runner::BookPartition partition) {
+    if (!path.has_value()) {
+      return;
+    }
+    const match_runner::OpeningBook book = match_runner::load_opening_book(path->string());
+    for (const match_runner::OpeningLine& line : book.lines) {
+      if (line.moves.empty()) {
+        continue;
+      }
+      const auto [found, inserted] = previous.try_emplace(
+          match_runner::canonical_key_text(match_runner::canonical_opening_key(line.moves)),
+          partition);
+      if (!inserted && found->second != partition) {
+        throw std::runtime_error{"a position is in both previous books: " + line.text};
+      }
+    }
+  };
+  add(options.previous_development_path, match_runner::BookPartition::kDevelopment);
+  add(options.previous_holdout_path, match_runner::BookPartition::kHoldout);
+  return previous;
+}
+
+struct BalanceContext {
+  const BalancedCorpusOptions& options;
+  const match_runner::CorrectionRecord& correction;
+  const PreviousPartitions& previous;
+  std::string command;
+};
+
+void offer_candidates(const BalanceContext& context, match_runner::QuotaFiller& filler,
+                      const std::vector<match_runner::GeneratedOpening>& candidates) {
+  std::vector<std::vector<std::string>> openings;
+  openings.reserve(candidates.size());
+  for (const match_runner::GeneratedOpening& candidate : candidates) {
+    openings.push_back(candidate.moves);
+  }
+  const std::vector<int> scores = match_runner::search_opening_scores(
+      context.command, context.correction.search.nodes, openings, context.options.workers);
+
+  for (std::size_t index = 0; index < candidates.size() && !filler.complete(); ++index) {
+    const match_runner::GeneratedOpening& candidate = candidates[index];
+    const std::optional<double> predicted = context.correction.correction.predict(
+        candidate.plies, match_runner::first_player_points(scores[index], candidate.plies));
+    if (!predicted.has_value()) {
+      throw std::runtime_error{"the correction has no constants for " +
+                               std::to_string(candidate.plies) + " plies"};
+    }
+    const bool inherited =
+        context.previous.contains(match_runner::canonical_key_text(candidate.canonical_key));
+    filler.offer(
+        match_runner::SelectedOpening{
+            .opening = candidate,
+            .score = scores[index],
+            .predicted_lead = *predicted,
+            .inherited = inherited,
+        },
+        match_runner::assign_partition(context.options.seed, candidate, context.previous));
+  }
+}
+
+// 2-ply positions are few, so every passing one is kept; deeper lengths draw random lines from
+// their own stream until both partitions hold the quota.
+[[nodiscard]] match_runner::QuotaFiller select_length(const BalanceContext& context, int plies) {
+  const BalancedCorpusOptions& options = context.options;
+  if (plies == 2) {
+    match_runner::QuotaFiller filler{std::nullopt, options.threshold};
+    offer_candidates(context, filler, match_runner::generate_systematic_two_ply_openings());
+    return filler;
+  }
+
+  match_runner::QuotaFiller filler{options.per_length, options.threshold};
+  std::mt19937_64 rng{match_runner::hash_opening(options.seed, plies, PositionKey{})};
+  std::unordered_set<std::string> seen_positions;
+  const long long max_attempts =
+      std::max(static_cast<long long>(options.per_length) * 2000LL, static_cast<long long>(100000));
+  long long attempts = 0;
+  while (!filler.complete()) {
+    std::vector<match_runner::GeneratedOpening> batch;
+    while (batch.size() < kCandidateBatch && attempts < max_attempts) {
+      ++attempts;
+      if (std::optional<match_runner::GeneratedOpening> opening =
+              match_runner::generate_random_opening(rng, plies, options.max_score_gap,
+                                                    seen_positions);
+          opening.has_value()) {
+        batch.push_back(std::move(*opening));
+      }
+    }
+    if (batch.empty()) {
+      throw std::runtime_error{"ran out of candidate openings at " + std::to_string(plies) +
+                               " plies"};
+    }
+    offer_candidates(context, filler, batch);
+  }
+  return filler;
+}
+
+[[nodiscard]] match_runner::BookSource book_source(const fs::path& path) {
+  return match_runner::BookSource{
+      .path = path.string(),
+      .digest = match_runner::file_digest(path.string()),
+  };
+}
+
+void write_balanced_corpus(const BalancedCorpusOptions& options) {
+  if (options.development_output_path.empty()) {
+    throw std::invalid_argument{"missing --development-out"};
+  }
+  if (options.holdout_output_path.empty()) {
+    throw std::invalid_argument{"missing --holdout-out"};
+  }
+  if (options.development_output_path.lexically_normal() ==
+      options.holdout_output_path.lexically_normal()) {
+    throw std::invalid_argument{"development and holdout outputs must be different paths"};
+  }
+  if (options.correction_path.empty()) {
+    throw std::invalid_argument{"missing --correction"};
+  }
+  if (options.engine_path.empty()) {
+    throw std::invalid_argument{"missing --engine"};
+  }
+  if (options.plies.empty()) {
+    throw std::invalid_argument{"missing --plies"};
+  }
+  if (options.per_length <= 0) {
+    throw std::invalid_argument{"--per-length requires a positive integer"};
+  }
+  if (options.seed == 0) {
+    throw std::invalid_argument{"--seed requires a positive integer"};
+  }
+
+  std::ifstream correction_input{options.correction_path};
+  if (!correction_input) {
+    throw std::invalid_argument{"failed to read " + options.correction_path.string()};
+  }
+  std::ostringstream correction_text;
+  correction_text << correction_input.rdbuf();
+  match_runner::BalancedBookSettings settings{
+      .seed = options.seed,
+      .plies = options.plies,
+      .max_score_gap = options.max_score_gap,
+      .threshold = options.threshold,
+      .per_length = options.per_length,
+      .correction = match_runner::parse_correction_record(correction_text.str()),
+      .correction_file = book_source(options.correction_path),
+  };
+  for (const int plies : options.plies) {
+    if (!settings.correction.correction.by_plies.contains(plies)) {
+      throw std::invalid_argument{"the correction has no constants for " + std::to_string(plies) +
+                                  " plies"};
+    }
+  }
+  if (options.previous_development_path.has_value()) {
+    settings.previous_development = book_source(*options.previous_development_path);
+  }
+  if (options.previous_holdout_path.has_value()) {
+    settings.previous_holdout = book_source(*options.previous_holdout_path);
+  }
+
+  const std::string command = match_runner::balance_engine_command(
+      options.engine_path.string(), settings.correction.search, options.net_path.string());
+  const match_runner::EngineIdentity engine =
+      match_runner::query_engine_identity(command, kHandshakeTimeout);
+  if (engine.net_sha256 != settings.correction.engine.net_sha256) {
+    throw std::invalid_argument{"the engine plays net " + engine.net_sha256 +
+                                " but the correction was fitted for net " +
+                                settings.correction.engine.net_sha256};
+  }
+  settings.correction.engine = engine;
+
+  const PreviousPartitions previous = previous_partitions(options);
+  const BalanceContext context{
+      .options = options,
+      .correction = settings.correction,
+      .previous = previous,
+      .command = command,
+  };
+  std::map<int, match_runner::QuotaFiller> lengths;
+  for (const int plies : options.plies) {
+    const match_runner::QuotaFiller& filler =
+        lengths.try_emplace(plies, select_length(context, plies)).first->second;
+    std::cout << "balanced_length plies=" << plies;
+    for (const match_runner::BookPartition partition :
+         {match_runner::BookPartition::kDevelopment, match_runner::BookPartition::kHoldout}) {
+      const match_runner::PartitionSelection& selection = filler.selection(partition);
+      std::cout << ' ' << match_runner::partition_name(partition)
+                << "_candidates=" << selection.candidates << ' '
+                << match_runner::partition_name(partition) << "_kept=" << selection.kept.size();
+    }
+    std::cout << '\n' << std::flush;
+  }
+
+  const std::string development_text = match_runner::format_balanced_book(
+      settings, match_runner::BookPartition::kDevelopment, lengths);
+  const std::string holdout_text =
+      match_runner::format_balanced_book(settings, match_runner::BookPartition::kHoldout, lengths);
+  static_cast<void>(match_runner::parse_opening_book_text("development", development_text));
+  static_cast<void>(match_runner::parse_opening_book_text("holdout", holdout_text));
+  write_text_atomically(options.development_output_path, development_text);
+  write_text_atomically(options.holdout_output_path, holdout_text);
 }
 
 [[nodiscard]] OpeningGenerateOptions parse_opening_generate_options(int argc, char** argv) {
@@ -663,6 +889,108 @@ void write_systematic_opening_book(const OpeningSystematicOptions& options) {
   return options;
 }
 
+[[nodiscard]] std::string_view next_value(int argc, char** argv, int& index,
+                                          std::string_view what) {
+  if (index + 1 >= argc) {
+    throw std::invalid_argument{std::string{argv[index]} + " requires " + std::string{what}};
+  }
+  return argv[++index];
+}
+
+[[nodiscard]] int next_positive_int(int argc, char** argv, int& index) {
+  const std::string_view argument = argv[index];
+  const std::optional<int> value =
+      parse_positive_int(next_value(argc, argv, index, "a positive integer"));
+  if (!value.has_value()) {
+    throw std::invalid_argument{std::string{argument} + " requires a positive integer"};
+  }
+  return *value;
+}
+
+[[nodiscard]] double next_positive_double(int argc, char** argv, int& index) {
+  const std::string_view argument = argv[index];
+  const std::string_view text = next_value(argc, argv, index, "a positive number");
+  double value = 0.0;
+  const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+  if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || !(value > 0.0)) {
+    throw std::invalid_argument{std::string{argument} + " requires a positive number"};
+  }
+  return value;
+}
+
+[[nodiscard]] FitBalanceOptions parse_fit_balance_options(int argc, char** argv) {
+  FitBalanceOptions options;
+  for (int index = 0; index < argc; ++index) {
+    const std::string_view argument = argv[index];
+    if (argument == "--run") {
+      options.runs.emplace_back(next_value(argc, argv, index, "a run directory"));
+    } else if (argument == "--engine") {
+      options.engine_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--net") {
+      options.net_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--out") {
+      options.output_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--nodes") {
+      options.search.nodes = static_cast<std::uint64_t>(next_positive_int(argc, argv, index));
+    } else if (argument == "--hash-mb") {
+      options.search.hash_mb = next_positive_int(argc, argv, index);
+    } else if (argument == "--workers") {
+      options.workers = next_positive_int(argc, argv, index);
+    } else if (argument == "--min-openings") {
+      options.min_openings = next_positive_int(argc, argv, index);
+    } else if (argument == "--threshold") {
+      options.threshold = next_positive_double(argc, argv, index);
+    } else {
+      throw std::invalid_argument{"unknown openings fit-balance argument: " +
+                                  std::string{argument}};
+    }
+  }
+  return options;
+}
+
+[[nodiscard]] BalancedCorpusOptions parse_balanced_corpus_options(int argc, char** argv) {
+  BalancedCorpusOptions options;
+  for (int index = 0; index < argc; ++index) {
+    const std::string_view argument = argv[index];
+    if (argument == "--development-out") {
+      options.development_output_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--holdout-out") {
+      options.holdout_output_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--correction") {
+      options.correction_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--engine") {
+      options.engine_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--net") {
+      options.net_path = next_value(argc, argv, index, "a path");
+    } else if (argument == "--previous-development") {
+      options.previous_development_path = fs::path{next_value(argc, argv, index, "a path")};
+    } else if (argument == "--previous-holdout") {
+      options.previous_holdout_path = fs::path{next_value(argc, argv, index, "a path")};
+    } else if (argument == "--plies") {
+      options.plies = parse_plies_list(next_value(argc, argv, index, "a comma-separated list"));
+    } else if (argument == "--per-length") {
+      options.per_length = next_positive_int(argc, argv, index);
+    } else if (argument == "--threshold") {
+      options.threshold = next_positive_double(argc, argv, index);
+    } else if (argument == "--max-score-gap") {
+      options.max_score_gap = next_positive_int(argc, argv, index);
+    } else if (argument == "--seed") {
+      const std::optional<std::uint64_t> seed =
+          parse_positive_u64(next_value(argc, argv, index, "a positive integer"));
+      if (!seed.has_value()) {
+        throw std::invalid_argument{"--seed requires a positive integer"};
+      }
+      options.seed = *seed;
+    } else if (argument == "--workers") {
+      options.workers = next_positive_int(argc, argv, index);
+    } else {
+      throw std::invalid_argument{"unknown openings generate-balanced argument: " +
+                                  std::string{argument}};
+    }
+  }
+  return options;
+}
+
 }  // namespace
 
 int run_openings(int argc, char** argv) {
@@ -706,6 +1034,26 @@ int run_openings(int argc, char** argv) {
               << " holdout_count=" << holdout.lines.size() << " non_empty_count=" << options.count
               << " plies=" << plies_text(options.plies) << " seed=" << options.seed
               << " max_score_gap=" << options.max_score_gap << '\n';
+    return 0;
+  }
+
+  if (command == "fit-balance") {
+    fit_balance(parse_fit_balance_options(argc - 1, argv + 1));
+    return 0;
+  }
+  if (command == "generate-balanced") {
+    const BalancedCorpusOptions options = parse_balanced_corpus_options(argc - 1, argv + 1);
+    write_balanced_corpus(options);
+    const match_runner::OpeningBook development =
+        match_runner::load_opening_book(options.development_output_path.string());
+    const match_runner::OpeningBook holdout =
+        match_runner::load_opening_book(options.holdout_output_path.string());
+    std::cout << "openings_generated"
+              << " development_path=" << options.development_output_path.string()
+              << " development_count=" << development.lines.size()
+              << " holdout_path=" << options.holdout_output_path.string()
+              << " holdout_count=" << holdout.lines.size() << " seed=" << options.seed
+              << " per_length=" << options.per_length << '\n';
     return 0;
   }
 

@@ -4,7 +4,9 @@ add_library(poe2_match_runner STATIC
   src/engine_process.cpp
   src/match_runner.cpp
   src/match_output.cpp
+  src/opening_balance.cpp
   src/opening_book.cpp
+  src/opening_generation.cpp
 )
 
 add_library(poe2::match_runner ALIAS poe2_match_runner)
@@ -155,6 +157,17 @@ add_test(
 set_tests_properties(runner_opening_corpus_holdout_golden PROPERTIES
   FIXTURES_REQUIRED opening_corpus_generation
 )
+
+add_test(
+  NAME runner_balanced_openings_reproducible
+  COMMAND ${CMAKE_COMMAND}
+          -DRUNNER=$<TARGET_FILE:poe2_runner>
+          -DENGINE=$<TARGET_FILE:poe2_minimax>
+          -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -DTEST_ROOT=${CMAKE_BINARY_DIR}/balanced-openings-test
+          -P ${PROJECT_SOURCE_DIR}/tests/balanced_openings_test.cmake
+)
+set_tests_properties(runner_balanced_openings_reproducible PROPERTIES TIMEOUT 120)
 
 add_test(
   NAME runner_rejects_opening_reuse

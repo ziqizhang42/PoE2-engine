@@ -1,0 +1,50 @@
+game,engine_one_player,opening_slot,opening_line,opening_moves,winner,reason,plies,player_one_score,player_two_score
+1,p1,1,1,b2 g5,engine_one,normal,49,110,87
+2,p2,1,1,b2 g5,engine_one,normal,49,100,100
+3,p1,2,2,d3 a2,engine_two,normal,49,98,110
+4,p2,2,2,d3 a2,engine_one,normal,49,81,98
+5,p1,3,3,c1 g5,engine_one,normal,49,98,92
+6,p2,3,3,c1 g5,engine_one,normal,49,81,87
+7,p1,4,4,d3 b5,engine_two,normal,49,81,97
+8,p2,4,4,d3 b5,engine_two,normal,49,107,84
+9,p1,5,5,c3 e3,engine_two,normal,49,89,93
+10,p2,5,5,c3 e3,engine_one,normal,49,84,97
+11,p1,6,6,d4 d3,engine_two,normal,49,83,98
+12,p2,6,6,d4 d3,engine_one,normal,49,89,97
+13,p1,7,7,b2 g2,engine_two,normal,49,106,101
+14,p2,7,7,b2 g2,engine_one,normal,49,85,83
+15,p1,8,8,d1 a5,engine_two,normal,49,98,98
+16,p2,8,8,d1 a5,engine_two,normal,49,100,86
+17,p1,9,9,g6 a3 f2 c5,engine_one,normal,49,91,83
+18,p2,9,9,g6 a3 f2 c5,engine_one,normal,49,97,102
+19,p1,10,10,e3 g4 b1 a3,engine_two,normal,49,82,98
+20,p2,10,10,e3 g4 b1 a3,engine_one,normal,49,81,99
+21,p1,11,11,g5 a1 d3 a7,engine_two,normal,49,86,95
+22,p2,11,11,g5 a1 d3 a7,engine_one,normal,49,101,97
+23,p1,12,12,a1 g3 e5 d4,engine_two,normal,49,93,104
+24,p2,12,12,a1 g3 e5 d4,engine_one,normal,49,90,94
+25,p1,13,13,e6 f6 f3 a6,engine_two,normal,49,98,109
+26,p2,13,13,e6 f6 f3 a6,engine_one,normal,49,94,91
+27,p1,14,14,c4 g4 b3 d3,engine_two,normal,49,89,87
+28,p2,14,14,c4 g4 b3 d3,engine_two,normal,49,105,85
+29,p1,15,15,c5 d3 f4 b3,engine_two,normal,49,102,104
+30,p2,15,15,c5 d3 f4 b3,engine_one,normal,49,87,82
+31,p1,16,16,g5 e7 c5 b3,engine_one,normal,49,98,89
+32,p2,16,16,g5 e7 c5 b3,engine_one,normal,49,96,95
+33,p1,17,17,a1 b2 b3 f7 f6 d6,engine_one,normal,49,108,90
+34,p2,17,17,a1 b2 b3 f7 f6 d6,engine_two,normal,49,103,94
+35,p1,18,18,e1 c3 b7 b1 f1 c2,engine_two,normal,49,89,99
+36,p2,18,18,e1 c3 b7 b1 f1 c2,engine_one,normal,49,82,83
+37,p1,19,19,f1 f3 d5 f6 f4 g1,engine_two,normal,49,96,93
+38,p2,19,19,f1 f3 d5 f6 f4 g1,engine_one,normal,49,85,104
+39,p1,20,20,a5 a6 g1 c2 f4 d2,engine_one,normal,49,90,84
+40,p2,20,20,a5 a6 g1 c2 f4 d2,engine_two,normal,49,109,95
+41,p1,21,21,g2 f1 b5 d7 c2 b3,engine_one,normal,49,93,81
+42,p2,21,21,g2 f1 b5 d7 c2 b3,engine_two,normal,49,110,101
+43,p1,22,22,c6 d6 f4 g1 f6 f5,engine_two,normal,49,82,104
+44,p2,22,22,c6 d6 f4 g1 f6 f5,engine_one,normal,49,97,98
+45,p1,23,23,a3 a2 b2 a6 d4 d1,engine_two,normal,49,105,108
+46,p2,23,23,a3 a2 b2 a6 d4 d1,engine_two,normal,49,106,90
+47,p1,24,24,b2 f2 d1 a5 g5 f6,engine_two,normal,49,90,102
+48,p2,24,24,b2 f2 d1 a5 g5 f6,engine_one,normal,49,91,99
+49,p1,25,25,b2 g5,none,timeout,10,30,20

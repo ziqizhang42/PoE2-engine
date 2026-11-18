@@ -1,4 +1,7 @@
+#include <array>
+#include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -136,6 +139,28 @@ OpeningBook load_opening_book(std::string_view path) {
   std::ostringstream text;
   text << input.rdbuf();
   return parse_opening_book_text(path, text.str());
+}
+
+std::string file_digest(std::string_view path) {
+  std::ifstream input{std::string{path}, std::ios::binary};
+  if (!input) {
+    throw std::runtime_error{"failed to read " + std::string{path}};
+  }
+
+  std::uint64_t hash = 14695981039346656037ULL;
+  std::array<char, 4096> buffer{};
+  while (input) {
+    input.read(buffer.data(), buffer.size());
+    const std::streamsize bytes = input.gcount();
+    for (std::streamsize index = 0; index < bytes; ++index) {
+      hash ^= static_cast<unsigned char>(buffer[static_cast<std::size_t>(index)]);
+      hash *= 1099511628211ULL;
+    }
+  }
+
+  std::ostringstream output;
+  output << "fnv1a64:" << std::hex << std::setw(16) << std::setfill('0') << hash;
+  return output.str();
 }
 
 }  // namespace poe2::match_runner

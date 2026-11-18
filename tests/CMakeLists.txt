@@ -63,6 +63,7 @@ target_compile_definitions(poe2_minimax_tests
 
 add_executable(poe2_match_runner_tests
   match_runner_test.cpp
+  opening_balance_test.cpp
 )
 
 add_executable(poe2_malformed_test_engine
