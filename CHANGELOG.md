@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-11-18 · net run1/g002
+
+The built-in net is unchanged: `run1/g002` (`232a3cc37caf`). With that net, 0.4.0 beat 0.3.2 1,066-934 over 2,000 games at 100 ms a move on the old holdout book (53.3%, 95% interval 51.9% to 54.9%).
 
 ### Engine
 
@@ -9,7 +11,10 @@
 
 ### Evaluation
 
-- Balanced opening books `eval/openings/development-v2.txt` and `eval/openings/holdout-v2.txt`, about 4,000 openings each. An opening is kept only when a 200,000-node search, corrected for each opening length from match results, predicts a result within 2 points of even. Between the same two engines over 4,000 games, the share of opening pairs that one engine won outright rose from 9% on the old development book to 32%, and the first player's win rate fell from 60% to 51%. `poe2_runner openings fit-balance` refits the correction and `openings generate-balanced` regenerates the books byte for byte ([docs/evaluation.md](docs/evaluation.md)). `make eval-gate`, `make eval-smoke`, and training recipes that name no book use them by default, with the gate's alternative unchanged at 20 normalized Elo; `run1` keeps the books its recipe names. A score on the balanced books cannot be compared with a score on the old ones, and every result recorded before this release is on the old ones. `models/index.csv` and `models/comparisons.csv` name the opening book of each result, as the ledger does.
+- Balanced opening books `eval/openings/development-v2.txt` and `eval/openings/holdout-v2.txt`, about 4,000 openings each. An opening is kept only when a 200,000-node search, corrected for each opening length from match results, predicts a result within 2 points of even. Between the same two engines over 4,000 games, the share of opening pairs that one engine won outright rose from 9% on the old development book to 32%, and the first player's win rate fell from 60% to 51%. `poe2_runner openings fit-balance` refits the correction and `openings generate-balanced` regenerates the books byte for byte ([docs/evaluation.md](docs/evaluation.md)).
+- `make eval-gate`, `make eval-smoke`, and training recipes that name no book use the balanced books by default, with the gate's alternative unchanged at 20 normalized Elo; `run1` keeps the books its recipe names. A score on the balanced books cannot be compared with a score on the old ones. Every gate result in this release and before it was played on the old ones.
+- `models/index.csv` and `models/comparisons.csv` name the opening book of each result, as the ledger does.
+- A release with more than one gated change records one fixed-length comparison against the previous release in the ledger, with kind `comparison`.
 
 ## 0.3.2 - 2026-11-17 · net run1/g002
 
