@@ -35,6 +35,11 @@ constexpr int kScoreGainHistoryScale = 4'096;
 // On a 7x7 board, one placement can join two length-three runs in each of four directions:
 // 4 * (64 - 4 - 4) = 224 points.
 constexpr Score kMaximumMoveScoreGain = 224;
+// A node searches this many moves at full depth before it tries the rest kLateMoveReduction
+// plies shallower. A reduced move at the minimum depth is asked at depth zero, its static value.
+constexpr int kFullDepthMoves = 4;
+constexpr int kLateMoveReduction = 2;
+constexpr int kReductionMinimumDepth = kLateMoveReduction + 1;
 static_assert(std::has_single_bit(kChildKeySetCapacity));
 static_assert(kChildKeySetCapacity > static_cast<std::size_t>(kCellCount));
 static_assert(std::has_single_bit(kDeadlineCheckInterval));
@@ -45,6 +50,7 @@ static_assert(kMaximumMoveScoreGain <= std::numeric_limits<std::uint8_t>::max())
 struct SearchBudget {
   Clock::time_point deadline = Clock::time_point::max();
   std::uint64_t node_limit = std::numeric_limits<std::uint64_t>::max();
+  bool reduce_late_moves = false;
 };
 
 [[nodiscard]] SearchBudget make_search_budget(const engine::EngineLimits& limits) noexcept {
@@ -55,6 +61,10 @@ struct SearchBudget {
   if (limits.nodes.has_value() && *limits.nodes > 0) {
     budget.node_limit = *limits.nodes;
   }
+  // A search with a node or depth limit stays exact for its depth: labels are made from node
+  // budgets, and a requested depth means that depth for every move.
+  budget.reduce_late_moves = budget.deadline != Clock::time_point::max() &&
+                             !limits.nodes.has_value() && !limits.depth.has_value();
   return budget;
 }
 
@@ -76,6 +86,7 @@ class SearchState final {
               LeafEvaluator evaluator, const Position& root)
       : deadline_(budget.deadline),
         node_limit_(budget.node_limit),
+        reduce_late_moves_(budget.reduce_late_moves),
         table_(table),
         history_scores_(history_scores),
         evaluator_(evaluator.kind),
@@ -114,6 +125,8 @@ class SearchState final {
   }
 
   void prefetch(PositionHash hash) const noexcept { table_.prefetch(hash); }
+
+  [[nodiscard]] bool reduces_late_moves() const noexcept { return reduce_late_moves_; }
 
   void record_tt_cutoff() noexcept { ++tt_cutoffs_; }
   void record_alpha_beta_cutoff(Player player, int move_index, int depth,
@@ -265,6 +278,7 @@ class SearchState final {
 
   Clock::time_point deadline_;
   std::uint64_t node_limit_;
+  bool reduce_late_moves_;
   TranspositionTable& table_;
   HistoryScores& history_scores_;
   Evaluator evaluator_;
@@ -693,6 +707,8 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
   NodeResult best;
   bool found_move = false;
   int previously_searched_move = -1;
+  int searched_moves = 0;
+  const bool reduces_late_moves = state.reduces_late_moves() && depth >= kReductionMinimumDepth;
 
   const auto search_move = [&](int move_index) -> bool {
     const Bitboard move_bit = Bitboard{1} << move_index;
@@ -718,10 +734,25 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
     MoveUndo undo;
     position.make_move_unchecked(move_index, undo);
 
-    std::optional<NodeResult> child =
-        negamax<Policy, UseTable, UseTwoPlyClosure, CheckTime, CheckNodes>(
-            position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view, move_index,
-            MoveGains::changed_by(undo));
+    const Bitboard changed_gains = MoveGains::changed_by(undo);
+    const auto search_child = [&](int child_depth, Score child_alpha) {
+      return negamax<Policy, UseTable, UseTwoPlyClosure, CheckTime, CheckNodes>(
+          position, child_depth, ply + 1, child_alpha, -alpha, state, policy, child_view,
+          move_index, changed_gains);
+    };
+    // The ordering puts the moves most likely to be best first. A later move is first asked, at
+    // reduced depth and with the narrowest window, only whether it beats the best so far. When
+    // it does, it is searched again in full, so no move is accepted on the shallower search.
+    std::optional<NodeResult> child;
+    if (reduces_late_moves && searched_moves >= kFullDepthMoves) {
+      child = search_child(depth - 1 - kLateMoveReduction, -alpha - 1);
+      if (child.has_value() && -child->value > alpha) {
+        child = search_child(depth - 1, -beta);
+      }
+    } else {
+      child = search_child(depth - 1, -beta);
+    }
+    ++searched_moves;
 
     position.unmake_move(undo);
     if (!child.has_value()) {
