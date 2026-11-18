@@ -130,6 +130,24 @@ make_raw_to_reversal_orbit() {
   return result;
 }
 
+// The two phase knots around a ply, the only ones its interpolation reads.
+struct KnotPair {
+  std::size_t lower = 0;
+  int left = 0;
+  int right = 0;
+};
+
+template <std::size_t KnotCount>
+[[nodiscard]] constexpr KnotPair bracketing_knots(const std::array<std::uint8_t, KnotCount>& knots,
+                                                  int ply) noexcept {
+  static_assert(KnotCount >= 2);
+  std::size_t upper = 1;
+  while (ply > knots[upper]) {
+    ++upper;
+  }
+  return KnotPair{.lower = upper - 1, .left = knots[upper - 1], .right = knots[upper]};
+}
+
 inline constexpr auto kScoringLines = make_scoring_lines();
 inline constexpr auto kPatternOffsets = make_pattern_offsets();
 inline constexpr auto kRawToReversalOrbit = make_raw_to_reversal_orbit();

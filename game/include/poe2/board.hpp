@@ -54,6 +54,8 @@ struct MoveUndo {
   PositionHash previous_hash = 0;
   Score previous_score = 0;
   Bitboard previous_pieces_in_lines = 0;
+  // The mover's runs of two or more pieces that pass through the move, including the move.
+  Bitboard lines_through_move = 0;
 };
 
 [[nodiscard]] constexpr Player opponent(Player player) noexcept {

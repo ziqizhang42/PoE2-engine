@@ -11,6 +11,7 @@
 #include <sstream>
 #include <utility>
 
+#include "evaluation_inputs.hpp"
 #include "poe2/minimax/evaluation.hpp"
 #include "poe2/move.hpp"
 #include "poe2/symmetry.hpp"
@@ -72,13 +73,15 @@ struct SearchBudget {
 class SearchState final {
  public:
   SearchState(SearchBudget budget, TranspositionTable& table, HistoryScores& history_scores,
-              LeafEvaluator evaluator)
+              LeafEvaluator evaluator, const Position& root)
       : deadline_(budget.deadline),
         node_limit_(budget.node_limit),
         table_(table),
         history_scores_(history_scores),
         evaluator_(evaluator.kind),
-        tables_(evaluator.tables) {}
+        tables_(evaluator.tables) {
+    inputs_[0].reset(root);
+  }
 
   template <bool CheckTime, bool CheckNodes>
   [[nodiscard]] bool enter_node() noexcept {
@@ -149,6 +152,20 @@ class SearchState final {
     return evaluator_ == Evaluator::kPatternGain;
   }
   [[nodiscard]] const PatternGainTables& tables() const noexcept { return *tables_; }
+
+  // Brings the inputs at `ply` to `position`, which follows the position at the ply above by
+  // `move_index`. That ply's inputs must be current.
+  const EvaluationInputs& advance_inputs(int ply, const Position& position, int move_index,
+                                         Bitboard changed_gains) noexcept {
+    assert(ply > 0 && static_cast<std::size_t>(ply) < kPlyCount);
+    EvaluationInputs& inputs = inputs_[static_cast<std::size_t>(ply)];
+    inputs.advance(inputs_[static_cast<std::size_t>(ply) - 1], position, move_index, changed_gains);
+    assert(inputs == rebuilt_inputs(position));
+    return inputs;
+  }
+  [[nodiscard]] const MoveGains& gains(int ply) const noexcept {
+    return inputs_[static_cast<std::size_t>(ply)].gains;
+  }
   [[nodiscard]] Score public_score(Score value) const noexcept {
     return uses_pattern_gain() ? round_pattern_gain_evaluation(static_cast<FixedEvaluation>(value))
                                : value;
@@ -226,6 +243,12 @@ class SearchState final {
   }
 
  private:
+  [[nodiscard]] static EvaluationInputs rebuilt_inputs(const Position& position) noexcept {
+    EvaluationInputs inputs;
+    inputs.reset(position);
+    return inputs;
+  }
+
   void update_history(Player player, int move_index, int bonus) noexcept {
     assert(move_index >= 0 && move_index < kCellCount);
     assert(bonus >= -kHistoryScoreLimit && bonus <= kHistoryScoreLimit);
@@ -244,6 +267,7 @@ class SearchState final {
   HistoryScores& history_scores_;
   Evaluator evaluator_;
   const PatternGainTables* tables_;
+  std::array<EvaluationInputs, kPlyCount> inputs_{};
   std::array<std::array<Move, kCellCount>, kPlyCount> principal_variations_{};
   std::array<std::uint8_t, kPlyCount> principal_variation_lengths_{};
   std::uint64_t nodes_ = 0;
@@ -455,8 +479,9 @@ class ScoreGainMovePicker final {
     }
 
     const Player player = position.side_to_move();
+    const MoveGains& gains = state.gains(ply);
     for (std::size_t index = 0; index < size_; ++index) {
-      const Score score_gain = position.score_gain_unchecked(player, moves_[index].move_index);
+      const Score score_gain = gains.gain(player, moves_[index].move_index);
       assert(score_gain > 0 && score_gain <= kMaximumMoveScoreGain);
       moves_[index].score_gain = static_cast<std::uint8_t>(score_gain);
       moves_[index].history_score = state.history_score(player, moves_[index].move_index);
@@ -571,7 +596,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
 [[nodiscard]] std::optional<NodeResult> negamax(Position& position, int depth, int ply, Score alpha,
                                                 Score beta, SearchState& state, Policy& policy,
                                                 SearchPositionView<Policy, UseTable> view,
-                                                int pending_policy_move) {
+                                                int pending_policy_move, Bitboard changed_gains) {
   if constexpr (!UseTable) {
     state.clear_principal_variation(ply);
   }
@@ -619,7 +644,12 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
                                              ? 1
                                              : static_cast<std::uint64_t>(2 * empty_count);
       state.record_model_evaluation(gain_queries);
-      value = evaluate_pattern_gain_fixed(position, legal_moves, empty_count, state.tables());
+      value = empty_count > 2
+                  ? evaluate_pattern_gain_fixed(
+                        position, legal_moves, empty_count,
+                        state.advance_inputs(ply, position, pending_policy_move, changed_gains),
+                        state.tables())
+                  : evaluate_pattern_gain_fixed(position, legal_moves, empty_count, state.tables());
     } else if constexpr (UseTwoPlyClosure) {
       const std::uint64_t gain_queries =
           empty_count == 1 ? 1 : static_cast<std::uint64_t>(2 * empty_count);
@@ -632,6 +662,10 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
       store_result(state, view, depth, value, TranspositionBound::kExact, std::nullopt);
     }
     return NodeResult{.value = value};
+  }
+
+  if (pending_policy_move >= 0) {
+    state.advance_inputs(ply, position, pending_policy_move, changed_gains);
   }
 
   // The canonical child view is enough for deadline, TT, and leaf handling, so the symmetry
@@ -681,7 +715,8 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
 
     std::optional<NodeResult> child =
         negamax<Policy, UseTable, UseTwoPlyClosure, CheckTime, CheckNodes>(
-            position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view, move_index);
+            position, depth - 1, ply + 1, -beta, -alpha, state, policy, child_view, move_index,
+            MoveGains::changed_by(undo));
 
     position.unmake_move(undo);
     if (!child.has_value()) {
@@ -766,8 +801,8 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
     position.make_move_unchecked(move_index, undo);
     std::optional<NodeResult> child =
         negamax<Policy, UseTable, UseTwoPlyClosure, CheckTime, CheckNodes>(
-            position, depth - 1, 1, -kSearchInfinity, -alpha, state, policy, child_view,
-            move_index);
+            position, depth - 1, 1, -kSearchInfinity, -alpha, state, policy, child_view, move_index,
+            MoveGains::changed_by(undo));
     position.unmake_move(undo);
     if (!child.has_value()) {
       return false;
@@ -1014,7 +1049,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
                                               HistoryScores& history_scores,
                                               LeafEvaluator evaluator,
                                               engine::EngineResult result) {
-  SearchState state{budget, table, history_scores, evaluator};
+  SearchState state{budget, table, history_scores, evaluator, position};
   Position search_position = position;
   Policy policy{search_position};
   SearchPositionView<Policy, UseTable> root_view;
@@ -1026,7 +1061,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
     std::optional<NodeResult> iteration =
         negamax<Policy, UseTable, UseTwoPlyClosure, CheckTime, CheckNodes>(
             search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view,
-            -1);
+            -1, 0);
     if (!iteration.has_value()) {
       break;
     }
@@ -1093,7 +1128,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
     const AnalysisProgressSink& progress, TranspositionTable& table, HistoryScores& history_scores,
     const std::vector<RootMoveGroup>& groups, LeafEvaluator evaluator,
     engine::EngineResult result) {
-  SearchState state{budget, table, history_scores, evaluator};
+  SearchState state{budget, table, history_scores, evaluator, position};
   Position search_position = position;
   Policy policy{search_position};
   SearchPositionView<Policy, UseTable> root_view;
@@ -1105,7 +1140,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
     std::optional<NodeResult> iteration =
         negamax<Policy, UseTable, UseTwoPlyClosure, CheckTime, CheckNodes>(
             search_position, depth, 0, -kSearchInfinity, kSearchInfinity, state, policy, root_view,
-            -1);
+            -1, 0);
     if (!iteration.has_value()) {
       break;
     }
@@ -1177,7 +1212,7 @@ template <typename Policy, bool UseTable, bool UseTwoPlyClosure, bool CheckTime,
     const Position& position, SearchBudget budget, int maximum_depth, std::size_t line_count,
     const AnalysisProgressSink& progress, TranspositionTable& table, HistoryScores& history_scores,
     const std::vector<RootMoveGroup>& groups, LeafEvaluator evaluator) {
-  SearchState state{budget, table, history_scores, evaluator};
+  SearchState state{budget, table, history_scores, evaluator, position};
   Position search_position = position;
   Policy policy{search_position};
   SearchPositionView<Policy, UseTable> root_view;
@@ -1329,7 +1364,8 @@ engine::EngineResult Search::run(const Position& position, const engine::EngineL
   const Bitboard legal_moves = position.legal_moves();
   if (legal_moves == 0) {
     if (has_time_limit(limits) || has_node_limit(limits) || has_depth_limit(limits)) {
-      SearchState state{make_search_budget(limits), table_, history_scores_, leaf_evaluator()};
+      SearchState state{make_search_budget(limits), table_, history_scores_, leaf_evaluator(),
+                        position};
       emit_diagnostics(info, state, table_);
     }
     return {};

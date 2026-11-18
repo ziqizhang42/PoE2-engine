@@ -252,18 +252,36 @@ template <std::size_t Size>
   return parameters;
 }
 
-[[nodiscard]] PatternGainTables make_tables(const PatternGainParameters& parameters) {
-  PatternGainTables tables;
-  for (std::size_t knot = 0; knot < kPatternGainLineKnotCount; ++knot) {
+// The numerator of interpolating one weight between the knots around a ply.
+template <std::size_t Size>
+[[nodiscard]] std::int32_t interpolation_numerator(const std::array<std::int16_t, Size>& weights,
+                                                   std::size_t weights_per_knot,
+                                                   pattern_gain::KnotPair knots, int ply,
+                                                   std::size_t weight) noexcept {
+  const std::int32_t lower = weights[knots.lower * weights_per_knot + weight];
+  const std::int32_t upper = weights[(knots.lower + 1) * weights_per_knot + weight];
+  return (knots.right - ply) * lower + (ply - knots.left) * upper;
+}
+
+// Fills in place: the tables are too large for the browser build's stack.
+void fill_tables(const PatternGainParameters& parameters, PatternGainTables& tables) noexcept {
+  for (std::size_t ply = 0; ply < kPatternGainPlyCount; ++ply) {
+    const int ply_number = static_cast<int>(ply);
+    const pattern_gain::KnotPair line_knots =
+        pattern_gain::bracketing_knots(kPatternGainLineKnots, ply_number);
     for (std::size_t pattern = 0; pattern < kPatternGainRawPatternCount; ++pattern) {
-      tables.raw_line_weights[knot][pattern] =
-          parameters.line_weights[knot * kPatternGainOrbitCount +
-                                  pattern_gain::kRawToReversalOrbit[pattern]];
+      tables.line_weights[ply][pattern] =
+          interpolation_numerator(parameters.line_weights, kPatternGainOrbitCount, line_knots,
+                                  ply_number, pattern_gain::kRawToReversalOrbit[pattern]);
+    }
+    const pattern_gain::KnotPair gain_knots =
+        pattern_gain::bracketing_knots(kPatternGainKnots, ply_number);
+    for (std::size_t feature = 0; feature < kPatternGainFeatureCount; ++feature) {
+      tables.gain_weights[ply][feature] = interpolation_numerator(
+          parameters.gain_weights, kPatternGainFeatureCount, gain_knots, ply_number, feature);
     }
   }
   tables.intercept = parameters.intercept;
-  tables.gain_weights = parameters.gain_weights;
-  return tables;
 }
 
 [[nodiscard]] std::string metadata_lookup(const NetMetadata& metadata, std::string_view key) {
@@ -312,8 +330,8 @@ template <std::size_t Size>
 Net::Net(std::string sha256, NetMetadata metadata, const PatternGainParameters& parameters)
     : sha256_(std::move(sha256)),
       metadata_(std::move(metadata)),
-      parameters_(checked_contents(metadata_, parameters)),
-      tables_(make_tables(parameters_)) {
+      parameters_(checked_contents(metadata_, parameters)) {
+  fill_tables(parameters_, tables_);
   const std::string header = metadata_lookup(metadata_, "header_sha256");
   id_ = (header.empty() ? sha256_ : header).substr(0, 12);
 }

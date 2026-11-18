@@ -1,6 +1,7 @@
 add_library(poe2_minimax_engine STATIC
   src/engine.cpp
   src/evaluation.cpp
+  src/evaluation_inputs.cpp
   src/evaluation_pattern_gain.cpp
   src/net.cpp
   src/net_file.cpp

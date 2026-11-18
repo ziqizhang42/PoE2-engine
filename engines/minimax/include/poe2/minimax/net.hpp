@@ -37,12 +37,16 @@ inline constexpr std::array<std::uint8_t, kPatternGainKnotCount> kPatternGainKno
     {0, 12, 24, 36, 49}};
 
 // The evaluator's lookup layout. A net fills it once when loaded; search reads it unchanged.
+// A weight here is the interpolation numerator at one ply: the weights of the two knots around
+// the ply, each scaled by the ply's distance to the other knot. An evaluation therefore sums
+// one row per residual and divides the sum by the knot spacing, which gives exactly the value
+// of interpolating the two knots' sums.
 struct PatternGainTables {
-  // Knot-major: weight [knot][raw pattern], so an evaluation reads two whole rows.
-  std::array<std::array<std::int16_t, kPatternGainRawPatternCount>, kPatternGainLineKnotCount>
-      raw_line_weights{};
+  std::array<std::array<std::int32_t, kPatternGainRawPatternCount>, kPatternGainPlyCount>
+      line_weights{};
   std::array<std::int32_t, kPatternGainPlyCount> intercept{};
-  std::array<std::int16_t, kPatternGainKnotCount * kPatternGainFeatureCount> gain_weights{};
+  std::array<std::array<std::int32_t, kPatternGainFeatureCount>, kPatternGainPlyCount>
+      gain_weights{};
 };
 
 struct PatternGainParameters {

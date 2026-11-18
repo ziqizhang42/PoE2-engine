@@ -505,6 +505,7 @@ void Position::make_move_unchecked(int move_index, MoveUndo& undo) noexcept {
       .previous_hash = hash_,
       .previous_score = score_for_player(scores_, player),
       .previous_pieces_in_lines = pieces_in_lines_[index],
+      .lines_through_move = update.pieces_in_lines,
   };
 
   board_.place_unchecked(player, move_index);

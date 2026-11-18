@@ -1319,3 +1319,61 @@ TEST_CASE("pattern/gain search keeps residual fractions", "[minimax][pattern-gai
   REQUIRE(result.best_move == poe2::Move{.square = poe2::square_from_index(expected.move_index)});
   REQUIRE(result.score == poe2::minimax::round_pattern_gain_evaluation(expected.value));
 }
+
+namespace {
+
+[[nodiscard]] poe2::minimax::FixedEvaluation pattern_gain_minimax(poe2::Position& position,
+                                                                  int depth) {
+  poe2::Bitboard moves = position.legal_moves();
+  if (depth == 0 || moves == 0) {
+    return poe2::minimax::evaluate_pattern_gain_fixed(position);
+  }
+
+  poe2::minimax::FixedEvaluation best = std::numeric_limits<poe2::minimax::FixedEvaluation>::min();
+  while (moves != 0) {
+    const int move_index = std::countr_zero(moves);
+    moves &= moves - poe2::Bitboard{1};
+    poe2::MoveUndo undo;
+    position.make_move_unchecked(move_index, undo);
+    best = std::max(best, -pattern_gain_minimax(position, depth - 1));
+    position.unmake_move(undo);
+  }
+  return best;
+}
+
+}  // namespace
+
+TEST_CASE("pattern/gain search equals minimax over evaluations made from scratch",
+          "[minimax][pattern-gain][incremental]") {
+  for (const std::uint32_t seed : {1U, 2U, 3U}) {
+    std::vector<int> move_order(poe2::kCellCount);
+    std::iota(move_order.begin(), move_order.end(), 0);
+    std::mt19937 generator(seed);
+    std::shuffle(move_order.begin(), move_order.end(), generator);
+
+    for (const int ply_count : {5, 16, 27, 38, 44}) {
+      poe2::Position position;
+      for (int ply = 0; ply < ply_count; ++ply) {
+        REQUIRE(position.play(poe2::square_from_index(move_order[static_cast<std::size_t>(ply)])));
+      }
+      const int depth = 3;
+      poe2::Position scratch = position;
+      const poe2::Score expected =
+          poe2::minimax::round_pattern_gain_evaluation(pattern_gain_minimax(scratch, depth));
+
+      for (const bool production : {false, true}) {
+        poe2::minimax::Search search{poe2::minimax::SearchOptions{
+            .hash_bytes = production ? poe2::minimax::kMebibyte : 0,
+            .use_symmetry = production,
+            .evaluator = poe2::minimax::Evaluator::kPatternGain,
+        }};
+        const poe2::engine::EngineResult result =
+            search.run(position, poe2::engine::EngineLimits{.depth = depth}, {});
+
+        CAPTURE(seed, ply_count, production);
+        REQUIRE(result.depth == depth);
+        REQUIRE(result.score == expected);
+      }
+    }
+  }
+}
