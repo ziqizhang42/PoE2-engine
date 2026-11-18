@@ -4,6 +4,26 @@ Experiments that answered a question about what to try next, newest first. Each 
 the question, what was measured, and the conclusion drawn from it. Release notes are in
 `CHANGELOG.md`; game results are in `eval/results.csv` and `models/`.
 
+## 2026-11-18: what does a faster search with the same results buy?
+
+A third less labeling time and a small gain in games. Two changes were measured together:
+updating the evaluator's inputs move by move instead of recomputing them at every position,
+and starting to load a position's table entry before it is needed. An audit measured them
+alone at 1.51 and 1.06 times the speed.
+
+| Measurement | Result |
+|---|---:|
+| Search to 1M nodes, 40 positions, 64 MiB table | 1.56 times as fast |
+| Same with a 16 MiB table | 1.58 times as fast |
+| Moves, scores, depths, and node counts that differ | 0 |
+| Labeling 2,000 positions of g002 at 5M nodes | 188 s to 122 s, labels byte for byte the same |
+| Games at 100 ms a move against the build before | 780-740 over 1,520 (51.3%, 95% interval 49.6% to 53.1%) |
+
+Large pages for the table added 1.3% to 1.9% on top, about the size of the measurement
+noise, and were left out. Conclusion: at 100 ms a move, 1.56 times the speed is worth about
+one game in a hundred. More strength at a fixed time has to come from searching fewer
+positions per ply, which changes what the engine plays and needs its own gates.
+
 ## 2026-11-17: do the gains of g001 and g002 add up against v0.2?
 
 No. g001 and g002 each played v0.2 for 1,000 games on the same 500 openings.

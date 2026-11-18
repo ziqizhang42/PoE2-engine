@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Engine
+
+- The search is about 1.6 times faster and returns the same results. It updates the evaluator's inputs move by move instead of recomputing them at every position, and starts loading a position's table entry before it needs it. Searches to a fixed node count or depth return the same moves, scores, and node counts, every evaluation has the same value, and labels are byte for byte the same. At 100 ms a move it beat the previous build 780-740 over 1,520 games (51.3%, 95% interval 49.6% to 53.1%).
+
 ## 0.3.2 - 2026-11-17 · net run1/g002
 
 - The built-in net is `run1/g002` (`232a3cc37caf`), the second generation of `run1`. `run1/g001` taught it: its data is 303,534 positions from 40,000 generated games, all labeled by g001. It beat g001 204-182 over 386 games at 100 ms a move (52.8%, 95% interval 50.3% to 56.3%).
