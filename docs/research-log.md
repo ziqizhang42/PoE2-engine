@@ -4,6 +4,33 @@ Experiments that answered a question about what to try next, newest first. Each 
 the question, what was measured, and the conclusion drawn from it. Release notes are in
 `CHANGELOG.md`; game results are in `eval/results.csv` and `models/`.
 
+## 2026-11-18: which search changes add strength at a fixed time?
+
+Searching late moves less deeply does; the others tried do not. Each change played the build
+with the faster search on the development book at 100 ms a move, with fixed-length matches.
+
+| Change | Games | Score | 95% interval |
+|---|---:|---:|---:|
+| Moves after the fourth 2 plies shallower | 4,000 | 53.0% | 52.0% to 54.2% |
+| The same, a second match | 4,000 | 52.7% | 51.7% to 53.9% |
+| The same, at 300 ms a move | 1,000 | 53.4% | 51.7% to 55.6% |
+| 1 ply shallower, 2 from the twelfth move | 4,000 | 52.8% | 51.7% to 54.0% |
+| 1 ply shallower | 3,000 | 51.8% | 50.7% to 53.1% |
+| Order moves by cutoff history before gain | 4,000 | 50.9% | 50.1% to 51.9% |
+| Keep the best move of an unfinished iteration | 4,000 | 50.5% | 49.6% to 51.5% |
+| Let a new search overwrite older table entries | 4,000 | 50.2% | 49.8% to 50.7% |
+
+A reduced move that beats the best so far is searched again in full. In 1,000-game
+screenings, starting reductions at depth 4 instead of 3, reducing after three or six moves
+instead of four, and sparing moves that gain 4 or more did not help. The first row then passed
+its gate on the holdout book, 204-182 over 386 games (52.8%, 95% interval 50.3% to 56.3%).
+Fixed-node and fixed-depth searches are unchanged, so labels are too.
+
+Ordering by history first needs 23% to 25% fewer nodes to reach the same depth, but it changes
+fixed-node searches and so labels, and on top of the reductions it scored 50.7% over 2,000
+games (49.4% to 52.2%). Conclusion: more reduction was better at every step, so 3 plies is
+worth trying. History-first ordering belongs at the start of a run, where labels start fresh.
+
 ## 2026-11-18: what does a faster search with the same results buy?
 
 A third less labeling time and a small gain in games. Two changes were measured together:

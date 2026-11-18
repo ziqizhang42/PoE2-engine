@@ -5,6 +5,7 @@
 ### Engine
 
 - The search is about 1.6 times faster and returns the same results. It updates the evaluator's inputs move by move instead of recomputing them at every position, and starts loading a position's table entry before it needs it. Searches to a fixed node count or depth return the same moves, scores, and node counts, every evaluation has the same value, and labels are byte for byte the same. At 100 ms a move it beat the previous build 780-740 over 1,520 games (51.3%, 95% interval 49.6% to 53.1%).
+- Timed searches look deeper. At each position the engine searches its first four moves at full depth and tries the rest two plies shallower, searching again in full any move that beats the best so far. Searches to a fixed node count or depth are unchanged, so labels are the same. The depth a timed search reports is that of its first moves; later moves may have been searched less deeply. At 100 ms a move it beat the previous build 204-182 over 386 games (52.8%, 95% interval 50.3% to 56.3%).
 
 ## 0.3.2 - 2026-11-17 · net run1/g002
 
