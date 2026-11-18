@@ -6,8 +6,9 @@ the question, what was measured, and the conclusion drawn from it. Release notes
 
 ## 2026-11-18: do openings chosen for balance make a match say more?
 
-Yes, about 4.6 times as much per game. On the rule-generated books the opening decides most
-games: over 41,000 games the first player won 61% and led by 8.1 points before the 5.5
+Yes: the same difference between two engines shows as about twice the normalized Elo, which
+is four to five times the evidence from a match of the same length. On the rule-generated
+books the opening decides most games: over 41,000 games the first player won 61% and led by 8.1 points before the 5.5
 handicap, the same opening gave nearly the same lead in different matches (correlation 0.99),
 and one engine won both games of only 7% of pairs. Ways of choosing openings, each tested on
 development openings it was not fitted on:
@@ -33,9 +34,26 @@ as a match on the old development book, 4,000 games each:
 | Better engine's margin per game | +0.59 | +0.61 |
 | Normalized Elo | 46 | 98 |
 
-Conclusion: a gate on the balanced books should need far fewer games; they are not the
-default yet. A score on one book cannot be compared with a score on the other, and the gate's
-alternative of 20 normalized Elo is a difference about half as large on the balanced book. An opening's lead correlated
+On the 2,000 `development-v2` openings of that match, none of which the correction was fitted
+on, the first player's lead was -0.05 + 0.99 times the predicted lead. The books hold up the
+same way when the two sides differ by net instead of by search: g002 against g001 on one
+build, 2,000 games on each book:
+
+| | Old development book | `development-v2` |
+|---|---:|---:|
+| Pairs one engine won outright | 8.8% | 29.4% |
+| First player wins | 62.3% | 52.7% |
+| g002's score | 52.2% | 57.9% |
+| g002's margin per game | +0.52 | +0.44 |
+| Normalized Elo | 37 | 75 |
+
+Conclusion: the balanced books are not the default yet. A score on one book cannot be
+compared with a score on the other. With the gate's alternative left at 20 normalized Elo, the
+log-likelihood ratio grew 2.3 times as fast on the balanced book in both pairs of matches, so
+a real improvement is accepted that much sooner; a change with no effect takes as long to
+reject as before, and the gate passes differences half as large. An alternative of 40 on the
+balanced books is the same real difference as 20 on the old ones and, computed from these
+pair results, decides either way in about a quarter of the games. An opening's lead correlated
 0.94 to 0.96 between neighbouring generations and 0.85 between v0.2 and g002, so refit the
 correction and regenerate after a large change. The first player's lead did not move with
 three times the thinking time (-0.13 points, standard error 0.07), which puts the even
