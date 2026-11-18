@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -299,4 +300,67 @@ TEST_CASE("a balanced book records its inputs and loads as an opening book", "[o
       poe2::match_runner::parse_opening_book_text("balanced", text);
   REQUIRE(book.lines.size() == 2);
   REQUIRE(book.lines[1].text == "a1 b2 c3 d4");
+}
+
+TEST_CASE("committed balanced books satisfy their selection invariants", "[opening_balance]") {
+  const std::filesystem::path root = std::filesystem::path{POE2_SOURCE_DIR} / "eval" / "openings";
+  const auto canonical_positions = [](const poe2::match_runner::OpeningBook& book) {
+    std::unordered_set<std::string> positions;
+    for (const poe2::match_runner::OpeningLine& line : book.lines) {
+      if (!line.moves.empty()) {
+        REQUIRE(positions
+                    .insert(poe2::match_runner::canonical_key_text(
+                        poe2::match_runner::canonical_opening_key(line.moves)))
+                    .second);
+      }
+    }
+    return positions;
+  };
+  const auto load = [&](std::string_view name) {
+    return poe2::match_runner::load_opening_book((root / name).string());
+  };
+  const std::unordered_set<std::string> old_development =
+      canonical_positions(load("development.txt"));
+  const std::unordered_set<std::string> old_holdout = canonical_positions(load("holdout.txt"));
+
+  REQUIRE(poe2::match_runner::file_digest((root / "development-v2.txt").string()) ==
+          "fnv1a64:7d1344d4c57abc5e");
+  REQUIRE(poe2::match_runner::file_digest((root / "holdout-v2.txt").string()) ==
+          "fnv1a64:b4beb9fe1c802219");
+
+  std::unordered_set<std::string> seen;
+  for (const auto& [name, two_ply, forbidden] :
+       {std::tuple{"development-v2.txt", 54, &old_holdout},
+        std::tuple{"holdout-v2.txt", 64, &old_development}}) {
+    INFO(name);
+    const poe2::match_runner::OpeningBook book = load(name);
+    std::map<int, int> lengths;
+    for (const std::string& position : canonical_positions(book)) {
+      REQUIRE(seen.insert(position).second);
+      REQUIRE_FALSE(forbidden->contains(position));
+    }
+    for (const poe2::match_runner::OpeningLine& line : book.lines) {
+      ++lengths[static_cast<int>(line.moves.size())];
+    }
+    REQUIRE(lengths.at(2) == two_ply);
+    for (const int plies : {4, 6, 8, 10, 12, 14}) {
+      REQUIRE(lengths.at(plies) == 657);
+    }
+    REQUIRE(lengths.size() == 7);
+
+    std::ifstream input{root / name};
+    std::string text;
+    int checked = 0;
+    while (std::getline(input, text)) {
+      const std::size_t lead = text.find("  # score=");
+      if (text.starts_with('#') || lead == std::string::npos) {
+        continue;
+      }
+      const std::size_t value = text.find("lead=", lead);
+      REQUIRE(value != std::string::npos);
+      REQUIRE(std::abs(std::stod(text.substr(value + 5))) < 2.0);
+      ++checked;
+    }
+    REQUIRE(checked == static_cast<int>(book.lines.size()));
+  }
 }

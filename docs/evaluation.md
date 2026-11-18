@@ -131,6 +131,65 @@ make eval-gate BASE=build/by-commit/BASE_BUILD_ID/release NEW_ENGINE=poe2_greedy
 make eval-gate BASE=build/by-commit/BASE_BUILD_ID/release/engines/poe2_greedy NEW_ENGINE=poe2_greedy BASE_ENGINE=poe2_greedy
 ```
 
+### Balanced Books
+
+In the rule-generated books the opening often decides the game: the first player's mean final lead varies by about 8.6 points from one opening to another, so in matches between two close engines only about 7% of side-swapped pairs are won twice by the same engine. The other pairs say nothing about which engine is stronger. The balanced books keep only openings that a fixed-node search predicts to be close to even:
+
+```text
+eval/openings/development-v2.txt
+eval/openings/holdout-v2.txt
+eval/openings/balance-correction-v2.txt
+```
+
+They are not the defaults yet; pass them with `BOOK=` or `SMOKE_BOOK=`, or `--opening-book`.
+
+`poe2_runner openings generate-balanced` builds both books:
+
+1. Candidates are every 2-ply position and, for each deeper length, random legal lines under the score-gap rule of the rule corpus, drawn from a stream of their own seeded by `--seed` and the length. Positions equal under the 8 board symmetries are one position, within each book and across the two.
+2. Each candidate is searched by the engine for a fixed node budget, after `newgame` so the table starts empty. The score, in half-points from the side to move, already includes the handicap.
+3. The raw search over-rates the first player, by about 3 points at 2 to 6 plies and about 1 point at 8 to 14. A per-length line, lead = intercept + slope × points, maps the score to the first player's expected final lead after the handicap. Without it the kept openings would be won by the first player only about 28% of the time.
+4. A candidate passes when the predicted lead is below `--threshold` points in size (default 2). Each book keeps every passing 2-ply opening, of which there are only about 60, and the first `--per-length` passing openings of each deeper length in stream order.
+5. An opening that is in a previous book stays on that book's side, so the new holdout book has no position the development book exposed to tuning, and the new development book has none from the holdout book. Every 2-ply position is in one of the previous books, so 2-ply openings keep their old side. Other openings are split by a hash of the seed and the position.
+
+The correction comes from match results. `poe2_runner openings fit-balance` reads the `games.csv` of each finished run, takes each opening's mean final lead over its normal games, searches the opening the same way, and fits the line for each length by least squares. It writes the constants together with the engine version, the net, the node budget, and the table size, since the constants only hold for that search; `generate-balanced` takes the node budget and table size from the file and refuses an engine that plays another net. Both commands give the same output for any `--workers`.
+
+`fit-balance` also checks the rule on openings it did not fit: it fits on half of the openings, split by position hash, and reports on the other half the bias of the corrected prediction by length, the share of openings kept, the share of outright pairs on kept and on all openings, and how often the first player won on kept openings. The file records this check. For `balance-correction-v2.txt`, fitted on 18 matches on `development.txt` (40,998 games, 8,451 openings) between v0.3.2 builds playing `run1/g002`: the rule kept 20.4% of held-out openings, outright pairs were 27.2% on kept openings against 7.8% on all, and the first player won 48.9% of games on kept openings.
+
+Each book's header records the seed, the engine version and net, the node budget, the table size, the correction file with its digest and constants, the threshold, the quota, the previous books with their digests, and for each length the number of openings kept, of candidates searched, and of openings inherited from a previous book. Each opening line ends with its search score and predicted lead as a comment.
+
+Regenerate both books byte for byte from the repository root (about 3 minutes with 8 workers; the paths are recorded as given, so use these):
+
+```bash
+cmake --preset release && cmake --build --preset release
+build/release/runner/poe2_runner openings generate-balanced \
+  --development-out eval/openings/development-v2.txt \
+  --holdout-out eval/openings/holdout-v2.txt \
+  --correction eval/openings/balance-correction-v2.txt \
+  --engine build/release/engines/minimax/poe2_minimax \
+  --plies 2,4,6,8,10,12,14 \
+  --per-length 657 \
+  --threshold 2 \
+  --max-score-gap 4 \
+  --seed 20261118 \
+  --previous-development eval/openings/development.txt \
+  --previous-holdout eval/openings/holdout.txt \
+  --workers 8
+```
+
+The engine must be one whose fixed-node search matches v0.3.2 with `run1/g002`. Refit the correction from finished matches on the development book, for example when the champion's net changes, and give the new correction and books new names so earlier results stay comparable:
+
+```bash
+build/release/runner/poe2_runner openings fit-balance \
+  --run build/eval/runs/<run> --run build/eval/runs/<another run> \
+  --engine build/release/engines/minimax/poe2_minimax \
+  --nodes 200000 \
+  --hash-mb 16 \
+  --workers 8 \
+  --out eval/openings/balance-correction-v3.txt
+```
+
+`--run` accepts only directories with a `summary.json`, so unfinished runs are not read. Only lengths with at least `--min-openings` fitted openings (default 30) get constants.
+
 ## Saved Runs
 
 Every evaluation run is saved under:

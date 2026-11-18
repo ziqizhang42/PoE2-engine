@@ -155,6 +155,8 @@ build/debug/runner/poe2_runner openings generate-corpus \
 
 This includes the complete canonical two-ply stratum, generates deeper legal histories under the score-gap rule, deduplicates final colored positions under board symmetry, and deterministically balances every depth across the two outputs.
 
+`openings fit-balance` and `openings generate-balanced` build books of openings that a fixed-node search predicts to be close to even; see [evaluation.md](evaluation.md#balanced-books).
+
 The systematic generator remains available for reproducing the historical two-ply suite:
 
 ```bash

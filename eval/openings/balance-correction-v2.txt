@@ -1,0 +1,47 @@
+# poe2 opening lead correction
+# predicted first-player lead after the handicap = intercept + slope * points,
+# where points is the first player's search score in points;
+# correction_<plies>=<intercept> <slope> <openings fitted>
+# fitted on 40998 games of 8451 openings from 18 runs:
+#   20261118T022243Z__lmr__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:ab92fcb4ebcc7a48
+#   20261118T025616Z__S-f3__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:f762653fedd5a497
+#   20261118T031409Z__S-f6__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:0e33ce98714c81e9
+#   20261118T032139Z__S-d4__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:15f3d00b4ef77770
+#   20261118T032907Z__S-r2__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:72555a316cc4affb
+#   20261118T033626Z__S-r2f3d4__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:ceff88c9d3ed0418
+#   20261118T034344Z__S-deep12__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:ada2f55a42bcbcad
+#   20261118T035109Z__S-gain4__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:7565d53c1a575f5c
+#   20261118T035840Z__ttage__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:99985ff0fe74dbed
+#   20261118T042856Z__adopt__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:7eda7187dd3562cf
+#   20261118T045852Z__D-h1__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:c288e9b335999976
+#   20261118T052845Z__S-r2__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:644a6dc6a3455286
+#   20261118T055817Z__S-deep12__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:2990764561c19c2b
+#   20261118T062751Z__lmr__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:0506f4e095f2164d
+#   20261118T071202Z__final-r2-adopt__minimax_poe2_minimax__vs__final-lmr-r2__minimax_poe2_minimax fnv1a64:492e636bd9b90b18
+#   20261118T072612Z__final-r2-hist__minimax_poe2_minimax__vs__final-lmr-r2__minimax_poe2_minimax fnv1a64:9848c56809103619
+#   20261118T074035Z__final-lmr-r2__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:e00e32eea0cf6460
+#   20261118T080940Z__final-lmr-r2__minimax_poe2_minimax__vs__base__minimax_poe2_minimax fnv1a64:87ad30ae365d352e
+# held-out check: fitted on 4101 openings, tested on 4350 (split by canonical position hash); leads in points after the handicap
+#   2 plies: openings 95, search +4.92, corrected +1.60, games +1.14, corrected minus games +0.46 (se 0.15), kept 38.9%
+#   4 plies: openings 784, search +5.00, corrected +1.89, games +1.69, corrected minus games +0.20 (se 0.06), kept 26.9%
+#   6 plies: openings 746, search +5.66, corrected +2.82, games +2.89, corrected minus games -0.07 (se 0.06), kept 23.9%
+#   8 plies: openings 679, search +3.54, corrected +2.26, games +2.33, corrected minus games -0.07 (se 0.06), kept 21.1%
+#   10 plies: openings 704, search +3.66, corrected +3.12, games +3.16, corrected minus games -0.04 (se 0.06), kept 16.6%
+#   12 plies: openings 682, search +4.13, corrected +3.28, games +3.31, corrected minus games -0.03 (se 0.06), kept 15.1%
+#   14 plies: openings 660, search +4.29, corrected +3.28, games +3.11, corrected minus games +0.17 (se 0.07), kept 15.0%
+#   all: corrected minus games +0.04 (se 0.03), residual sd 1.71
+#   kept |corrected| < 2.00: 20.4% of openings; outright pairs 27.2% of 2153 (every opening: 7.8% of 10471); first player wins 48.9% of 4306 games
+#   uncorrected |search| < 2.00: 15.4% of openings; first player wins 27.9% of 3104 games
+engine_version=0.3.2
+net_name=run1/g002
+net_id=232a3cc37caf
+net_sha256=232a3cc37caf08d073f213fe138dfa3d354959fba071d542d30c03231d177e08
+nodes=200000
+hash_mb=16
+correction_2=-3.100013 0.889447 135
+correction_4=-2.691041 0.894440 1393
+correction_6=-2.294386 0.910229 1394
+correction_8=-0.962279 0.920541 1392
+correction_10=-0.284109 0.935835 1379
+correction_12=-0.613178 0.945345 1381
+correction_14=-0.933786 0.963052 1377
