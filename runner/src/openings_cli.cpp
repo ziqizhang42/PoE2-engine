@@ -667,7 +667,8 @@ void write_balanced_corpus(const BalancedCorpusOptions& options) {
                                 " but the correction was fitted for net " +
                                 settings.correction.engine.net_sha256};
   }
-  settings.correction.engine = engine;
+  // The header keeps the engine the correction was fitted with. A later version that plays the
+  // same net and searches a node budget the same way then writes the same file.
 
   const PreviousPartitions previous = previous_partitions(options);
   const BalanceContext context{

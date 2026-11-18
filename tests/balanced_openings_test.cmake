@@ -76,6 +76,27 @@ foreach(book development holdout)
   endif()
 endforeach()
 
+# A later engine that searches the same way must regenerate a book byte for byte, so the
+# header names the engine version the correction was fitted with, not the one that ran.
+string(REGEX REPLACE "engine_version=[^\n]*" "engine_version=0.0.1" earlier_correction
+       "${correction_text}")
+file(WRITE "${TEST_ROOT}/correction-earlier.txt" "${earlier_correction}")
+run_runner(generate-balanced
+  --development-out "${TEST_ROOT}/books-earlier/development.txt"
+  --holdout-out "${TEST_ROOT}/books-earlier/holdout.txt"
+  --correction "${TEST_ROOT}/correction-earlier.txt"
+  --engine "${ENGINE}"
+  --plies 2
+  --per-length 1
+  --threshold 30
+  --seed 7
+)
+file(STRINGS "${TEST_ROOT}/books-earlier/development.txt" earlier_header
+     REGEX "^# engine_version=0\\.0\\.1$")
+if(NOT earlier_header)
+  message(FATAL_ERROR "a book does not name the engine version its correction was fitted with")
+endif()
+
 execute_process(
   COMMAND "${RUNNER}" openings generate-balanced
           --development-out "${TEST_ROOT}/wrong-net/development.txt"
